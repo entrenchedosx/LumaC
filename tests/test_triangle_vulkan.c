@@ -463,7 +463,7 @@ int main(void) {
 
         /* Stage mismatch is rejected at pipeline creation. */
         {
-            lc_graphics_pipeline_desc pdesc;
+            lc_graphics_pipeline_desc pdesc = { 0 };
             lc_pipeline *nope = (lc_pipeline *)0x1;
 
             pdesc.vertex_shader = fs; /* fragment in vertex slot */
@@ -478,7 +478,7 @@ int main(void) {
 
         /* Real pipeline, then shaders may die while it lives. */
         {
-            lc_graphics_pipeline_desc pdesc;
+            lc_graphics_pipeline_desc pdesc = { 0 };
             lc_pipeline *pipeline = NULL;
 
             pdesc.vertex_shader = vs;
@@ -567,7 +567,7 @@ int main(void) {
         lc_shader_desc desc;
         lc_shader *vs = NULL;
         lc_shader *fs = NULL;
-        lc_graphics_pipeline_desc pdesc;
+        lc_graphics_pipeline_desc pdesc = { 0 };
         lc_pipeline *pipeline = NULL;
         int env = make_tri_ctx(&ctx, "LumaC Triangle Test");
 
@@ -618,7 +618,7 @@ int main(void) {
         lc_shader_desc desc;
         lc_shader *vs = NULL;
         lc_shader *fs = NULL;
-        lc_graphics_pipeline_desc pdesc;
+        lc_graphics_pipeline_desc pdesc = { 0 };
         lc_pipeline *pipeline = NULL;
         static const unsigned targets[][2] = {
             { 800, 600 }, { 1024, 768 }, { 1280, 720 }, { 640, 480 },
@@ -716,7 +716,7 @@ int main(void) {
         lc_shader_desc desc;
         lc_shader *vs = NULL;
         lc_shader *fs = NULL;
-        lc_graphics_pipeline_desc pdesc;
+        lc_graphics_pipeline_desc pdesc = { 0 };
         lc_pipeline *pipeline = NULL;
         HWND hwnd;
         int i;
@@ -805,7 +805,7 @@ int main(void) {
         lc_shader_desc desc;
         lc_shader *vs = NULL;
         lc_shader *fs = NULL;
-        lc_graphics_pipeline_desc pdesc;
+        lc_graphics_pipeline_desc pdesc = { 0 };
         lc_pipeline *pipeline = NULL;
         int i;
         int ok_a = 0;

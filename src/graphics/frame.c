@@ -111,6 +111,46 @@ lc_result lc_bind_pipeline(lc_swapchain *swapchain, lc_pipeline *pipeline) {
     return lc_vulkan_frame_bind(swapchain, pipeline);
 }
 
+static int lc_is_live_buffer(const lc_buffer *buffer) {
+    lc_state *state = lc_get_internal_state();
+    const lc_buffer *it;
+
+    if (state == NULL || buffer == NULL) {
+        return 0;
+    }
+    for (it = state->buffers; it != NULL; it = it->next) {
+        if (it == buffer) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+lc_result lc_bind_vertex_buffer(lc_swapchain *swapchain, uint32_t binding,
+                                lc_buffer *buffer, uint64_t offset) {
+    lc_state *state = lc_get_internal_state();
+
+    if (swapchain == NULL || buffer == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (state == NULL || !state->initialized) {
+        return LC_ERROR_NOT_INITIALIZED;
+    }
+    if (!lc_is_live_swapchain(swapchain) || !lc_is_live_buffer(buffer)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!swapchain->frame_active) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    /* Same device, vertex-capable buffer, offset inside the buffer. */
+    if (buffer->device != swapchain->device ||
+        (buffer->usage & LC_BUFFER_USAGE_VERTEX) == 0 ||
+        offset >= buffer->size) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    return lc_vulkan_frame_bind_vertex(swapchain, binding, buffer, offset);
+}
+
 lc_result lc_draw(lc_swapchain *swapchain, uint32_t vertex_count,
                   uint32_t first_vertex) {
     lc_state *state = lc_get_internal_state();

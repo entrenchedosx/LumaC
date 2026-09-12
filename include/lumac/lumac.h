@@ -508,10 +508,76 @@ LC_API void lc_shader_destroy(lc_shader *shader);
 /* Opaque graphics-pipeline handle. Never dereference; use API below. */
 typedef struct lc_pipeline lc_pipeline;
 
-/* Minimal graphics-pipeline description. Both shaders are required. */
+/* -------------------------------------------------------------------------
+ * Format system (Phase 8: backend-neutral GPU formats)
+ *
+ * Threading: use only from the application's main thread.
+ * ------------------------------------------------------------------------- */
+
+/* Backend-neutral GPU data formats for vertex attributes, color data,
+ * and future textures/render targets. Names describe layout; exact
+ * bit patterns follow the Vulkan convention (e.g. RGBA8 is R in the
+ * lowest byte). LC_FORMAT_UNDEFINED means "no format". */
+typedef enum lc_format {
+    LC_FORMAT_UNDEFINED = 0,
+
+    LC_FORMAT_R8_UNORM,
+    LC_FORMAT_RG8_UNORM,
+
+    LC_FORMAT_RGBA8_UNORM,
+    LC_FORMAT_RGBA8_SRGB,
+    LC_FORMAT_BGRA8_UNORM,
+    LC_FORMAT_BGRA8_SRGB,
+
+    LC_FORMAT_R16_FLOAT,
+    LC_FORMAT_RG16_FLOAT,
+    LC_FORMAT_RGBA16_FLOAT,
+
+    LC_FORMAT_R32_FLOAT,
+    LC_FORMAT_RG32_FLOAT,
+    LC_FORMAT_RGB32_FLOAT,
+    LC_FORMAT_RGBA32_FLOAT,
+
+    LC_FORMAT_R32_UINT,
+    LC_FORMAT_RG32_UINT,
+    LC_FORMAT_RGB32_UINT,
+    LC_FORMAT_RGBA32_UINT
+} lc_format;
+
+/* Per-vertex or per-instance stepping. */
+typedef enum lc_vertex_input_rate {
+    LC_VERTEX_INPUT_PER_VERTEX = 0,
+    LC_VERTEX_INPUT_PER_INSTANCE = 1
+} lc_vertex_input_rate;
+
+/* One vertex buffer binding: `stride` bytes per element. */
+typedef struct lc_vertex_binding_desc {
+    uint32_t binding;
+    uint32_t stride;
+    lc_vertex_input_rate input_rate;
+} lc_vertex_binding_desc;
+
+/* One shader input attribute fed from a binding. `offset` is the byte
+ * offset of the attribute within each stride-sized element. */
+typedef struct lc_vertex_attribute_desc {
+    uint32_t location;
+    uint32_t binding;
+    lc_format format;
+    uint32_t offset;
+} lc_vertex_attribute_desc;
+
+/* Minimal graphics-pipeline description. Both shaders are required.
+ * Optional vertex input: zero counts mean no vertex buffers (shader
+ * vertex-index generation, as in the first triangle). Counts are
+ * validated against device limits at creation. Zero-initialize the
+ * whole struct (e.g. `= { 0 }`) and set the fields you use. */
 typedef struct lc_graphics_pipeline_desc {
     lc_shader *vertex_shader;
     lc_shader *fragment_shader;
+    const lc_vertex_binding_desc *vertex_bindings;
+    uint32_t vertex_binding_count;
+    const lc_vertex_attribute_desc *vertex_attributes;
+    uint32_t vertex_attribute_count;
 } lc_graphics_pipeline_desc;
 
 /**
@@ -522,7 +588,7 @@ typedef struct lc_graphics_pipeline_desc {
  * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
  *         LC_ERROR_INVALID_ARGUMENT (NULL device/swapchain/desc/out,
  *         NULL/mis-staged/dead shaders, cross-device use, dead
- *         handles), LC_ERROR_OUT_OF_MEMORY,
+ *         handles, invalid vertex layout), LC_ERROR_OUT_OF_MEMORY,
  *         LC_ERROR_PIPELINE_CREATION_FAILED.
  */
 LC_API lc_result lc_graphics_pipeline_create(
@@ -565,6 +631,164 @@ LC_API lc_result lc_draw(
     uint32_t vertex_count,
     uint32_t first_vertex
 );
+
+/* -------------------------------------------------------------------------
+ * Buffer API (Phase 8: generic GPU buffers)
+ *
+ * Buffers belong to one device and survive swapchain recreation.
+ * Destroying a device first destroys its dependent buffers.
+ * Threading: use only from the application's main thread.
+ * ------------------------------------------------------------------------- */
+
+/* Opaque GPU buffer handle. Never dereference; use API below. */
+typedef struct lc_buffer lc_buffer;
+
+/* Backend-neutral buffer usage flags (bitmask, combine with |). */
+typedef enum lc_buffer_usage {
+    LC_BUFFER_USAGE_VERTEX       = 1 << 0,
+    LC_BUFFER_USAGE_INDEX        = 1 << 1,
+    LC_BUFFER_USAGE_UNIFORM      = 1 << 2,
+    LC_BUFFER_USAGE_STORAGE      = 1 << 3,
+    LC_BUFFER_USAGE_TRANSFER_SRC = 1 << 4,
+    LC_BUFFER_USAGE_TRANSFER_DST = 1 << 5
+} lc_buffer_usage;
+
+/* Memory placement model. No backend memory flags are exposed. */
+typedef enum lc_memory_usage {
+    /* Fastest device memory. Not CPU-mappable; written via
+     * lc_buffer_write() staging. */
+    LC_MEMORY_GPU_ONLY = 0,
+    /* CPU-writable memory, persistently mapped. For uploads and
+     * frequently updated resources. */
+    LC_MEMORY_CPU_TO_GPU = 1,
+    /* CPU-readable memory, persistently mapped. For readback. */
+    LC_MEMORY_GPU_TO_CPU = 2
+} lc_memory_usage;
+
+/* Buffer creation parameters. `size` > 0. `usage` is a combination of
+ * lc_buffer_usage bits (at least one bit required). GPU-only buffers
+ * implicitly gain transfer-destination support so lc_buffer_write()
+ * staging always works. */
+typedef struct lc_buffer_desc {
+    uint64_t size;
+    uint32_t usage;
+    lc_memory_usage memory;
+} lc_buffer_desc;
+
+/**
+ * Create a GPU buffer on a device. Requires lc_init() first and a
+ * live device.
+ *
+ * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
+ *         LC_ERROR_INVALID_ARGUMENT (NULL device/desc/out, zero size,
+ *         empty/unknown usage, unknown memory usage, dead device),
+ *         LC_ERROR_OUT_OF_MEMORY (host allocation or no suitable
+ *         device memory).
+ */
+LC_API lc_result lc_buffer_create(
+    lc_device *device,
+    const lc_buffer_desc *desc,
+    lc_buffer **out_buffer
+);
+
+/**
+ * Destroy a buffer and release its memory. Safe to call with NULL.
+ */
+LC_API void lc_buffer_destroy(lc_buffer *buffer);
+
+/**
+ * Get the buffer size in bytes. Returns 0 for NULL.
+ */
+LC_API uint64_t lc_buffer_get_size(const lc_buffer *buffer);
+
+/**
+ * Map a CPU-visible buffer for direct access. Returns the same
+ * persistently mapped pointer on every call; memory stays mapped
+ * until the buffer is destroyed.
+ *
+ * @return LC_SUCCESS, or LC_ERROR_INVALID_ARGUMENT (NULL/dead buffer,
+ *         NULL out pointer, or buffer is not CPU-mappable).
+ */
+LC_API lc_result lc_buffer_map(
+    lc_buffer *buffer,
+    void **out_data
+);
+
+/**
+ * Unmap a buffer. Buffers use persistent mapping, so this is a
+ * documented no-op kept for API symmetry and future backends.
+ * Safe to call with NULL or on any buffer.
+ */
+LC_API void lc_buffer_unmap(lc_buffer *buffer);
+
+/**
+ * Write bytes into a buffer with bounds and overflow checking.
+ * CPU-visible buffers memcpy directly; GPU-only buffers upload
+ * through an internal staging buffer.
+ *
+ * @param buffer Live buffer.
+ * @param offset Byte offset; must be within the buffer.
+ * @param data Source bytes (may be NULL only when size == 0).
+ * @param size Byte count; offset + size must fit the buffer.
+ * @return LC_SUCCESS, LC_ERROR_INVALID_ARGUMENT (NULL/dead buffer,
+ *         out-of-range write, NULL data with nonzero size),
+ *         LC_ERROR_OUT_OF_MEMORY (staging allocation),
+ *         LC_ERROR_UNKNOWN (transfer submission failure).
+ */
+LC_API lc_result lc_buffer_write(
+    lc_buffer *buffer,
+    uint64_t offset,
+    const void *data,
+    uint64_t size
+);
+
+/* -------------------------------------------------------------------------
+ * Vertex input API (Phase 8: backend-neutral vertex layouts)
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Bind a vertex buffer for subsequent lc_draw() calls. Only valid
+ * inside an open frame; bindings are command-buffer state and must be
+ * re-established every frame. Call once per binding used.
+ *
+ * @return LC_SUCCESS or LC_ERROR_INVALID_ARGUMENT (NULL/dead
+ *         swapchain or buffer, no open frame, cross-device use,
+ *         buffer lacks VERTEX usage, offset past buffer end).
+ */
+LC_API lc_result lc_bind_vertex_buffer(
+    lc_swapchain *swapchain,
+    uint32_t binding,
+    lc_buffer *buffer,
+    uint64_t offset
+);
+
+/* -------------------------------------------------------------------------
+ * Device capabilities (Phase 8: engine-oriented queries)
+ * ------------------------------------------------------------------------- */
+
+/* Small backend-neutral capability set for resource planning. */
+typedef struct lc_device_limits {
+    uint32_t max_texture_2d_dimension;
+    uint32_t max_vertex_attributes;
+    uint32_t max_vertex_bindings;
+    uint64_t max_uniform_buffer_size;
+} lc_device_limits;
+
+/**
+ * Query device limits. A NULL device (or NULL out pointer handling)
+ * yields zeros rather than crashing: with a NULL device, *out_limits
+ * is zeroed if provided; a NULL out_limits is a no-op.
+ */
+LC_API void lc_device_get_limits(
+    const lc_device *device,
+    lc_device_limits *out_limits
+);
+
+/**
+ * Get a swapchain's color format in backend-neutral form.
+ * Returns LC_FORMAT_UNDEFINED for NULL.
+ */
+LC_API lc_format lc_swapchain_get_format(const lc_swapchain *swapchain);
 
 #ifdef __cplusplus
 }

@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <string.h>
 
 #include "lumac/lumac.h"
 #include "internal/lumac_internal.h"
@@ -77,11 +78,14 @@ void lc_device_destroy(lc_device *device) {
     if (device == NULL) {
         return;
     }
-    /* Dependents first: pipelines, shaders, swapchains, then surfaces.
-     * vkDestroySwapchainKHR and vkDestroySurfaceKHR both need the
-     * logical device / instance, which die with the device below. */
+    /* Dependents first: pipelines, shaders, buffers, swapchains, then
+     * surfaces. vkDestroySwapchainKHR and vkDestroySurfaceKHR both need
+     * the logical device / instance, which die with the device below.
+     * Buffers and the upload context die before VkDevice; the upload
+     * teardown runs inside lc_vulkan_device_destroy. */
     lc_pipeline_destroy_for_device(device);
     lc_shader_destroy_for_device(device);
+    lc_buffer_destroy_for_device(device);
     lc_swapchain_destroy_for_device(device);
     lc_surface_destroy_for_device(device);
     lc_device_list_remove(device);
@@ -125,4 +129,25 @@ uint32_t lc_device_get_device_id(const lc_device *device) {
         return 0;
     }
     return device->device_id;
+}
+
+void lc_device_get_limits(const lc_device *device,
+                          lc_device_limits *out_limits) {
+    VkPhysicalDeviceProperties props;
+
+    if (out_limits == NULL) {
+        return;
+    }
+    memset(out_limits, 0, sizeof(*out_limits));
+    if (device == NULL || device->physical_device == VK_NULL_HANDLE) {
+        return;
+    }
+    memset(&props, 0, sizeof(props));
+    vkGetPhysicalDeviceProperties(device->physical_device, &props);
+    out_limits->max_texture_2d_dimension = props.limits.maxImageDimension2D;
+    out_limits->max_vertex_attributes =
+        props.limits.maxVertexInputAttributes;
+    out_limits->max_vertex_bindings = props.limits.maxVertexInputBindings;
+    out_limits->max_uniform_buffer_size =
+        (uint64_t)props.limits.maxUniformBufferRange;
 }

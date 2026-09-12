@@ -27,7 +27,7 @@ int main(void) {
     lc_device *fake_device = (lc_device *)0x1; /* validity checked first */
     lc_swapchain *fake_swapchain = (lc_swapchain *)0x1;
     lc_swapchain *fake_target = (lc_swapchain *)0x1;
-    lc_graphics_pipeline_desc desc;
+    lc_graphics_pipeline_desc desc = { 0 };
 
     printf("Running LumaC pipeline validation tests...\n");
 

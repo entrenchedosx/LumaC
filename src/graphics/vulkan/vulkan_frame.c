@@ -1,15 +1,14 @@
 /*
- * Vulkan frame backend (Phase 6: acquire, clear, submit, present).
+ * Vulkan frame backend (acquire, clear/draw, submit, present).
  *
  * Swapchain-local frame lifecycle with LC_MAX_FRAMES_IN_FLIGHT slots.
  * Each slot owns its semaphores, fence, and reusable command buffer;
- * per-image fences track which submission still owns an image, and a
- * per-image flag records whether UNDEFINED may no longer be claimed.
+ * per-image fences track which submission still owns an image.
  *
- * Clearing uses vkCmdClearColorImage with explicit layout transitions
- * (UNDEFINED-or-PRESENT_SRC -> TRANSFER_DST -> PRESENT_SRC), so no
- * render pass, pipeline, or shaders are needed. Queue families never
- * change under a swapchain, and concurrent sharing (when graphics and
+ * Recording happens inside one minimal render pass per frame (clear
+ * via load op or clear attachments, then bound-pipeline draws), so no
+ * manual layout transitions are needed. Queue families never change
+ * under a swapchain, and concurrent sharing (when graphics and
  * present families differ) needs no ownership transfers.
  *
  * Out-of-date and suboptimal conditions map to recoverable results;
@@ -504,4 +503,34 @@ lc_result lc_vulkan_frame_end(lc_swapchain *swapchain) {
         return LC_ERROR_SWAPCHAIN_UNSUPPORTED;
     }
     return LC_ERROR_UNKNOWN;
+}
+
+lc_result lc_vulkan_frame_bind_vertex(lc_swapchain *swapchain,
+                                      uint32_t binding,
+                                      const lc_buffer *buffer,
+                                      uint64_t offset) {
+    VkPhysicalDeviceProperties props;
+    lc_vk_flight *flight;
+    VkDeviceSize vk_offset;
+
+    if (swapchain == NULL || buffer == NULL || !swapchain->frame_active) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (swapchain->current_frame >= LC_MAX_FRAMES_IN_FLIGHT ||
+        buffer->vk_buffer == VK_NULL_HANDLE) {
+        return LC_ERROR_UNKNOWN;
+    }
+    /* Binding numbers are validated against the device so a stray
+     * index fails here instead of inside vkCmdBindVertexBuffers. */
+    memset(&props, 0, sizeof(props));
+    vkGetPhysicalDeviceProperties(swapchain->device->physical_device, &props);
+    if (binding >= props.limits.maxVertexInputBindings) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+
+    flight = &swapchain->flights[swapchain->current_frame];
+    vk_offset = (VkDeviceSize)offset;
+    vkCmdBindVertexBuffers(flight->cmd, binding, 1, &buffer->vk_buffer,
+                           &vk_offset);
+    return LC_SUCCESS;
 }

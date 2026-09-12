@@ -559,6 +559,9 @@ void lc_vulkan_device_destroy(lc_device *device) {
     if (device == NULL) {
         return;
     }
+    /* Upload context first: its pool/fence die before VkDevice.
+     * Tracked buffers are already gone (device-destroy hook). */
+    lc_vulkan_upload_teardown(device);
     if (device->device != VK_NULL_HANDLE) {
         vkDestroyDevice(device->device, NULL);
         device->device = VK_NULL_HANDLE;

@@ -9,6 +9,7 @@
  * destroyed once the pipeline exists.
  */
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "graphics/graphics_internal.h"
@@ -18,12 +19,71 @@ static VkShaderStageFlagBits lc_vk_stage_flag(lc_shader_stage stage) {
                                              : VK_SHADER_STAGE_FRAGMENT_BIT;
 }
 
+/* Validate the vertex layout against device limits and internal
+ * consistency: every attribute references a declared binding, no
+ * location repeats, strides are nonzero and cover their attributes.
+ * Zero bindings with zero attributes (vertex-index generation) always
+ * passes. */
+static lc_result lc_vk_validate_vertex_layout(
+    VkPhysicalDevice physical,
+    const lc_vertex_binding_desc *bindings, uint32_t binding_count,
+    const lc_vertex_attribute_desc *attributes, uint32_t attribute_count) {
+    VkPhysicalDeviceProperties props;
+    uint32_t i;
+    uint32_t j;
+
+    memset(&props, 0, sizeof(props));
+    vkGetPhysicalDeviceProperties(physical, &props);
+    if (binding_count > props.limits.maxVertexInputBindings ||
+        attribute_count > props.limits.maxVertexInputAttributes) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    for (i = 0; i < binding_count; i++) {
+        if (bindings[i].stride == 0 ||
+            bindings[i].stride > props.limits.maxVertexInputBindingStride) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+    }
+    for (i = 0; i < attribute_count; i++) {
+        uint32_t size = lc_format_byte_size(attributes[i].format);
+        int bound = 0;
+
+        if (size == 0) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        if (attributes[i].offset > props.limits.maxVertexInputAttributeOffset) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        for (j = 0; j < binding_count; j++) {
+            if (bindings[j].binding != attributes[i].binding) {
+                continue;
+            }
+            bound = 1;
+            if (attributes[i].offset + size > bindings[j].stride) {
+                return LC_ERROR_INVALID_ARGUMENT;
+            }
+        }
+        if (!bound) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        for (j = 0; j < i; j++) {
+            if (attributes[j].location == attributes[i].location) {
+                return LC_ERROR_INVALID_ARGUMENT;
+            }
+        }
+    }
+    return LC_SUCCESS;
+}
+
 lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
                                     lc_swapchain *swapchain,
-                                    const lc_shader *vertex_shader,
-                                    const lc_shader *fragment_shader) {
+                                    const lc_graphics_pipeline_desc *desc) {
+    const lc_shader *vertex_shader;
+    const lc_shader *fragment_shader;
     VkPipelineShaderStageCreateInfo stages[2];
     VkPipelineVertexInputStateCreateInfo vertex_input;
+    VkVertexInputBindingDescription *vk_bindings = NULL;
+    VkVertexInputAttributeDescription *vk_attributes = NULL;
     VkPipelineInputAssemblyStateCreateInfo input_assembly;
     VkPipelineViewportStateCreateInfo viewport_state;
     VkPipelineRasterizationStateCreateInfo rasterization;
@@ -35,18 +95,36 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
     VkDynamicState dynamic_states[2];
 
     if (pipeline == NULL || device == NULL || swapchain == NULL ||
-        vertex_shader == NULL || fragment_shader == NULL) {
+        desc == NULL || desc->vertex_shader == NULL ||
+        desc->fragment_shader == NULL) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
+    vertex_shader = desc->vertex_shader;
+    fragment_shader = desc->fragment_shader;
     if (vertex_shader->stage != LC_SHADER_STAGE_VERTEX ||
         fragment_shader->stage != LC_SHADER_STAGE_FRAGMENT) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if ((desc->vertex_binding_count > 0 && desc->vertex_bindings == NULL) ||
+        (desc->vertex_attribute_count > 0 &&
+         desc->vertex_attributes == NULL)) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
     if (vertex_shader->module == VK_NULL_HANDLE ||
         fragment_shader->module == VK_NULL_HANDLE ||
         device->device == VK_NULL_HANDLE ||
+        device->physical_device == VK_NULL_HANDLE ||
         swapchain->render_pass == VK_NULL_HANDLE) {
         return LC_ERROR_PIPELINE_CREATION_FAILED;
+    }
+    {
+        lc_result layout_res = lc_vk_validate_vertex_layout(
+            device->physical_device, desc->vertex_bindings,
+            desc->vertex_binding_count, desc->vertex_attributes,
+            desc->vertex_attribute_count);
+        if (layout_res != LC_SUCCESS) {
+            return layout_res;
+        }
     }
 
     pipeline->device = device;
@@ -63,10 +141,55 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
     stages[1].module = fragment_shader->module;
     stages[1].pName = fragment_shader->entry_point;
 
-    /* No vertex buffers yet: empty input state. */
+    /* Vertex input from the backend-neutral layout (empty when the
+     * shader generates vertices from its index). Vulkan copies these
+     * arrays at creation, so they are freed before returning. */
+    if (desc->vertex_binding_count > 0) {
+        uint32_t i;
+
+        vk_bindings = (VkVertexInputBindingDescription *)malloc(
+            sizeof(VkVertexInputBindingDescription) *
+            desc->vertex_binding_count);
+        if (vk_bindings == NULL) {
+            return LC_ERROR_OUT_OF_MEMORY;
+        }
+        for (i = 0; i < desc->vertex_binding_count; i++) {
+            vk_bindings[i].binding = desc->vertex_bindings[i].binding;
+            vk_bindings[i].stride = desc->vertex_bindings[i].stride;
+            vk_bindings[i].inputRate =
+                (desc->vertex_bindings[i].input_rate ==
+                 LC_VERTEX_INPUT_PER_INSTANCE)
+                    ? VK_VERTEX_INPUT_RATE_INSTANCE
+                    : VK_VERTEX_INPUT_RATE_VERTEX;
+        }
+    }
+    if (desc->vertex_attribute_count > 0) {
+        uint32_t i;
+
+        vk_attributes = (VkVertexInputAttributeDescription *)malloc(
+            sizeof(VkVertexInputAttributeDescription) *
+            desc->vertex_attribute_count);
+        if (vk_attributes == NULL) {
+            free(vk_bindings);
+            return LC_ERROR_OUT_OF_MEMORY;
+        }
+        for (i = 0; i < desc->vertex_attribute_count; i++) {
+            vk_attributes[i].location = desc->vertex_attributes[i].location;
+            vk_attributes[i].binding = desc->vertex_attributes[i].binding;
+            vk_attributes[i].format =
+                lc_vulkan_translate_format(desc->vertex_attributes[i].format);
+            vk_attributes[i].offset = desc->vertex_attributes[i].offset;
+        }
+    }
+
     memset(&vertex_input, 0, sizeof(vertex_input));
     vertex_input.sType =
         VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertex_input.vertexBindingDescriptionCount = desc->vertex_binding_count;
+    vertex_input.pVertexBindingDescriptions = vk_bindings;
+    vertex_input.vertexAttributeDescriptionCount =
+        desc->vertex_attribute_count;
+    vertex_input.pVertexAttributeDescriptions = vk_attributes;
 
     memset(&input_assembly, 0, sizeof(input_assembly));
     input_assembly.sType =
@@ -120,6 +243,8 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
     if (vkCreatePipelineLayout(device->device, &layout_info, NULL,
                                &pipeline->layout) != VK_SUCCESS) {
         pipeline->layout = VK_NULL_HANDLE;
+        free(vk_bindings);
+        free(vk_attributes);
         return LC_ERROR_PIPELINE_CREATION_FAILED;
     }
 
@@ -153,9 +278,13 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
             pipeline->pipeline = VK_NULL_HANDLE;
             vkDestroyPipelineLayout(device->device, pipeline->layout, NULL);
             pipeline->layout = VK_NULL_HANDLE;
+            free(vk_bindings);
+            free(vk_attributes);
             return LC_ERROR_PIPELINE_CREATION_FAILED;
         }
     }
+    free(vk_bindings);
+    free(vk_attributes);
     return LC_SUCCESS;
 }
 

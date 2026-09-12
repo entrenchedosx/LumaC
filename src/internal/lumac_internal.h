@@ -33,6 +33,7 @@ typedef struct lc_state {
     lc_swapchain *swapchains;
     lc_shader *shaders;
     lc_pipeline *pipelines;
+    lc_buffer *buffers;
 } lc_state;
 
 /* Accessor for the single process-wide state (see src/lumac.c) */
@@ -94,6 +95,14 @@ void lc_pipeline_destroy_for_swapchain(const lc_swapchain *swapchain);
 /* Nonzero when a pipeline handle is live. Shared by frame.c for
  * bind/draw validation. See src/graphics/pipeline.c. */
 int lc_pipeline_is_live(const lc_pipeline *pipeline);
+
+/* Destroys all live buffers. Called by lc_shutdown().
+ * See src/graphics/buffer.c. */
+void lc_buffer_destroy_all(void);
+
+/* Destroys all buffers owned by a device being torn down.
+ * Called by lc_device_destroy(). See src/graphics/buffer.c. */
+void lc_buffer_destroy_for_device(const lc_device *device);
 
 /* Default title used when lc_window_desc.title is NULL */
 #define LC_DEFAULT_TITLE "LumaC"

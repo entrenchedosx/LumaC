@@ -293,3 +293,10 @@ uint32_t lc_swapchain_get_image_count(const lc_swapchain *swapchain) {
     }
     return swapchain->image_count;
 }
+
+lc_format lc_swapchain_get_format(const lc_swapchain *swapchain) {
+    if (swapchain == NULL) {
+        return LC_FORMAT_UNDEFINED;
+    }
+    return lc_vulkan_untranslate_format(swapchain->format);
+}

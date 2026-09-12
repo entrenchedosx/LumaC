@@ -139,6 +139,14 @@ lc_result lc_graphics_pipeline_create(
         *out_pipeline = NULL;
         return LC_ERROR_INVALID_ARGUMENT;
     }
+    /* Vertex layout arrays must accompany nonzero counts (deep content
+     * is validated against device limits by the backend). */
+    if ((desc->vertex_binding_count > 0 && desc->vertex_bindings == NULL) ||
+        (desc->vertex_attribute_count > 0 &&
+         desc->vertex_attributes == NULL)) {
+        *out_pipeline = NULL;
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
 
     pipeline = (lc_pipeline *)calloc(1, sizeof(lc_pipeline));
     if (pipeline == NULL) {
@@ -146,9 +154,7 @@ lc_result lc_graphics_pipeline_create(
         return LC_ERROR_OUT_OF_MEMORY;
     }
 
-    res = lc_vulkan_pipeline_create(pipeline, device, swapchain,
-                                    desc->vertex_shader,
-                                    desc->fragment_shader);
+    res = lc_vulkan_pipeline_create(pipeline, device, swapchain, desc);
     if (res != LC_SUCCESS) {
         *out_pipeline = NULL;
         free(pipeline);

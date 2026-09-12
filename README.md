@@ -36,16 +36,19 @@ layers clean. Vertex buffers do not exist yet.
 - SPIR-V shader modules plus a minimal graphics pipeline (empty
   layout, dynamic viewport/scissor, no culling) over a classic render
   pass; `lc_bind_pipeline` + `lc_draw` record into the open frame
+- GPU resource foundation: backend-neutral formats, generic buffers
+  (GPU-only / CPU-to-GPU / GPU-to-CPU) with mapping and bounds-checked
+  staging writes, backend-neutral vertex layouts, device limits
 - Explicit lifetime model: dependents are destroyed before the objects
-  they borrow; shutdown order is pipelines, shaders, swapchains,
-  surfaces, devices, windows
+  they borrow; shutdown order is pipelines, shaders, buffers,
+  swapchains, surfaces, devices, windows
 - Static or shared library builds; headless-safe unit tests plus
   Vulkan integration tests that skip cleanly without a GPU/display
 
 ## Current Status
 
-Early development (`0.1.0-dev`). Triangle rendering works; there are
-no vertex buffers, textures, or descriptors yet.
+Early development (`0.1.0-dev`). Vertex-buffer triangle rendering
+works; there are no textures, descriptors, or uniform buffers yet.
 
 | Feature              | Windows          | Linux            |
 | -------------------- | ---------------- | ---------------- |
@@ -57,6 +60,7 @@ no vertex buffers, textures, or descriptors yet.
 | Frame presentation   | Verified         | Runtime verified (lavapipe) |
 | Triangle rendering   | Verified         | Runtime verified (lavapipe) |
 | Shaders / pipeline   | Implemented      | Implemented (compiled clean) |
+| Buffers / formats    | Verified         | Runtime verified (lavapipe) |
 | Validation layers    | Clean            | Not available in test env |
 | D3D12                | Planned          | N/A              |
 | Wayland              | N/A              | Planned          |
@@ -72,14 +76,16 @@ cmake --build build --config Debug
 ctest --test-dir build -C Debug --output-on-failure
 ```
 
-Run the triangle example (vertex-indexed RGB triangle over a dark
-background; resize, minimize, and close all behave):
+Run the triangle examples — `triangle` (vertex-index generation) and
+`vertex_triangle` (real GPU vertex buffer; identical image):
 
 ```bash
 # Windows:
 .\build\examples\triangle\Debug\triangle.exe
+.\build\examples\vertex_triangle\Debug\vertex_triangle.exe
 # Linux:
 /build/triangle/triangle
+/build/vertex_triangle/vertex_triangle
 ```
 
 ## Building
@@ -178,6 +184,11 @@ int main(void)
 - Shader: `lc_shader_create/destroy` (SPIR-V, vertex/fragment stages)
 - Pipeline: `lc_graphics_pipeline_create`, `lc_pipeline_destroy`,
   `lc_bind_pipeline`, `lc_draw`
+- Formats: `lc_format` (backend-neutral color/vertex data formats)
+- Buffers: `lc_buffer_create/destroy/get_size/map/unmap/write`
+  (GPU-only / CPU-to-GPU / GPU-to-CPU)
+- Vertex input: bindings/attributes, `lc_bind_vertex_buffer`
+- Capabilities: `lc_device_get_limits`, `lc_swapchain_get_format`
 
 See `include/lumac/lumac.h` for the authoritative documented API.
 
@@ -198,6 +209,8 @@ Public LumaC API  (include/lumac/lumac.h — opaque handles only)
     +---- Surface subsystem (src/graphics/surface.c)
     |
     +---- Swapchain + frame (src/graphics/swapchain.c, frame.c)
+    |
+    +---- Resources (src/graphics/buffer.c, shader.c, pipeline.c)
               |
               +---- Vulkan backend (src/graphics/vulkan/)
 ```
@@ -217,20 +230,28 @@ internal tracking lists — no reference counting, no global singletons.
 
 ## Roadmap
 
-- Vertex buffers, index buffers, uniform buffers
-- Textures, samplers, descriptors, depth buffers
-- Blend state and pipeline-state configuration API
-- D3D12 backend, Wayland surface support
+Foundation — done: core, Windows/X11 windows, Vulkan device, surface,
+swapchain, frame lifecycle, graphics pipeline, triangle, resource
+system (buffers).
+
+Next: textures, samplers, resource bindings, uniform/storage buffers,
+index drawing, instancing, depth/stencil, offscreen rendering, MSAA,
+compute.
+
+Long term: asynchronous uploads, pipeline cache, timestamp queries,
+indirect drawing, bindless resources, debugging markers, profiling
+hooks, multithreaded recording, custom allocators, memory budgeting,
+device-lost recovery, render-graph helpers, D3D12, Wayland.
 
 ## Repository Structure
 
 ```
 LumaC/
 ├── .github/workflows/   # Windows + Linux CI
-├── docs/images/         # real captures (triangle.png, clear-screen.png)
+├── docs/                # ARCHITECTURE.md, API_DESIGN.md, images/
 ├── examples/            # basic_init, window, device_info,
 │                        # surface_info, swapchain_info, clear_screen,
-│                        # triangle (+ shaders/)
+│                        # triangle (+ shaders/), vertex_triangle
 ├── include/lumac/       # public lumac.h
 ├── src/                 # core, platform, graphics, vulkan backend
 ├── tests/               # headless unit tests + Vulkan integration tests

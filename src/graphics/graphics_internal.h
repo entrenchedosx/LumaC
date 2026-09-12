@@ -65,6 +65,34 @@ struct lc_device {
     VkQueue graphics_queue;
     lc_vk_queue *queues; /* one entry per queue family, malloc'd */
     uint32_t queue_count;
+
+    /* Device-level immediate-submit upload context (lazy). One command
+     * pool/buffer on the graphics family plus a fence; reused by every
+     * staging copy. Transfers run on the graphics queue: universally
+     * supported and simple; a dedicated transfer queue is future work. */
+    VkCommandPool upload_pool;
+    VkCommandBuffer upload_cmd;
+    VkFence upload_fence;
+};
+
+/* Opaque public buffer type, completed here. A buffer belongs to one
+ * device and survives swapchain recreation; device teardown destroys
+ * dependent buffers before VkDevice. CPU-visible memory is mapped
+ * persistently at creation (coherent required); GPU-only memory is
+ * never mapped and is written through staging. */
+struct lc_buffer {
+    lc_device *device;
+
+    uint64_t size;
+    uint32_t usage; /* lc_buffer_usage bits, as requested */
+    lc_memory_usage memory_usage;
+
+    VkBuffer vk_buffer;
+    VkDeviceMemory vk_memory;
+    void *mapped_ptr; /* persistent mapping, or NULL when not mappable */
+
+    lc_buffer *next;
+    lc_buffer *prev;
 };
 
 /* Opaque public surface type, completed here. A surface borrows its
@@ -279,18 +307,69 @@ struct lc_pipeline {
 };
 
 /*
- * Validate shaders (live, correctly staged, same device) and create
- * the pipeline layout plus graphics pipeline against the swapchain's
- * render pass. Consumes only module handles: shaders may be destroyed
- * afterwards. On failure tears down partial state.
+ * Validate shaders (live, correctly staged, same device) and the vertex
+ * layout, then create the pipeline layout plus graphics pipeline
+ * against the swapchain's render pass. Consumes only module handles:
+ * shaders may be destroyed afterwards. On failure tears down partial
+ * state.
  */
 lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
                                     lc_swapchain *swapchain,
-                                    const lc_shader *vertex_shader,
-                                    const lc_shader *fragment_shader);
+                                    const lc_graphics_pipeline_desc *desc);
 
 /* Destroys pipeline then layout. Device must still be alive. */
 void lc_vulkan_pipeline_destroy(lc_pipeline *pipeline);
+
+/* Centralized backend-neutral <-> Vulkan format translation. Unknown
+ * inputs map to VK_FORMAT_UNDEFINED / LC_FORMAT_UNDEFINED. */
+VkFormat lc_vulkan_translate_format(lc_format format);
+lc_format lc_vulkan_untranslate_format(VkFormat format);
+
+/* Byte size of one lc_format element (0 for UNDEFINED). */
+uint32_t lc_format_byte_size(lc_format format);
+
+/*
+ * Fill an allocated (zeroed) lc_buffer whose size/usage/memory fields
+ * are already set: create VkBuffer, allocate and bind memory
+ * (persistently mapping CPU-visible coherent memory). On failure tears
+ * down whatever stage was reached; the caller still owns the struct.
+ */
+lc_result lc_vulkan_buffer_create(lc_buffer *buffer);
+
+/* Unmaps (if mapped) and destroys buffer + memory. Device must still
+ * be alive; callers guarantee ordering via device-teardown hooks. */
+void lc_vulkan_buffer_destroy(lc_buffer *buffer);
+
+/*
+ * Bounds-checked write; assumes the caller validated liveness. Mappable
+ * buffers memcpy directly; GPU-only buffers stage through a temporary
+ * CPU-visible buffer plus an immediate-submit copy. Returns an
+ * lc_result; data/size were validated by the caller.
+ */
+lc_result lc_vulkan_buffer_write(lc_buffer *buffer, uint64_t offset,
+                                 const void *data, uint64_t size);
+
+/*
+ * Device upload context (lazy immediate-submit on the graphics queue).
+ * Ensure creates pool/buffer/fence on first use; copy records, submits,
+ * and waits a buffer-to-buffer copy; teardown destroys all three.
+ * Safe on empty state; device must be alive.
+ */
+lc_result lc_vulkan_upload_ensure(lc_device *device);
+void lc_vulkan_upload_teardown(lc_device *device);
+/* Exported (but not in the public header) so white-box integration
+ * tests can drive the copy path directly; not part of the API. */
+LC_API lc_result lc_vulkan_copy_buffer(lc_device *device, VkBuffer dst,
+                                       uint64_t dst_offset, VkBuffer src,
+                                       uint64_t src_offset, uint64_t size);
+
+/* Record a vertex-buffer bind into the open frame's command buffer.
+ * Validation (liveness, device match, VERTEX usage, offset) is done by
+ * the caller; binding number range is checked here against the device. */
+lc_result lc_vulkan_frame_bind_vertex(lc_swapchain *swapchain,
+                                      uint32_t binding,
+                                      const lc_buffer *buffer,
+                                      uint64_t offset);
 
 /*
  * Begin a frame on a live, idle swapchain struct: wait for a flight

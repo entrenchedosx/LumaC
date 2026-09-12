@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Production resource foundation: backend-neutral `lc_format` system
+  with centralized Vulkan translation
+- Generic `lc_buffer` abstraction (GPU-only / CPU-to-GPU / GPU-to-CPU
+  memory model), persistent coherent mapping, bounds-checked
+  `lc_buffer_write` with staging uploads via a device upload context
+- Backend-neutral vertex bindings/attributes, pipeline vertex-input
+  state, `lc_bind_vertex_buffer`
+- `examples/vertex_triangle`: identical triangle from a real GPU
+  vertex buffer; exact staging round-trip verified in tests
+- `lc_device_get_limits`, `lc_swapchain_get_format`
+- `docs/ARCHITECTURE.md` (subsystems, ownership, backend strategy,
+  known pre-1.0 debt) and `docs/API_DESIGN.md` (binding principles)
 - First triangle: `lc_shader` (SPIR-V modules), `lc_pipeline`
   (empty layout, dynamic viewport/scissor, no culling), minimal
   render pass owned by the swapchain, `lc_bind_pipeline` + `lc_draw`

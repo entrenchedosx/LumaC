@@ -30,12 +30,15 @@ set(LUMAC_SOURCES
     src/graphics/frame.c
     src/graphics/shader.c
     src/graphics/pipeline.c
+    src/graphics/buffer.c
     src/graphics/vulkan/vulkan_backend.c
     src/graphics/vulkan/vulkan_surface.c
     src/graphics/vulkan/vulkan_swapchain.c
     src/graphics/vulkan/vulkan_frame.c
     src/graphics/vulkan/vulkan_shader.c
     src/graphics/vulkan/vulkan_pipeline.c
+    src/graphics/vulkan/vulkan_format.c
+    src/graphics/vulkan/vulkan_buffer.c
 )
 
 # Platform backend selection (only the current OS backend is compiled)
@@ -112,6 +115,7 @@ file(MAKE_DIRECTORY "${LC_SPV_DIR}")
 file(COPY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples/triangle/shaders/triangle.vert.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/examples/triangle/shaders/triangle.frag.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/vertex_triangle/shaders/vb_triangle.vert.spv"
     DESTINATION "${LC_SPV_DIR}")
 find_program(LC_GLSLC glslc HINTS "$ENV{VULKAN_SDK}/Bin")
 if(LC_GLSLC)
@@ -119,19 +123,25 @@ if(LC_GLSLC)
         OUTPUT
             "${LC_SPV_DIR}/triangle.vert.spv"
             "${LC_SPV_DIR}/triangle.frag.spv"
+            "${LC_SPV_DIR}/vb_triangle.vert.spv"
         COMMAND "${LC_GLSLC}" -fshader-stage=vert
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/triangle/shaders/triangle.vert"
             -o "${LC_SPV_DIR}/triangle.vert.spv"
         COMMAND "${LC_GLSLC}" -fshader-stage=frag
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/triangle/shaders/triangle.frag"
             -o "${LC_SPV_DIR}/triangle.frag.spv"
+        COMMAND "${LC_GLSLC}" -fshader-stage=vert
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/vertex_triangle/shaders/vb_triangle.vert"
+            -o "${LC_SPV_DIR}/vb_triangle.vert.spv"
         DEPENDS
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/triangle/shaders/triangle.vert"
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/triangle/shaders/triangle.frag"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/vertex_triangle/shaders/vb_triangle.vert"
         COMMENT "Compiling LumaC triangle shaders")
     add_custom_target(lumac_triangle_shaders DEPENDS
         "${LC_SPV_DIR}/triangle.vert.spv"
-        "${LC_SPV_DIR}/triangle.frag.spv")
+        "${LC_SPV_DIR}/triangle.frag.spv"
+        "${LC_SPV_DIR}/vb_triangle.vert.spv")
 endif()
 
 # Examples
@@ -143,6 +153,7 @@ if(LUMAC_BUILD_EXAMPLES)
     add_subdirectory(examples/swapchain_info)
     add_subdirectory(examples/clear_screen)
     add_subdirectory(examples/triangle)
+    add_subdirectory(examples/vertex_triangle)
 endif()
 
 # Tests
@@ -241,4 +252,24 @@ if(LUMAC_BUILD_TESTS)
         add_dependencies(test_triangle_vulkan lumac_triangle_shaders)
     endif()
     add_test(NAME test_triangle_vulkan COMMAND test_triangle_vulkan)
+
+    # Headless-safe: validates buffer argument handling, never touches
+    # Vulkan or the window system
+    add_executable(test_buffer tests/test_buffer.c)
+    target_link_libraries(test_buffer PRIVATE lumac)
+    target_include_directories(test_buffer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    add_test(NAME test_buffer COMMAND test_buffer)
+
+    # Integration: real allocation/mapping/staging/round-trip plus
+    # vertex-buffer rendering; needs display + Vulkan + GPU, skips
+    # otherwise. Uses internal headers for the copy path (no public
+    # copy API exists by design), so it needs src + Vulkan includes.
+    add_executable(test_buffer_vulkan tests/test_buffer_vulkan.c)
+    target_link_libraries(test_buffer_vulkan PRIVATE lumac Vulkan::Vulkan)
+    target_include_directories(test_buffer_vulkan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(test_buffer_vulkan PRIVATE LC_TRIANGLE_SPV_DIR="${LC_SPV_DIR}")
+    if(TARGET lumac_triangle_shaders)
+        add_dependencies(test_buffer_vulkan lumac_triangle_shaders)
+    endif()
+    add_test(NAME test_buffer_vulkan COMMAND test_buffer_vulkan)
 endif()

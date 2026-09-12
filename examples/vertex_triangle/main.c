@@ -5,15 +5,28 @@
 #include <lumac/lumac.h>
 
 /*
- * Phase 7 example: first LumaC triangle. Loads SPIR-V vertex/fragment
- * shaders, builds a graphics pipeline, and draws one vertex-indexed
- * triangle per frame over a dark background. Resize recreates the
- * swapchain; minimize defers; close exits. No vertex buffers yet.
+ * Phase 8 example: the same RGB triangle as examples/triangle, but fed
+ * from a real GPU vertex buffer. Vertex data uploads through
+ * lc_buffer_write() staging into a GPU-only buffer; the pipeline
+ * carries a backend-neutral vertex layout; each frame binds the buffer
+ * and draws. Resize recreates the swapchain; minimize defers; close
+ * exits. The buffer outlives every recreation untouched.
  */
 
 #ifndef LC_TRIANGLE_SPV_DIR
 #define LC_TRIANGLE_SPV_DIR "."
 #endif
+
+typedef struct vertex {
+    float position[2];
+    float color[3];
+} vertex;
+
+static const vertex k_triangle[3] = {
+    { { 0.0f, -0.6f }, { 1.0f, 0.2f, 0.2f } },
+    { { 0.6f, 0.6f }, { 0.2f, 1.0f, 0.2f } },
+    { { -0.6f, 0.6f }, { 0.2f, 0.4f, 1.0f } },
+};
 
 /* Minimal private SPIR-V file loader (examples/tests only; the library
  * takes bytes, never paths). Returns malloc'd 4-aligned memory. */
@@ -70,14 +83,18 @@ int main(void) {
     lc_device *device = NULL;
     lc_surface *surface = NULL;
     lc_swapchain *swapchain = NULL;
+    lc_buffer *vertex_buffer = NULL;
     lc_shader *vertex_shader = NULL;
     lc_shader *fragment_shader = NULL;
     lc_pipeline *pipeline = NULL;
     lc_window_desc window_desc;
     lc_device_desc device_desc;
     lc_swapchain_desc swapchain_desc;
+    lc_buffer_desc buffer_desc;
     lc_shader_desc shader_desc;
     lc_graphics_pipeline_desc pipeline_desc = { 0 };
+    lc_vertex_binding_desc binding;
+    lc_vertex_attribute_desc attributes[2];
     lc_result res;
     void *vert_code = NULL;
     void *frag_code = NULL;
@@ -89,7 +106,7 @@ int main(void) {
         return 1;
     }
 
-    window_desc.title = "LumaC Triangle";
+    window_desc.title = "LumaC Vertex Triangle";
     window_desc.width = 800;
     window_desc.height = 600;
     res = lc_window_create(&window_desc, &window);
@@ -132,9 +149,36 @@ int main(void) {
         return 1;
     }
 
-    if (!load_shader_file("triangle.vert.spv", &vert_code, &vert_size) ||
+    /* GPU-only vertex buffer, filled through the staging upload path. */
+    buffer_desc.size = sizeof(k_triangle);
+    buffer_desc.usage = LC_BUFFER_USAGE_VERTEX;
+    buffer_desc.memory = LC_MEMORY_GPU_ONLY;
+    res = lc_buffer_create(device, &buffer_desc, &vertex_buffer);
+    if (res != LC_SUCCESS) {
+        fprintf(stderr, "lc_buffer_create failed (%d)\n", res);
+        lc_swapchain_destroy(swapchain);
+        lc_surface_destroy(surface);
+        lc_device_destroy(device);
+        lc_window_destroy(window);
+        lc_shutdown();
+        return 1;
+    }
+    res = lc_buffer_write(vertex_buffer, 0, k_triangle, sizeof(k_triangle));
+    if (res != LC_SUCCESS) {
+        fprintf(stderr, "lc_buffer_write failed (%d)\n", res);
+        lc_buffer_destroy(vertex_buffer);
+        lc_swapchain_destroy(swapchain);
+        lc_surface_destroy(surface);
+        lc_device_destroy(device);
+        lc_window_destroy(window);
+        lc_shutdown();
+        return 1;
+    }
+
+    if (!load_shader_file("vb_triangle.vert.spv", &vert_code, &vert_size) ||
         !load_shader_file("triangle.frag.spv", &frag_code, &frag_size)) {
         fprintf(stderr, "failed to load triangle SPIR-V\n");
+        lc_buffer_destroy(vertex_buffer);
         lc_swapchain_destroy(swapchain);
         lc_surface_destroy(surface);
         lc_device_destroy(device);
@@ -152,6 +196,7 @@ int main(void) {
         fprintf(stderr, "vertex lc_shader_create failed (%d)\n", res);
         free(vert_code);
         free(frag_code);
+        lc_buffer_destroy(vertex_buffer);
         lc_swapchain_destroy(swapchain);
         lc_surface_destroy(surface);
         lc_device_destroy(device);
@@ -170,6 +215,7 @@ int main(void) {
         lc_shader_destroy(vertex_shader);
         free(vert_code);
         free(frag_code);
+        lc_buffer_destroy(vertex_buffer);
         lc_swapchain_destroy(swapchain);
         lc_surface_destroy(surface);
         lc_device_destroy(device);
@@ -177,20 +223,37 @@ int main(void) {
         lc_shutdown();
         return 1;
     }
-    /* Host copies no longer needed; modules live on the device. */
     free(vert_code);
     free(frag_code);
     vert_code = NULL;
     frag_code = NULL;
 
+    /* Backend-neutral vertex layout: vec2 position + vec3 color. */
+    binding.binding = 0;
+    binding.stride = sizeof(vertex);
+    binding.input_rate = LC_VERTEX_INPUT_PER_VERTEX;
+    attributes[0].location = 0;
+    attributes[0].binding = 0;
+    attributes[0].format = LC_FORMAT_RG32_FLOAT;
+    attributes[0].offset = 0;
+    attributes[1].location = 1;
+    attributes[1].binding = 0;
+    attributes[1].format = LC_FORMAT_RGB32_FLOAT;
+    attributes[1].offset = sizeof(float) * 2;
+
     pipeline_desc.vertex_shader = vertex_shader;
     pipeline_desc.fragment_shader = fragment_shader;
+    pipeline_desc.vertex_bindings = &binding;
+    pipeline_desc.vertex_binding_count = 1;
+    pipeline_desc.vertex_attributes = attributes;
+    pipeline_desc.vertex_attribute_count = 2;
     res = lc_graphics_pipeline_create(device, swapchain, &pipeline_desc,
                                       &pipeline);
     if (res != LC_SUCCESS) {
         fprintf(stderr, "lc_graphics_pipeline_create failed (%d)\n", res);
         lc_shader_destroy(fragment_shader);
         lc_shader_destroy(vertex_shader);
+        lc_buffer_destroy(vertex_buffer);
         lc_swapchain_destroy(swapchain);
         lc_surface_destroy(surface);
         lc_device_destroy(device);
@@ -198,7 +261,6 @@ int main(void) {
         lc_shutdown();
         return 1;
     }
-    /* Shaders may die once the pipeline exists. */
     lc_shader_destroy(fragment_shader);
     lc_shader_destroy(vertex_shader);
     fragment_shader = NULL;
@@ -206,7 +268,7 @@ int main(void) {
 
     printf("LumaC %s\n", lc_get_version_string());
     printf("GPU: %s\n", lc_device_get_name(device));
-    printf("Rendering triangle. Close the window to exit.\n");
+    printf("Rendering vertex-buffer triangle. Close the window to exit.\n");
 
     while (!lc_window_should_close(window)) {
         uint32_t w;
@@ -250,12 +312,13 @@ int main(void) {
             break;
         }
         res = lc_bind_pipeline(swapchain, pipeline);
-        if (res == LC_ERROR_PIPELINE_INCOMPATIBLE) {
-            fprintf(stderr, "pipeline incompatible after recreate\n");
-            break;
-        }
         if (res != LC_SUCCESS) {
             fprintf(stderr, "lc_bind_pipeline failed (%d)\n", res);
+            break;
+        }
+        res = lc_bind_vertex_buffer(swapchain, 0, vertex_buffer, 0);
+        if (res != LC_SUCCESS) {
+            fprintf(stderr, "lc_bind_vertex_buffer failed (%d)\n", res);
             break;
         }
         res = lc_draw(swapchain, 3, 0);
@@ -281,6 +344,7 @@ int main(void) {
     }
 
     lc_pipeline_destroy(pipeline);
+    lc_buffer_destroy(vertex_buffer);
     lc_swapchain_destroy(swapchain);
     lc_surface_destroy(surface);
     lc_device_destroy(device);
