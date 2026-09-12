@@ -77,9 +77,11 @@ void lc_device_destroy(lc_device *device) {
     if (device == NULL) {
         return;
     }
-    /* Dependents first: swapchains, then surfaces. vkDestroySwapchainKHR
-     * and vkDestroySurfaceKHR both need the logical device / instance,
-     * which die with the device below. */
+    /* Dependents first: pipelines, shaders, swapchains, then surfaces.
+     * vkDestroySwapchainKHR and vkDestroySurfaceKHR both need the
+     * logical device / instance, which die with the device below. */
+    lc_pipeline_destroy_for_device(device);
+    lc_shader_destroy_for_device(device);
     lc_swapchain_destroy_for_device(device);
     lc_surface_destroy_for_device(device);
     lc_device_list_remove(device);

@@ -214,10 +214,23 @@ void lc_vulkan_swapchain_teardown(lc_swapchain *swapchain) {
     if (device_handle != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_handle);
     }
-    /* Views first (children of the swapchain), then the swapchain,
-     * then the host arrays. Images belong to VkSwapchainKHR and are
-     * never destroyed directly. Frame objects (pool/sync) persist:
-     * they do not depend on individual images. */
+    /* Framebuffers first (they reference the views), then views,
+     * then the swapchain and its render pass, then the host arrays.
+     * Images belong to VkSwapchainKHR and are never destroyed
+     * directly. Frame objects (pool/sync) persist: they do not depend
+     * on individual images. */
+    if (swapchain->framebuffers != NULL) {
+        if (device_handle != VK_NULL_HANDLE) {
+            for (i = 0; i < swapchain->image_count; i++) {
+                if (swapchain->framebuffers[i] != VK_NULL_HANDLE) {
+                    vkDestroyFramebuffer(device_handle,
+                                         swapchain->framebuffers[i], NULL);
+                }
+            }
+        }
+        free(swapchain->framebuffers);
+        swapchain->framebuffers = NULL;
+    }
     if (swapchain->image_views != NULL) {
         if (device_handle != VK_NULL_HANDLE) {
             for (i = 0; i < swapchain->image_count; i++) {
@@ -253,16 +266,22 @@ void lc_vulkan_swapchain_teardown(lc_swapchain *swapchain) {
         free(swapchain->images_in_flight);
         swapchain->images_in_flight = NULL;
     }
-    if (swapchain->image_initialized != NULL) {
-        free(swapchain->image_initialized);
-        swapchain->image_initialized = NULL;
-    }
     if (swapchain->vk_swapchain != VK_NULL_HANDLE) {
         if (device_handle != VK_NULL_HANDLE) {
             vkDestroySwapchainKHR(device_handle, swapchain->vk_swapchain,
                                   NULL);
         }
         swapchain->vk_swapchain = VK_NULL_HANDLE;
+    }
+    /* The render pass depends only on the device (pipelines reference
+     * it by compatibility, never by lifetime), but it is rebuilt with
+     * the swapchain for uniformity, so it dies here too. */
+    if (swapchain->render_pass != VK_NULL_HANDLE) {
+        if (device_handle != VK_NULL_HANDLE) {
+            vkDestroyRenderPass(device_handle, swapchain->render_pass,
+                                NULL);
+        }
+        swapchain->render_pass = VK_NULL_HANDLE;
     }
     swapchain->image_count = 0;
     swapchain->extent.width = 0;
@@ -313,6 +332,128 @@ static void lc_vk_destroy_view_list(VkDevice device, VkImageView *views,
         }
     }
     free(views);
+}
+
+/* Minimal render pass (Option A over dynamic rendering: Vulkan
+ * 1.0-compatible, matching the conservative 1.2 baseline, no
+ * capability negotiation). One color attachment, cleared on load and
+ * stored for presentation; the pass begins lazily each frame with the
+ * latest clear color. The recipe is fixed, so equal formats imply
+ * compatible render passes across recreates. */
+static lc_result lc_vk_create_render_pass(VkDevice device, VkFormat format,
+                                          VkRenderPass *out_pass) {
+    VkAttachmentDescription attachment;
+    VkAttachmentReference color_ref;
+    VkSubpassDescription subpass;
+    VkSubpassDependency deps[2];
+    VkRenderPassCreateInfo info;
+
+    memset(&attachment, 0, sizeof(attachment));
+    attachment.format = format;
+    attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    memset(&color_ref, 0, sizeof(color_ref));
+    color_ref.attachment = 0;
+    color_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    memset(&subpass, 0, sizeof(subpass));
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &color_ref;
+
+    /* External acquire -> color writes, then color writes ->
+     * external present. Pairs with the submit semaphore wait at the
+     * color-attachment stage. */
+    memset(deps, 0, sizeof(deps));
+    deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    deps[0].dstSubpass = 0;
+    deps[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    deps[0].srcAccessMask = 0;
+    deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    deps[1].srcSubpass = 0;
+    deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    deps[1].dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    deps[1].dstAccessMask = 0;
+
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    info.attachmentCount = 1;
+    info.pAttachments = &attachment;
+    info.subpassCount = 1;
+    info.pSubpasses = &subpass;
+    info.dependencyCount = 2;
+    info.pDependencies = deps;
+
+    if (vkCreateRenderPass(device, &info, NULL, out_pass) != VK_SUCCESS) {
+        *out_pass = VK_NULL_HANDLE;
+        return LC_ERROR_SWAPCHAIN_CREATION_FAILED;
+    }
+    return LC_SUCCESS;
+}
+
+/* Destroy a framebuffer array (skipping NULL entries) and free it. */
+static void lc_vk_destroy_framebuffer_list(VkDevice device,
+                                           VkFramebuffer *fbs,
+                                           uint32_t count) {
+    uint32_t i;
+
+    if (fbs == NULL) {
+        return;
+    }
+    if (device != VK_NULL_HANDLE) {
+        for (i = 0; i < count; i++) {
+            if (fbs[i] != VK_NULL_HANDLE) {
+                vkDestroyFramebuffer(device, fbs[i], NULL);
+            }
+        }
+    }
+    free(fbs);
+}
+
+/* One framebuffer per image view, all sharing the render pass. Midway
+ * failure unwinds via the list helper; the caller then destroys the
+ * new render pass and swapchain. */
+static lc_result lc_vk_create_framebuffers(VkDevice device,
+                                           VkRenderPass render_pass,
+                                           VkImageView *views, uint32_t count,
+                                           VkExtent2D extent,
+                                           VkFramebuffer **out_fbs) {
+    uint32_t i;
+    VkFramebuffer *fbs =
+        (VkFramebuffer *)calloc(count, sizeof(VkFramebuffer));
+
+    if (fbs == NULL) {
+        return LC_ERROR_OUT_OF_MEMORY;
+    }
+    for (i = 0; i < count; i++) {
+        VkFramebufferCreateInfo info;
+
+        memset(&info, 0, sizeof(info));
+        info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        info.renderPass = render_pass;
+        info.attachmentCount = 1;
+        info.pAttachments = &views[i];
+        info.width = extent.width;
+        info.height = extent.height;
+        info.layers = 1;
+
+        if (vkCreateFramebuffer(device, &info, NULL, &fbs[i]) !=
+            VK_SUCCESS) {
+            lc_vk_destroy_framebuffer_list(device, fbs, count);
+            return LC_ERROR_SWAPCHAIN_CREATION_FAILED;
+        }
+    }
+    *out_fbs = fbs;
+    return LC_SUCCESS;
 }
 
 /* One 2D color view per image (single mip, single layer). Midway
@@ -369,8 +510,9 @@ lc_result lc_vulkan_swapchain_rebuild(lc_swapchain *swapchain, uint32_t width,
     VkImage *images = NULL;
     VkImageView *views = NULL;
     VkFence *in_flight = NULL;
-    uint8_t *initialized = NULL;
     VkSemaphore *present_sems = NULL;
+    VkRenderPass render_pass = VK_NULL_HANDLE;
+    VkFramebuffer *framebuffers = NULL;
     lc_result res;
 
     if (swapchain == NULL || swapchain->device == NULL ||
@@ -470,14 +612,10 @@ lc_result lc_vulkan_swapchain_rebuild(lc_swapchain *swapchain, uint32_t width,
         vkDestroySwapchainKHR(device->device, new_handle, NULL);
         return res;
     }
-    /* Per-image frame tracking: fresh images start with no owner fence
-     * and undefined contents. Built alongside the views so commit is
-     * all-or-nothing. */
+    /* Per-image owner-fence tracking: fresh images start unowned.
+     * Built alongside the views so commit is all-or-nothing. */
     in_flight = (VkFence *)calloc(image_count, sizeof(VkFence));
-    initialized = (uint8_t *)calloc(image_count, sizeof(uint8_t));
-    if (in_flight == NULL || initialized == NULL) {
-        free(in_flight);
-        free(initialized);
+    if (in_flight == NULL) {
         vkDestroySwapchainKHR(device->device, new_handle, NULL);
         free(images);
         return LC_ERROR_OUT_OF_MEMORY;
@@ -488,7 +626,6 @@ lc_result lc_vulkan_swapchain_rebuild(lc_swapchain *swapchain, uint32_t width,
         vkDestroySwapchainKHR(device->device, new_handle, NULL);
         free(images);
         free(in_flight);
-        free(initialized);
         return res;
     }
     /* One present semaphore per image (see struct comment): submit
@@ -500,7 +637,6 @@ lc_result lc_vulkan_swapchain_rebuild(lc_swapchain *swapchain, uint32_t width,
         vkDestroySwapchainKHR(device->device, new_handle, NULL);
         free(images);
         free(in_flight);
-        free(initialized);
         return LC_ERROR_OUT_OF_MEMORY;
     }
     {
@@ -522,10 +658,39 @@ lc_result lc_vulkan_swapchain_rebuild(lc_swapchain *swapchain, uint32_t width,
                 vkDestroySwapchainKHR(device->device, new_handle, NULL);
                 free(images);
                 free(in_flight);
-                free(initialized);
                 return LC_ERROR_SWAPCHAIN_CREATION_FAILED;
             }
         }
+    }
+    /* Render pass (format-only dependency) and one framebuffer per
+     * view. Failures unwind everything built so far. */
+    res = lc_vk_create_render_pass(device->device, format, &render_pass);
+    if (res != LC_SUCCESS) {
+        uint32_t i;
+        for (i = 0; i < image_count; i++) {
+            vkDestroySemaphore(device->device, present_sems[i], NULL);
+        }
+        free(present_sems);
+        lc_vk_destroy_view_list(device->device, views, image_count);
+        vkDestroySwapchainKHR(device->device, new_handle, NULL);
+        free(images);
+        free(in_flight);
+        return res;
+    }
+    res = lc_vk_create_framebuffers(device->device, render_pass, views,
+                                    image_count, extent, &framebuffers);
+    if (res != LC_SUCCESS) {
+        uint32_t i;
+        vkDestroyRenderPass(device->device, render_pass, NULL);
+        for (i = 0; i < image_count; i++) {
+            vkDestroySemaphore(device->device, present_sems[i], NULL);
+        }
+        free(present_sems);
+        lc_vk_destroy_view_list(device->device, views, image_count);
+        vkDestroySwapchainKHR(device->device, new_handle, NULL);
+        free(images);
+        free(in_flight);
+        return res;
     }
     /* Frame objects persist across recreates; create them once. Only a
      * fresh swapchain reaches here with no pool, so failure unwinds a
@@ -534,6 +699,9 @@ lc_result lc_vulkan_swapchain_rebuild(lc_swapchain *swapchain, uint32_t width,
         res = lc_vulkan_frame_init(swapchain);
         if (res != LC_SUCCESS) {
             uint32_t i;
+            lc_vk_destroy_framebuffer_list(device->device, framebuffers,
+                                           image_count);
+            vkDestroyRenderPass(device->device, render_pass, NULL);
             for (i = 0; i < image_count; i++) {
                 vkDestroySemaphore(device->device, present_sems[i], NULL);
             }
@@ -542,14 +710,13 @@ lc_result lc_vulkan_swapchain_rebuild(lc_swapchain *swapchain, uint32_t width,
             vkDestroySwapchainKHR(device->device, new_handle, NULL);
             free(images);
             free(in_flight);
-            free(initialized);
             return res;
         }
     }
 
     /* Fully built: retire the old state, then commit. From here on the
-     * old swapchain, its views, its present semaphores, and its arrays
-     * are gone. */
+     * old swapchain, its render pass, framebuffers, views, present
+     * semaphores, and arrays are gone. */
     lc_vulkan_swapchain_teardown(swapchain);
     swapchain->vk_swapchain = new_handle;
     swapchain->format = format;
@@ -560,8 +727,9 @@ lc_result lc_vulkan_swapchain_rebuild(lc_swapchain *swapchain, uint32_t width,
     swapchain->image_views = views;
     swapchain->image_count = image_count;
     swapchain->images_in_flight = in_flight;
-    swapchain->image_initialized = initialized;
     swapchain->present_semaphores = present_sems;
+    swapchain->render_pass = render_pass;
+    swapchain->framebuffers = framebuffers;
     swapchain->current_image = UINT32_MAX;
     return LC_SUCCESS;
 }

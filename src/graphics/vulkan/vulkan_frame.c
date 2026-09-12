@@ -31,32 +31,54 @@ static float lc_vk_clamp01(float v) {
     return v;
 }
 
-static void lc_vk_image_barrier(VkCommandBuffer cmd, VkImage image,
-                                VkAccessFlags src_access,
-                                VkPipelineStageFlags src_stage,
-                                VkAccessFlags dst_access,
-                                VkPipelineStageFlags dst_stage,
-                                VkImageLayout old_layout,
-                                VkImageLayout new_layout) {
-    VkImageMemoryBarrier barrier;
+/* Begin the render pass instance if not already open, consuming the
+ * pending clear color (or opaque black when no clear was requested).
+ * Viewport and scissor are dynamic, so they are set here every time
+ * from the current extent: resizing never requires pipeline rebuilds. */
+static void lc_vk_open_render_pass(lc_swapchain *swapchain) {
+    lc_vk_flight *flight =
+        &swapchain->flights[swapchain->current_frame];
+    VkClearValue clear_value;
+    VkRenderPassBeginInfo begin_info;
+    VkViewport viewport;
+    VkRect2D scissor;
 
-    memset(&barrier, 0, sizeof(barrier));
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.srcAccessMask = src_access;
-    barrier.dstAccessMask = dst_access;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.oldLayout = old_layout;
-    barrier.newLayout = new_layout;
-    barrier.image = image;
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.baseMipLevel = 0;
-    barrier.subresourceRange.levelCount = 1;
-    barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount = 1;
+    clear_value.color.float32[0] =
+        swapchain->clear_pending ? swapchain->clear_r : 0.0f;
+    clear_value.color.float32[1] =
+        swapchain->clear_pending ? swapchain->clear_g : 0.0f;
+    clear_value.color.float32[2] =
+        swapchain->clear_pending ? swapchain->clear_b : 0.0f;
+    clear_value.color.float32[3] =
+        swapchain->clear_pending ? swapchain->clear_a : 1.0f;
+    swapchain->clear_pending = 0;
 
-    vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, NULL, 0, NULL, 1,
-                         &barrier);
+    memset(&begin_info, 0, sizeof(begin_info));
+    begin_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    begin_info.renderPass = swapchain->render_pass;
+    begin_info.framebuffer =
+        swapchain->framebuffers[swapchain->current_image];
+    begin_info.renderArea.offset.x = 0;
+    begin_info.renderArea.offset.y = 0;
+    begin_info.renderArea.extent = swapchain->extent;
+    begin_info.clearValueCount = 1;
+    begin_info.pClearValues = &clear_value;
+    vkCmdBeginRenderPass(flight->cmd, &begin_info,
+                         VK_SUBPASS_CONTENTS_INLINE);
+
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = (float)swapchain->extent.width;
+    viewport.height = (float)swapchain->extent.height;
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(flight->cmd, 0, 1, &viewport);
+
+    memset(&scissor, 0, sizeof(scissor));
+    scissor.extent = swapchain->extent;
+    vkCmdSetScissor(flight->cmd, 0, 1, &scissor);
+
+    swapchain->rp_open = 1;
 }
 
 /* Best-effort unwind of partially created frame objects. All handles
@@ -265,35 +287,92 @@ lc_result lc_vulkan_frame_begin(lc_swapchain *swapchain) {
         return LC_ERROR_UNKNOWN;
     }
 
-    /* Transition for clearing. First use discards undefined contents;
-     * later frames come back from presentation. The acquire semaphore
-     * already guarantees prior presentation finished, so no source
-     * access needs waiting on. */
-    if (swapchain->image_initialized[image_index] != 0) {
-        lc_vk_image_barrier(flight->cmd, swapchain->images[image_index], 0,
-                            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                            VK_ACCESS_TRANSFER_WRITE_BIT,
-                            VK_PIPELINE_STAGE_TRANSFER_BIT,
-                            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    } else {
-        lc_vk_image_barrier(flight->cmd, swapchain->images[image_index], 0,
-                            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                            VK_ACCESS_TRANSFER_WRITE_BIT,
-                            VK_PIPELINE_STAGE_TRANSFER_BIT,
-                            VK_IMAGE_LAYOUT_UNDEFINED,
-                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    }
-
+    /* Fresh recording state: no pipeline bound, no render pass open,
+     * no clear consumed yet. Layout transitions are owned entirely by
+     * the render pass (UNDEFINED in, PRESENT out), so every frame is
+     * self-contained with no per-image history. */
     swapchain->current_image = image_index;
     swapchain->frame_active = 1;
+    swapchain->bound_pipeline = NULL;
+    swapchain->rp_open = 0;
+    swapchain->clear_pending = 0;
     return LC_SUCCESS;
 }
 
 lc_result lc_vulkan_frame_clear(lc_swapchain *swapchain, float r, float g,
                                 float b, float a) {
-    VkClearColorValue color;
-    VkImageSubresourceRange range;
+    float cr = lc_vk_clamp01(r);
+    float cg = lc_vk_clamp01(g);
+    float cb = lc_vk_clamp01(b);
+    float ca = lc_vk_clamp01(a);
+
+    if (swapchain == NULL || !swapchain->frame_active) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!lc_vk_frame_ready(swapchain) ||
+        swapchain->current_image >= swapchain->image_count) {
+        return LC_ERROR_UNKNOWN;
+    }
+    if (swapchain->rp_open) {
+        /* A pass is already recording (bind or draw happened): clear
+         * inside it so ordering stays exact. */
+        lc_vk_flight *flight =
+            &swapchain->flights[swapchain->current_frame];
+        VkClearAttachment attachment;
+        VkClearRect rect;
+
+        memset(&attachment, 0, sizeof(attachment));
+        attachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        attachment.colorAttachment = 0;
+        attachment.clearValue.color.float32[0] = cr;
+        attachment.clearValue.color.float32[1] = cg;
+        attachment.clearValue.color.float32[2] = cb;
+        attachment.clearValue.color.float32[3] = ca;
+
+        memset(&rect, 0, sizeof(rect));
+        rect.rect.extent = swapchain->extent;
+        rect.baseArrayLayer = 0;
+        rect.layerCount = 1;
+
+        vkCmdClearAttachments(flight->cmd, 1, &attachment, 1, &rect);
+        return LC_SUCCESS;
+    }
+    /* Otherwise the color is consumed when the pass begins; the latest
+     * clear wins. */
+    swapchain->clear_r = cr;
+    swapchain->clear_g = cg;
+    swapchain->clear_b = cb;
+    swapchain->clear_a = ca;
+    swapchain->clear_pending = 1;
+    return LC_SUCCESS;
+}
+
+lc_result lc_vulkan_frame_bind(lc_swapchain *swapchain,
+                               const lc_pipeline *pipeline) {
+    lc_vk_flight *flight;
+
+    if (swapchain == NULL || pipeline == NULL ||
+        !swapchain->frame_active) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!lc_vk_frame_ready(swapchain) ||
+        swapchain->current_image >= swapchain->image_count ||
+        swapchain->render_pass == VK_NULL_HANDLE) {
+        return LC_ERROR_UNKNOWN;
+    }
+    flight = &swapchain->flights[swapchain->current_frame];
+
+    if (!swapchain->rp_open) {
+        lc_vk_open_render_pass(swapchain);
+    }
+    vkCmdBindPipeline(flight->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                      pipeline->pipeline);
+    swapchain->bound_pipeline = pipeline;
+    return LC_SUCCESS;
+}
+
+lc_result lc_vulkan_frame_draw(lc_swapchain *swapchain, uint32_t vertex_count,
+                               uint32_t first_vertex) {
     lc_vk_flight *flight;
 
     if (swapchain == NULL || !swapchain->frame_active) {
@@ -303,23 +382,15 @@ lc_result lc_vulkan_frame_clear(lc_swapchain *swapchain, float r, float g,
         swapchain->current_image >= swapchain->image_count) {
         return LC_ERROR_UNKNOWN;
     }
+    if (swapchain->bound_pipeline == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
     flight = &swapchain->flights[swapchain->current_frame];
 
-    color.float32[0] = lc_vk_clamp01(r);
-    color.float32[1] = lc_vk_clamp01(g);
-    color.float32[2] = lc_vk_clamp01(b);
-    color.float32[3] = lc_vk_clamp01(a);
-
-    memset(&range, 0, sizeof(range));
-    range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    range.baseMipLevel = 0;
-    range.levelCount = 1;
-    range.baseArrayLayer = 0;
-    range.layerCount = 1;
-
-    vkCmdClearColorImage(flight->cmd, swapchain->images[swapchain->current_image],
-                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &color, 1,
-                         &range);
+    if (!swapchain->rp_open) {
+        lc_vk_open_render_pass(swapchain);
+    }
+    vkCmdDraw(flight->cmd, vertex_count, 1, first_vertex, 0);
     return LC_SUCCESS;
 }
 
@@ -327,14 +398,12 @@ lc_result lc_vulkan_frame_end(lc_swapchain *swapchain) {
     lc_device *device;
     lc_surface *surface;
     lc_vk_flight *flight;
-    VkImage image;
     VkSubmitInfo submit_info;
     VkPipelineStageFlags wait_stage =
-        VK_PIPELINE_STAGE_TRANSFER_BIT;
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkPresentInfoKHR present_info;
     VkResult present_res;
     VkSemaphore present_sem = VK_NULL_HANDLE;
-    uint32_t presented_image = UINT32_MAX;
     int reported_suboptimal;
 
     if (swapchain == NULL || !swapchain->frame_active) {
@@ -347,7 +416,6 @@ lc_result lc_vulkan_frame_end(lc_swapchain *swapchain) {
     device = swapchain->device;
     surface = swapchain->surface;
     flight = &swapchain->flights[swapchain->current_frame];
-    image = swapchain->images[swapchain->current_image];
     /* Per-image present semaphore: the submit signals it and the
      * presentation engine consumes it asynchronously, so a per-slot
      * semaphore could be re-signaled for a new image while an older
@@ -360,14 +428,16 @@ lc_result lc_vulkan_frame_end(lc_swapchain *swapchain) {
         return LC_ERROR_UNKNOWN;
     }
 
-    /* Back to a presentable layout; the transfer write must complete
-     * before the presentation engine may read. */
-    lc_vk_image_barrier(flight->cmd, image,
-                        VK_ACCESS_TRANSFER_WRITE_BIT,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    /* Realize a clear-only frame: open the pass with the pending color
+     * and close it immediately. Drawing frames already have the pass
+     * open from bind/draw. */
+    if (!swapchain->rp_open && swapchain->clear_pending) {
+        lc_vk_open_render_pass(swapchain);
+    }
+    if (swapchain->rp_open) {
+        vkCmdEndRenderPass(flight->cmd);
+        swapchain->rp_open = 0;
+    }
 
     if (vkEndCommandBuffer(flight->cmd) != VK_SUCCESS) {
         /* Recording failed: drop the frame without submitting. The
@@ -380,7 +450,9 @@ lc_result lc_vulkan_frame_end(lc_swapchain *swapchain) {
     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit_info.waitSemaphoreCount = 1;
     submit_info.pWaitSemaphores = &flight->image_available;
-    /* The clear is a transfer operation: wait there, not earlier. */
+    /* Rendering waits at color-attachment output: the acquire
+     * semaphore guarantees the image is free, and the first use
+     * inside the pass is a color-attachment write. */
     submit_info.pWaitDstStageMask = &wait_stage;
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers = &flight->cmd;
@@ -409,19 +481,16 @@ lc_result lc_vulkan_frame_end(lc_swapchain *swapchain) {
         vkQueuePresentKHR(surface->present_queue, &present_info);
 
     /* The submission owns a fence now; the slot rotates regardless of
-     * how presentation went. */
-    presented_image = swapchain->current_image;
+     * how presentation went. Layout history needs no tracking: every
+     * frame starts its pass from UNDEFINED. */
     swapchain->current_frame =
         (swapchain->current_frame + 1u) % LC_MAX_FRAMES_IN_FLIGHT;
     swapchain->current_image = UINT32_MAX;
     swapchain->frame_active = 0;
+    swapchain->bound_pipeline = NULL;
     reported_suboptimal = swapchain->frame_suboptimal;
     swapchain->frame_suboptimal = 0;
 
-    if (present_res == VK_SUCCESS || present_res == VK_SUBOPTIMAL_KHR) {
-        /* The image completed a full cycle and sits in PRESENT_SRC. */
-        swapchain->image_initialized[presented_image] = 1;
-    }
     if (present_res == VK_SUCCESS) {
         return reported_suboptimal ? LC_SUBOPTIMAL : LC_SUCCESS;
     }

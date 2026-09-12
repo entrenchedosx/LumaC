@@ -5,10 +5,10 @@
  * Internal graphics interface (Phase 5: device + surface + swapchain).
  *
  * Platform-neutral logic (argument validation, init checks, allocation,
- * device/surface/swapchain-list tracking, getters) lives in
- * src/graphics/graphics.c, surface.c, and swapchain.c. Only Vulkan work
- * lives in src/graphics/vulkan/vulkan_backend.c, vulkan_surface.c, and
- * vulkan_swapchain.c.
+ * tracking lists, getters) lives in src/graphics/graphics.c,
+ * surface.c, swapchain.c, frame.c, shader.c, and pipeline.c. Only
+ * Vulkan work lives in src/graphics/vulkan/ (backend, surface,
+ * swapchain, frame, shader, pipeline).
  *
  * Vulkan and native-platform types appear here and in the backend only -
  * never in the public header. Vulkan include directories and platform
@@ -152,6 +152,9 @@ struct lc_swapchain {
     VkImage *images; /* owned by VkSwapchainKHR; array owned here */
     VkImageView *image_views; /* one 2D color view per image, owned here */
     uint32_t image_count;
+    /* NOTE: no per-image layout tracking is needed. The render pass
+     * always starts from UNDEFINED (contents come from its clear) and
+     * ends at PRESENT_SRC, so every frame is self-contained. */
     /* One present semaphore per image (not per flight slot): submit
      * signals it, presentation consumes it asynchronously, and with
      * more images than flight slots a slot's semaphore could otherwise
@@ -159,6 +162,20 @@ struct lc_swapchain {
      * (VUID-vkQueueSubmit-pSignalSemaphores). Rebuilt with the images;
      * indexed by acquired image. */
     VkSemaphore *present_semaphores;
+    /* Render scope (Phase 7): one minimal render pass (clear/store,
+     * UNDEFINED-to-present) plus one framebuffer per image view,
+     * rebuilt with the swapchain. The pass begins lazily on first
+     * clear/bind/draw so the clear color is always known. */
+    VkRenderPass render_pass;
+    VkFramebuffer *framebuffers; /* one per image, owned here */
+    /* Open-frame recording state. */
+    const lc_pipeline *bound_pipeline; /* last bound, NULL at frame start */
+    int rp_open; /* render pass instance active in the command buffer */
+    int clear_pending; /* lc_clear_color stored but not yet consumed */
+    float clear_r;
+    float clear_g;
+    float clear_b;
+    float clear_a;
 
     /* Frame lifecycle (Phase 6). Pool/buffers/sync persist across
      * recreates; per-image tracking is rebuilt with the images. */
@@ -166,8 +183,6 @@ struct lc_swapchain {
     lc_vk_flight flights[LC_MAX_FRAMES_IN_FLIGHT];
     uint32_t current_frame; /* next flight slot, not an image index */
     VkFence *images_in_flight; /* per image: fence to wait before reuse */
-    uint8_t *image_initialized; /* per image: 1 once transitioned from
-                                 * PRESENT_SRC at least once */
     uint32_t current_image; /* acquired index, valid only mid-frame */
     int frame_active; /* exactly one open frame per swapchain max */
     int frame_suboptimal; /* acquire reported SUBOPTIMAL this frame */
@@ -210,6 +225,72 @@ lc_result lc_vulkan_frame_init(lc_swapchain *swapchain);
 /* Destroys frame objects (pool frees command buffers implicitly, then
  * semaphores and fences). Safe on empty/partial state. */
 void lc_vulkan_frame_teardown(lc_swapchain *swapchain);
+
+/* Record a pipeline bind, opening the render pass first if needed.
+ * The pipeline's compatibility was verified by the caller. */
+lc_result lc_vulkan_frame_bind(lc_swapchain *swapchain,
+                               const lc_pipeline *pipeline);
+
+/* Record a draw with the bound pipeline, opening the render pass
+ * first if needed. Requires a bound pipeline. */
+lc_result lc_vulkan_frame_draw(lc_swapchain *swapchain, uint32_t vertex_count,
+                               uint32_t first_vertex);
+
+/* Maximum entry-point name stored per shader (including NUL). */
+#define LC_SHADER_ENTRY_MAX 64
+
+/* Opaque public shader type, completed here. A shader belongs to one
+ * device; pipeline creation consumes only the module, so shaders may
+ * die while their pipelines live on. */
+struct lc_shader {
+    lc_device *device;
+    lc_shader_stage stage;
+    char entry_point[LC_SHADER_ENTRY_MAX]; /* normalized, NUL-terminated */
+    VkShaderModule module;
+    lc_shader *next;
+    lc_shader *prev;
+};
+
+/*
+ * Validate `desc` and create the VkShaderModule on a live device.
+ * On failure tears down whatever stage was reached; the caller still
+ * owns (and frees) the struct.
+ */
+lc_result lc_vulkan_shader_create(lc_shader *shader, lc_device *device,
+                                  const lc_shader_desc *desc);
+
+/* Destroys the VkShaderModule. Device must still be alive; callers
+ * guarantee ordering via device-teardown hooks. */
+void lc_vulkan_shader_destroy(lc_shader *shader);
+
+/* Opaque public pipeline type, completed here. A pipeline is created
+ * against one swapchain's color format (same fixed render-pass recipe
+ * everywhere, so format equality implies compatibility) but may be
+ * bound on any same-device, same-format swapchain. It is destroyed
+ * with its creation swapchain or its device, whichever goes first. */
+struct lc_pipeline {
+    lc_device *device;
+    lc_swapchain *swapchain; /* creation anchor for lifetime tracking */
+    VkPipelineLayout layout;
+    VkPipeline pipeline;
+    VkFormat format; /* must equal the target swapchain's format */
+    lc_pipeline *next;
+    lc_pipeline *prev;
+};
+
+/*
+ * Validate shaders (live, correctly staged, same device) and create
+ * the pipeline layout plus graphics pipeline against the swapchain's
+ * render pass. Consumes only module handles: shaders may be destroyed
+ * afterwards. On failure tears down partial state.
+ */
+lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
+                                    lc_swapchain *swapchain,
+                                    const lc_shader *vertex_shader,
+                                    const lc_shader *fragment_shader);
+
+/* Destroys pipeline then layout. Device must still be alive. */
+void lc_vulkan_pipeline_destroy(lc_pipeline *pipeline);
 
 /*
  * Begin a frame on a live, idle swapchain struct: wait for a flight

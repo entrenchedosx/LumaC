@@ -5,7 +5,7 @@ Lightweight cross-platform graphics API written in C11, with native Windows/Linu
 [![C11](https://img.shields.io/badge/C-C11-blue)](https://en.cppreference.com/w/c/11)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-![LumaC clear-screen example](docs/images/clear-screen.png)
+![LumaC triangle example](docs/images/triangle.png)
 
 ## Overview
 
@@ -13,12 +13,14 @@ LumaC is a small, explicit graphics API for games and graphical
 applications. It hides backend complexity (window-system integration,
 device selection, swapchain negotiation, frame synchronization) behind
 a handful of opaque handles — `lc_window`, `lc_device`, `lc_surface`,
-`lc_swapchain` — while staying close to the underlying API semantics.
-There is no engine, no scene graph, and no hidden global state beyond
-a small explicit tracking registry used for safe teardown ordering.
+`lc_swapchain`, `lc_shader`, `lc_pipeline` — while staying close to
+the underlying API semantics. There is no engine, no scene graph, and
+no hidden global state beyond a small explicit tracking registry used
+for safe teardown ordering.
 
 The current Vulkan backend can open a window, select a GPU, build a
-swapchain, and present cleared frames with validation layers clean.
+swapchain, and render a vertex-indexed RGB triangle with validation
+layers clean. Vertex buffers do not exist yet.
 
 ## Features
 
@@ -29,17 +31,21 @@ swapchain, and present cleared frames with validation layers clean.
 - Vulkan surfaces with present-queue discovery
 - Swapchains with capability-driven format/mode/extent selection,
   per-image views, and transactional recreation
-- Frame lifecycle: acquire, transfer clear, submit, present, with two
-  frames in flight and recoverable out-of-date/suboptimal handling
+- Frame lifecycle: acquire, clear, submit, present, with two frames
+  in flight and recoverable out-of-date/suboptimal handling
+- SPIR-V shader modules plus a minimal graphics pipeline (empty
+  layout, dynamic viewport/scissor, no culling) over a classic render
+  pass; `lc_bind_pipeline` + `lc_draw` record into the open frame
 - Explicit lifetime model: dependents are destroyed before the objects
-  they borrow; shutdown order is swapchains, surfaces, devices, windows
+  they borrow; shutdown order is pipelines, shaders, swapchains,
+  surfaces, devices, windows
 - Static or shared library builds; headless-safe unit tests plus
   Vulkan integration tests that skip cleanly without a GPU/display
 
 ## Current Status
 
-Early development (`0.1.0-dev`). Frame presentation works; there is no
-triangle rendering yet (no pipelines, shaders, buffers, or textures).
+Early development (`0.1.0-dev`). Triangle rendering works; there are
+no vertex buffers, textures, or descriptors yet.
 
 | Feature              | Windows          | Linux            |
 | -------------------- | ---------------- | ---------------- |
@@ -49,6 +55,8 @@ triangle rendering yet (no pipelines, shaders, buffers, or textures).
 | Vulkan surface       | Verified         | Runtime verified (XWayland) |
 | Swapchain            | Verified         | Runtime verified (lavapipe) |
 | Frame presentation   | Verified         | Runtime verified (lavapipe) |
+| Triangle rendering   | Verified         | Runtime verified (lavapipe) |
+| Shaders / pipeline   | Implemented      | Implemented (compiled clean) |
 | Validation layers    | Clean            | Not available in test env |
 | D3D12                | Planned          | N/A              |
 | Wayland              | N/A              | Planned          |
@@ -64,14 +72,14 @@ cmake --build build --config Debug
 ctest --test-dir build -C Debug --output-on-failure
 ```
 
-Run the clear-screen example (blank window renders a pulsing blue;
-resize, minimize, and close all behave):
+Run the triangle example (vertex-indexed RGB triangle over a dark
+background; resize, minimize, and close all behave):
 
 ```bash
 # Windows:
-.\build\examples\clear_screen\Debug\clear_screen.exe
+.\build\examples\triangle\Debug\triangle.exe
 # Linux:
-/build/clear_screen/clear_screen
+/build/triangle/triangle
 ```
 
 ## Building
@@ -110,7 +118,8 @@ Options:
 
 ## Example
 
-Real frame loop using the actual current API (`examples/clear_screen`):
+Real frame loop using the actual current API (`examples/triangle`,
+pipeline setup omitted for brevity):
 
 ```c
 #include <lumac/lumac.h>
@@ -140,7 +149,9 @@ int main(void)
         if (result != LC_SUCCESS) {
             break;
         }
-        lc_clear_color(swapchain, 0.08f, 0.12f, 0.20f, 1.0f);
+        lc_clear_color(swapchain, 0.08f, 0.10f, 0.16f, 1.0f);
+        lc_bind_pipeline(swapchain, pipeline);
+        lc_draw(swapchain, 3, 0);
         result = lc_end_frame(swapchain);
         if (result == LC_SUBOPTIMAL ||
             result == LC_ERROR_SWAPCHAIN_OUT_OF_DATE) {
@@ -164,6 +175,9 @@ int main(void)
 - Swapchain: `lc_swapchain_create/destroy/recreate`,
   `lc_swapchain_get_width/height/image_count`
 - Frame: `lc_begin_frame`, `lc_clear_color`, `lc_end_frame`
+- Shader: `lc_shader_create/destroy` (SPIR-V, vertex/fragment stages)
+- Pipeline: `lc_graphics_pipeline_create`, `lc_pipeline_destroy`,
+  `lc_bind_pipeline`, `lc_draw`
 
 See `include/lumac/lumac.h` for the authoritative documented API.
 
@@ -203,10 +217,9 @@ internal tracking lists — no reference counting, no global singletons.
 
 ## Roadmap
 
-- Triangle rendering (shader modules, graphics pipeline, vertex
-  buffers, render pass or dynamic rendering)
-- Frame acquisition/present helpers and frames-in-flight tuning
-- Uniform buffers, textures, samplers, descriptors, depth buffers
+- Vertex buffers, index buffers, uniform buffers
+- Textures, samplers, descriptors, depth buffers
+- Blend state and pipeline-state configuration API
 - D3D12 backend, Wayland surface support
 
 ## Repository Structure
@@ -214,9 +227,10 @@ internal tracking lists — no reference counting, no global singletons.
 ```
 LumaC/
 ├── .github/workflows/   # Windows + Linux CI
-├── docs/images/         # real captures (clear-screen.png)
+├── docs/images/         # real captures (triangle.png, clear-screen.png)
 ├── examples/            # basic_init, window, device_info,
-│                        # surface_info, swapchain_info, clear_screen
+│                        # surface_info, swapchain_info, clear_screen,
+│                        # triangle (+ shaders/)
 ├── include/lumac/       # public lumac.h
 ├── src/                 # core, platform, graphics, vulkan backend
 ├── tests/               # headless unit tests + Vulkan integration tests

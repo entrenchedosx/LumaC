@@ -21,7 +21,6 @@ option(LUMAC_BUILD_TESTS "Build LumaC tests" ON)
 find_package(Vulkan REQUIRED)
 
 # Library sources (platform-neutral + graphics + one Vulkan backend).
-# No acquire/present, command, sync, or rendering sources exist yet.
 set(LUMAC_SOURCES
     src/lumac.c
     src/window.c
@@ -29,10 +28,14 @@ set(LUMAC_SOURCES
     src/graphics/surface.c
     src/graphics/swapchain.c
     src/graphics/frame.c
+    src/graphics/shader.c
+    src/graphics/pipeline.c
     src/graphics/vulkan/vulkan_backend.c
     src/graphics/vulkan/vulkan_surface.c
     src/graphics/vulkan/vulkan_swapchain.c
     src/graphics/vulkan/vulkan_frame.c
+    src/graphics/vulkan/vulkan_shader.c
+    src/graphics/vulkan/vulkan_pipeline.c
 )
 
 # Platform backend selection (only the current OS backend is compiled)
@@ -100,6 +103,37 @@ if(LUMAC_BUILD_SHARED AND NOT MSVC)
     # Public API uses LC_API with default visibility
 endif()
 
+# Triangle shaders: committed SPIR-V is always staged into the build
+# tree; when glslc exists it recompiles the GLSL sources instead, so
+# the binaries never drift from source. Only the triangle example and
+# its test consume these files; the library never needs a compiler.
+set(LC_SPV_DIR "${CMAKE_BINARY_DIR}/lumac_shaders")
+file(MAKE_DIRECTORY "${LC_SPV_DIR}")
+file(COPY
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/triangle/shaders/triangle.vert.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/triangle/shaders/triangle.frag.spv"
+    DESTINATION "${LC_SPV_DIR}")
+find_program(LC_GLSLC glslc HINTS "$ENV{VULKAN_SDK}/Bin")
+if(LC_GLSLC)
+    add_custom_command(
+        OUTPUT
+            "${LC_SPV_DIR}/triangle.vert.spv"
+            "${LC_SPV_DIR}/triangle.frag.spv"
+        COMMAND "${LC_GLSLC}" -fshader-stage=vert
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/triangle/shaders/triangle.vert"
+            -o "${LC_SPV_DIR}/triangle.vert.spv"
+        COMMAND "${LC_GLSLC}" -fshader-stage=frag
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/triangle/shaders/triangle.frag"
+            -o "${LC_SPV_DIR}/triangle.frag.spv"
+        DEPENDS
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/triangle/shaders/triangle.vert"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/triangle/shaders/triangle.frag"
+        COMMENT "Compiling LumaC triangle shaders")
+    add_custom_target(lumac_triangle_shaders DEPENDS
+        "${LC_SPV_DIR}/triangle.vert.spv"
+        "${LC_SPV_DIR}/triangle.frag.spv")
+endif()
+
 # Examples
 if(LUMAC_BUILD_EXAMPLES)
     add_subdirectory(examples/basic_init)
@@ -108,6 +142,7 @@ if(LUMAC_BUILD_EXAMPLES)
     add_subdirectory(examples/surface_info)
     add_subdirectory(examples/swapchain_info)
     add_subdirectory(examples/clear_screen)
+    add_subdirectory(examples/triangle)
 endif()
 
 # Tests
@@ -180,4 +215,30 @@ if(LUMAC_BUILD_TESTS)
     target_link_libraries(test_frame_vulkan PRIVATE lumac)
     target_include_directories(test_frame_vulkan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     add_test(NAME test_frame_vulkan COMMAND test_frame_vulkan)
+
+    # Headless-safe: validates shader argument/SPIR-V handling, never
+    # touches Vulkan
+    add_executable(test_shader tests/test_shader.c)
+    target_link_libraries(test_shader PRIVATE lumac)
+    target_include_directories(test_shader PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    add_test(NAME test_shader COMMAND test_shader)
+
+    # Headless-safe: validates pipeline argument handling, never touches
+    # Vulkan
+    add_executable(test_pipeline tests/test_pipeline.c)
+    target_link_libraries(test_pipeline PRIVATE lumac)
+    target_include_directories(test_pipeline PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    add_test(NAME test_pipeline COMMAND test_pipeline)
+
+    # Integration: real SPIR-V modules, pipeline creation, triangle
+    # rendering (120 frames, resize, minimize, two windows); needs
+    # display + Vulkan + GPU, skips otherwise.
+    add_executable(test_triangle_vulkan tests/test_triangle_vulkan.c)
+    target_link_libraries(test_triangle_vulkan PRIVATE lumac)
+    target_include_directories(test_triangle_vulkan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_definitions(test_triangle_vulkan PRIVATE LC_TRIANGLE_SPV_DIR="${LC_SPV_DIR}")
+    if(TARGET lumac_triangle_shaders)
+        add_dependencies(test_triangle_vulkan lumac_triangle_shaders)
+    endif()
+    add_test(NAME test_triangle_vulkan COMMAND test_triangle_vulkan)
 endif()

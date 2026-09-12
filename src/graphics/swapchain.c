@@ -179,6 +179,9 @@ void lc_swapchain_destroy(lc_swapchain *swapchain) {
     if (swapchain == NULL) {
         return;
     }
+    /* Pipelines anchored here die first; their layouts and pipelines
+     * are device children but their compatibility anchor is gone. */
+    lc_pipeline_destroy_for_swapchain(swapchain);
     lc_swapchain_list_remove(swapchain);
     /* Image teardown waits idle, so no submission is pending when the
      * pool, semaphores, and fences below are destroyed - even if the
