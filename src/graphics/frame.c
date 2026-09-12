@@ -151,6 +151,52 @@ lc_result lc_bind_vertex_buffer(lc_swapchain *swapchain, uint32_t binding,
     return lc_vulkan_frame_bind_vertex(swapchain, binding, buffer, offset);
 }
 
+static int lc_is_live_binding_set(const lc_binding_set *set) {
+    lc_state *state = lc_get_internal_state();
+    const lc_binding_set *it;
+
+    if (state == NULL || set == NULL) {
+        return 0;
+    }
+    for (it = state->binding_sets; it != NULL; it = it->next) {
+        if (it == set) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+lc_result lc_bind_binding_set(lc_swapchain *swapchain, lc_pipeline *pipeline,
+                              uint32_t slot, lc_binding_set *set) {
+    lc_state *state = lc_get_internal_state();
+
+    if (swapchain == NULL || pipeline == NULL || set == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (state == NULL || !state->initialized) {
+        return LC_ERROR_NOT_INITIALIZED;
+    }
+    if (!lc_is_live_swapchain(swapchain) ||
+        !lc_pipeline_is_live(pipeline) || !lc_is_live_binding_set(set)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!swapchain->frame_active) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    /* Same device everywhere; the set's layout anchor must be the
+     * pipeline's anchor at this slot (pointer comparison only, never
+     * dereferencing dead layouts). */
+    if (pipeline->device != swapchain->device ||
+        set->device != swapchain->device) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (slot >= pipeline->layout_count ||
+        set->layout != pipeline->layouts[slot]) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    return lc_vulkan_frame_bind_set(swapchain, pipeline, slot, set);
+}
+
 lc_result lc_draw(lc_swapchain *swapchain, uint32_t vertex_count,
                   uint32_t first_vertex) {
     lc_state *state = lc_get_internal_state();

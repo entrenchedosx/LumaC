@@ -35,7 +35,10 @@ typedef struct lc_state {
     lc_pipeline *pipelines;
     lc_buffer *buffers;
     lc_image *images;
+    lc_image_view *image_views;
     lc_sampler *samplers;
+    lc_binding_layout *binding_layouts;
+    lc_binding_set *binding_sets;
 } lc_state;
 
 /* Accessor for the single process-wide state (see src/lumac.c) */
@@ -121,6 +124,34 @@ void lc_sampler_destroy_all(void);
 /* Destroys all samplers owned by a device being torn down.
  * Called by lc_device_destroy(). See src/graphics/sampler.c. */
 void lc_sampler_destroy_for_device(const lc_device *device);
+
+/* Destroys all live image views. Called by lc_shutdown().
+ * See src/graphics/image_view.c. */
+void lc_image_view_destroy_all(void);
+
+/* Destroys all views of one image being torn down.
+ * Called by lc_image_destroy(). See src/graphics/image_view.c. */
+void lc_image_view_destroy_for_image(const lc_image *image);
+
+/* Destroys all views owned by a device being torn down.
+ * Called by lc_device_destroy(). See src/graphics/image_view.c. */
+void lc_image_view_destroy_for_device(const lc_device *device);
+
+/* Destroys all live binding layouts. Called by lc_shutdown().
+ * See src/graphics/binding.c. */
+void lc_binding_layout_destroy_all(void);
+
+/* Destroys all binding layouts owned by a device being torn down.
+ * Called by lc_device_destroy(). See src/graphics/binding.c. */
+void lc_binding_layout_destroy_for_device(const lc_device *device);
+
+/* Destroys all live binding sets. Called by lc_shutdown().
+ * See src/graphics/binding.c. */
+void lc_binding_set_destroy_all(void);
+
+/* Destroys all binding sets owned by a device being torn down.
+ * Called by lc_device_destroy(). See src/graphics/binding.c. */
+void lc_binding_set_destroy_for_device(const lc_device *device);
 
 /* Default title used when lc_window_desc.title is NULL */
 #define LC_DEFAULT_TITLE "LumaC"

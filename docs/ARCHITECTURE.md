@@ -34,12 +34,20 @@ Applications / Games / Editors / UI / Engines / Visualization
   they survive swapchain recreation.
 - **Images** (`src/graphics/image.c`, `vulkan_image.c`): 1D/2D/3D
   GPU images with mips, array layers, and cube-compatible structure;
-  default full-resource views; whole-image layout tracking (documented
-  limitation vs future per-subresource state); staging uploads and GPU
-  mipmap generation through the shared upload context.
+  default full-resource views plus explicit subresource views;
+  per-subresource layout tracking; staging uploads and GPU mipmap
+  generation through the shared upload context.
+- **Image views** (`src/graphics/image_view.c`): mip/layer ranges,
+  cube/depth aspects, format rules; borrowed by images.
 - **Samplers** (`src/graphics/sampler.c`): standalone sampling
   configuration (filters, mipmap modes, address modes, LODs,
-  capability-gated anisotropy). No bindings yet by design.
+  capability-gated anisotropy).
+- **Resource binding** (`src/graphics/binding.c`,
+  `vulkan_binding.c`): binding layouts (slots with types, counts,
+  visibility) map to set layouts; binding sets allocate from a
+  private growable device descriptor allocator; validated batched
+  updates; pipelines take ordered layout slots shared with D3D12
+  root-signature slots; per-frame set binds are recorded openly.
 - **Shaders** (`src/graphics/shader.c`): SPIR-V (Vulkan) / bytecode
   modules. Independent after pipeline creation.
 - **Pipelines** (`src/graphics/pipeline.c`): vertex+fragment pair
@@ -65,10 +73,12 @@ Applications / Games / Editors / UI / Engines / Visualization
 - Caller-created handles are caller-owned (`lc_*_destroy`).
 - A handle borrows what it was built from; dependents die first,
   enforced by internal tracking lists (no reference counting):
-  `pipelines -> shaders -> samplers -> images -> buffers ->
-  swapchains -> surfaces -> devices -> windows -> core`. (Shaders are
-  independent of pipelines post-creation but still die before their
-  device; images/samplers are device children like buffers.)
+  `pipelines -> binding sets -> binding layouts -> shaders ->
+  samplers -> image views -> images -> buffers -> swapchains ->
+  surfaces -> devices -> windows -> core`. (Shaders are independent of
+  pipelines post-creation but still die before their device; binding
+  anchors are compared, never dereferenced, so dead layouts fail
+  closed. Images/samplers are device children like buffers.)
 - Destroying a parent first auto-destroys dependents; shutdown
   follows the same order.
 
@@ -76,7 +86,9 @@ Applications / Games / Editors / UI / Engines / Visualization
 
 - One graphics backend today (Vulkan). Public concepts are chosen to
   map onto D3D12 as well: buffers/usages/memory-model, formats,
-  vertex bindings/attributes, fences/semaphores-behind-frames.
+  vertex bindings/attributes, binding layouts/sets (root
+  signatures/tables, CBV/SRV/UAV/samplers),
+  fences/semaphores-behind-frames.
 - Format translation and memory-type selection are centralized
   helpers, not scattered switches.
 - Future backends (D3D12, possibly Metal/WebGPU) reuse the public
@@ -106,3 +118,33 @@ Applications / Games / Editors / UI / Engines / Visualization
    swapchain by documented policy; recovery is roadmap work.
 7. **Coarse `vkDeviceWaitIdle` on teardown/recreate paths.** Correct
    and rare (never per-frame); finer-grained sync is future work.
+8. **Binding-layout anchor discipline.** Pipelines and sets hold
+   non-owning layout pointers compared (never dereferenced) at bind
+   time; destroying a layout first invalidates dependents, rejected
+   where detectable, with Vulkan validation as backstop. Acceptable
+   pre-1.0; revisit only if real use hits the edge.
+
+## Renderer layering (future)
+
+LumaC core stays a low-level graphics API. A future Luma Renderer
+layer (separate headers, same C ABI discipline) will own meshes,
+materials, cameras, lights, PBR, shadows, IBL, post-processing,
+render graphs, culling, and GPU-driven rendering on top of it:
+
+```
+LumaC Core Graphics API (this repository)
+    |
+    v
+future Luma Renderer
+    |
+    +---- Global bindings (camera, scene lighting)
+    +---- Material bindings (base color, normal, metallic/roughness,
+    |      sampler)
+    +---- Object data (transform, object ID)
+    +---- Large scene buffers (storage buffers)
+```
+
+Likely resource pattern: one global set (camera + lights), one set
+per material (textures + samplers), per-object uniform/storage data —
+all expressible with today's binding layouts, sets, and arrays. No
+high-level system is implemented here on purpose.

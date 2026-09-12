@@ -514,6 +514,9 @@ LC_API void lc_shader_destroy(lc_shader *shader);
 /* Opaque graphics-pipeline handle. Never dereference; use API below. */
 typedef struct lc_pipeline lc_pipeline;
 
+/* Opaque binding-layout handle (defined below); pipeline slots reference it. */
+typedef struct lc_binding_layout lc_binding_layout;
+
 /* -------------------------------------------------------------------------
  * Format system (Phase 8: backend-neutral GPU formats)
  *
@@ -582,9 +585,12 @@ typedef struct lc_vertex_attribute_desc {
 
 /* Minimal graphics-pipeline description. Both shaders are required.
  * Optional vertex input: zero counts mean no vertex buffers (shader
- * vertex-index generation, as in the first triangle). Counts are
- * validated against device limits at creation. Zero-initialize the
- * whole struct (e.g. `= { 0 }`) and set the fields you use. */
+ * vertex-index generation, as in the first triangle). Optional
+ * resource slots: an ordered array of binding layouts, indexed by
+ * slot at bind time (backend-neutral numbering shared with D3D12
+ * root-signature slots). Counts are validated at creation.
+ * Zero-initialize the whole struct (e.g. `= { 0 }`) and set the
+ * fields you use. */
 typedef struct lc_graphics_pipeline_desc {
     lc_shader *vertex_shader;
     lc_shader *fragment_shader;
@@ -592,6 +598,8 @@ typedef struct lc_graphics_pipeline_desc {
     uint32_t vertex_binding_count;
     const lc_vertex_attribute_desc *vertex_attributes;
     uint32_t vertex_attribute_count;
+    const lc_binding_layout *const *binding_layouts;
+    uint32_t binding_layout_count;
 } lc_graphics_pipeline_desc;
 
 /**
@@ -791,6 +799,9 @@ typedef struct lc_device_limits {
     uint64_t max_uniform_buffer_size;
     uint32_t max_image_array_layers;
     float max_sampler_anisotropy;
+    uint32_t min_uniform_buffer_offset_alignment;
+    uint32_t min_storage_buffer_offset_alignment;
+    uint32_t max_bound_resource_slots;
 } lc_device_limits;
 
 /**
@@ -1036,6 +1047,222 @@ LC_API lc_result lc_sampler_create(
  * Destroy a sampler. Safe to call with NULL.
  */
 LC_API void lc_sampler_destroy(lc_sampler *sampler);
+
+/* -------------------------------------------------------------------------
+ * Image view API (Phase 10: subresource views for binding)
+ *
+ * A view selects a type, aspect, mip range, and layer range of one
+ * image. Binding sets reference views, never images directly, so mip
+ * chains, array slices, cubemaps, and depth aspects are all
+ * addressable. Threading: main thread only.
+ * ------------------------------------------------------------------------- */
+
+/* Opaque image-view handle. Never dereference; use API below. */
+typedef struct lc_image_view lc_image_view;
+
+/* Backend-neutral view dimensionality. */
+typedef enum lc_image_view_type {
+    LC_IMAGE_VIEW_1D = 0,
+    LC_IMAGE_VIEW_1D_ARRAY = 1,
+    LC_IMAGE_VIEW_2D = 2,
+    LC_IMAGE_VIEW_2D_ARRAY = 3,
+    LC_IMAGE_VIEW_3D = 4,
+    LC_IMAGE_VIEW_CUBE = 5,
+    LC_IMAGE_VIEW_CUBE_ARRAY = 6
+} lc_image_view_type;
+
+/* Backend-neutral aspect selection (bitmask, combine with |). */
+typedef enum lc_image_aspect {
+    LC_IMAGE_ASPECT_COLOR   = 1 << 0,
+    LC_IMAGE_ASPECT_DEPTH   = 1 << 1,
+    LC_IMAGE_ASPECT_STENCIL = 1 << 2
+} lc_image_aspect;
+
+/* View creation parameters. `format` may be LC_FORMAT_UNDEFINED to use
+ * the image format (no reinterpretation beyond exact match yet).
+ * Ranges must fit the image: base + count within mips/layers. */
+typedef struct lc_image_view_desc {
+    lc_image_view_type type;
+    lc_format format;
+    uint32_t aspect;
+    uint32_t base_mip_level;
+    uint32_t mip_level_count;
+    uint32_t base_array_layer;
+    uint32_t array_layer_count;
+} lc_image_view_desc;
+
+/**
+ * Create a view of a live image. The view borrows its image; the
+ * image must outlive it (destroying an image destroys its views).
+ *
+ * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
+ *         LC_ERROR_INVALID_ARGUMENT (NULL image/desc/out, dead image,
+ *         unknown type, aspect incompatible with the format, empty or
+ *         overflowing ranges, cube rules violated, format mismatch),
+ *         LC_ERROR_OUT_OF_MEMORY, LC_ERROR_IMAGE_CREATION_FAILED.
+ */
+LC_API lc_result lc_image_view_create(
+    lc_image *image,
+    const lc_image_view_desc *desc,
+    lc_image_view **out_view
+);
+
+/**
+ * Destroy an image view. Safe to call with NULL.
+ */
+LC_API void lc_image_view_destroy(lc_image_view *view);
+
+/* -------------------------------------------------------------------------
+ * Resource binding API (Phase 10: backend-neutral descriptors)
+ *
+ * A binding layout describes what resources shaders expect (numbered
+ * slots with types, counts, visibility). A binding set is a layout
+ * instance populated with buffers, image views, and samplers. Neither
+ * concept names Vulkan descriptor sets or D3D12 heaps; backends map
+ * them (Vulkan: set layouts/pools/sets; D3D12: root signature/tables).
+ * Threading: main thread only.
+ * ------------------------------------------------------------------------- */
+
+/* Backend-neutral shader visibility (bitmask, combine with |). */
+typedef enum lc_shader_visibility {
+    LC_SHADER_VISIBILITY_VERTEX   = 1 << 0,
+    LC_SHADER_VISIBILITY_FRAGMENT = 1 << 1,
+    LC_SHADER_VISIBILITY_COMPUTE  = 1 << 2,
+    LC_SHADER_VISIBILITY_ALL_GRAPHICS =
+        (1 << 0) | (1 << 1),
+    LC_SHADER_VISIBILITY_ALL = (1 << 0) | (1 << 1) | (1 << 2)
+} lc_shader_visibility;
+
+/* Backend-neutral resource slot types. */
+typedef enum lc_binding_type {
+    LC_BINDING_UNIFORM_BUFFER = 0,
+    LC_BINDING_STORAGE_BUFFER = 1,
+    LC_BINDING_SAMPLED_IMAGE = 2,
+    LC_BINDING_STORAGE_IMAGE = 3,
+    LC_BINDING_SAMPLER = 4
+} lc_binding_type;
+
+
+/* One numbered resource slot: `count` prepares for arrays (count >= 1
+ * always; descriptor arrays map structurally). */
+typedef struct lc_binding_desc {
+    uint32_t binding;
+    lc_binding_type type;
+    uint32_t count;
+    uint32_t visibility;
+} lc_binding_desc;
+
+/* Binding-layout description: an unordered set of slots. */
+typedef struct lc_binding_layout_desc {
+    const lc_binding_desc *bindings;
+    uint32_t binding_count;
+} lc_binding_layout_desc;
+
+/**
+ * Create a binding layout on a device. Requires lc_init() first and a
+ * live device.
+ *
+ * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
+ *         LC_ERROR_INVALID_ARGUMENT (NULL device/desc/out, NULL
+ *         bindings with nonzero count, duplicate binding numbers,
+ *         count == 0, unknown type or visibility bits, over device
+ *         limits, dead device), LC_ERROR_OUT_OF_MEMORY.
+ */
+LC_API lc_result lc_binding_layout_create(
+    lc_device *device,
+    const lc_binding_layout_desc *desc,
+    lc_binding_layout **out_layout
+);
+
+/**
+ * Destroy a binding layout. Safe to call with NULL. Pipelines and
+ * sets built from it hold no reference: destroying a layout first
+ * invalidates them for binding (rejected where detectable).
+ */
+LC_API void lc_binding_layout_destroy(lc_binding_layout *layout);
+
+/* Opaque binding-set handle. Never dereference; use API below. */
+typedef struct lc_binding_set lc_binding_set;
+
+/**
+ * Create an empty binding set from a live layout. No pipeline needed.
+ *
+ * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
+ *         LC_ERROR_INVALID_ARGUMENT (NULL layout/out, dead layout),
+ *         LC_ERROR_OUT_OF_MEMORY.
+ */
+LC_API lc_result lc_binding_set_create(
+    lc_binding_layout *layout,
+    lc_binding_set **out_set
+);
+
+/**
+ * Destroy a binding set, freeing its descriptor allocation.
+ * Safe to call with NULL.
+ */
+LC_API void lc_binding_set_destroy(lc_binding_set *set);
+
+/* One buffer range for a binding write. `size` == 0 binds the whole
+ * buffer from `offset` (explicit whole-size naming deferred). */
+typedef struct lc_buffer_binding {
+    lc_buffer *buffer;
+    uint64_t offset;
+    uint64_t size;
+} lc_buffer_binding;
+
+/* One image view for a binding write. */
+typedef struct lc_image_binding {
+    lc_image_view *view;
+} lc_image_binding;
+
+/* One sampler for a binding write. */
+typedef struct lc_sampler_binding {
+    lc_sampler *sampler;
+} lc_sampler_binding;
+
+/* One slot update. Only the member matching `type` is read. */
+typedef struct lc_binding_write {
+    uint32_t binding;
+    uint32_t array_element;
+    lc_binding_type type;
+    union {
+        lc_buffer_binding buffer;
+        lc_image_binding image;
+        lc_sampler_binding sampler;
+    } u;
+} lc_binding_write;
+
+/**
+ * Write resources into a live binding set. Validates every write
+ * (slot exists, type matches, array bounds, buffer ranges, device
+ * match, resource liveness) before recording anything.
+ *
+ * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
+ *         LC_ERROR_INVALID_ARGUMENT (NULL set, NULL writes with
+ *         nonzero count, dead set, unknown binding/type, element
+ *         overflow, dead/mismatched resources, bad ranges),
+ *         LC_ERROR_OUT_OF_MEMORY.
+ */
+LC_API lc_result lc_binding_set_update(
+    lc_binding_set *set,
+    const lc_binding_write *writes,
+    uint32_t write_count
+);
+
+/**
+ * Bind a resource set at a pipeline slot during an open frame.
+ * The set's layout must be the pipeline's layout at `slot`.
+ *
+ * @return LC_SUCCESS, LC_ERROR_INVALID_ARGUMENT (NULL/dead handles,
+ *         no open frame, cross-device use, slot out of range,
+ *         layout mismatch).
+ */
+LC_API lc_result lc_bind_binding_set(
+    lc_swapchain *swapchain,
+    lc_pipeline *pipeline,
+    uint32_t slot,
+    lc_binding_set *set
+);
 
 #ifdef __cplusplus
 }

@@ -78,15 +78,18 @@ void lc_device_destroy(lc_device *device) {
     if (device == NULL) {
         return;
     }
-    /* Dependents first: pipelines, shaders, samplers, images, buffers,
-     * swapchains, then surfaces. vkDestroySwapchainKHR and
+    /* Dependents first: pipelines, binding sets and layouts, shaders,
+     * samplers, images (with views), buffers, swapchains, then
+     * surfaces. Descriptor pools die inside lc_vulkan_device_destroy,
+     * after every set is freed. vkDestroySwapchainKHR and
      * vkDestroySurfaceKHR both need the logical device / instance,
-     * which die with the device below. Buffers, images, and the upload
-     * context die before VkDevice; the upload teardown runs inside
-     * lc_vulkan_device_destroy. */
+     * which die with the device below. */
     lc_pipeline_destroy_for_device(device);
+    lc_binding_set_destroy_for_device(device);
+    lc_binding_layout_destroy_for_device(device);
     lc_shader_destroy_for_device(device);
     lc_sampler_destroy_for_device(device);
+    lc_image_view_destroy_for_device(device);
     lc_image_destroy_for_device(device);
     lc_buffer_destroy_for_device(device);
     lc_swapchain_destroy_for_device(device);

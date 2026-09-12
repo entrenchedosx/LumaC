@@ -80,6 +80,14 @@ struct lc_device {
      * (see lc_device_get_limits). Nothing else is enabled: features
      * stay minimal and deliberate. */
     int anisotropy_supported;
+
+    /* Device-level descriptor allocator (lazy): growable Vulkan pools
+     * backing binding-set allocation. Completely private; pools die
+     * with the device. Sets are individually freeable, so pools carry
+     * FREE_DESCRIPTOR_SET_BIT. */
+    VkDescriptorPool *desc_pools;
+    uint32_t desc_pool_count;
+    uint32_t desc_pool_capacity;
 };
 
 /* Opaque public buffer type, completed here. A buffer belongs to one
@@ -302,13 +310,18 @@ void lc_vulkan_shader_destroy(lc_shader *shader);
  * against one swapchain's color format (same fixed render-pass recipe
  * everywhere, so format equality implies compatibility) but may be
  * bound on any same-device, same-format swapchain. It is destroyed
- * with its creation swapchain or its device, whichever goes first. */
+ * with its creation swapchain or its device, whichever goes first.
+ * Binding-layout anchors (non-owning, malloc'd array) identify the
+ * resource slots; bind-time checks compare anchors, never dereference
+ * dead layouts. */
 struct lc_pipeline {
     lc_device *device;
     lc_swapchain *swapchain; /* creation anchor for lifetime tracking */
     VkPipelineLayout layout;
     VkPipeline pipeline;
     VkFormat format; /* must equal the target swapchain's format */
+    const lc_binding_layout **layouts; /* slot anchors, malloc'd (maybe NULL) */
+    uint32_t layout_count;
     lc_pipeline *next;
     lc_pipeline *prev;
 };
@@ -423,11 +436,12 @@ struct lc_image {
     VkDeviceMemory vk_memory;
     VkImageView default_view;
 
-    /* Whole-image layout tracking. Every transition helper moves all
-     * mips and layers together. Future render-target and compute use
-     * will need per-subresource state; until then this is the single
-     * source of truth and uploads/mips always leave defined states. */
-    VkImageLayout layout;
+    /* Per-subresource layout tracking: entry [layer * mip_levels + mip]
+     * for every mip of every layer (malloc'd). Uploads, mip generation,
+     * and transitions keep each entry truthful, so mixed states (e.g.
+     * mid-mipmap-dance) are representable and the next transition
+     * always names a correct old layout. */
+    VkImageLayout *layouts;
 
     lc_image *next;
     lc_image *prev;
@@ -448,11 +462,54 @@ void lc_vulkan_image_destroy(lc_image *image);
 
 /*
  * Transition the whole image to a new layout on the upload context
- * (immediate submit). Records one barrier over all mips/layers with
- * stage/access masks suited to the endpoints. Unknown transitions
- * fail rather than emit invalid barriers.
+ * (immediate submit, one barrier per subresource). Each entry moves
+ * from its tracked layout with stage/access masks suited to the
+ * endpoints; `visibility` selects stages for SHADER_READ endpoints
+ * (0 defaults to fragment). Unknown endpoints fail rather than emit
+ * invalid barriers. Tracked state follows only on success.
  */
-lc_result lc_vulkan_image_transition(lc_image *image, VkImageLayout new_layout);
+lc_result lc_vulkan_image_transition(lc_image *image, VkImageLayout new_layout,
+                                     uint32_t visibility);
+
+/*
+ * Transition an explicit mip/layer range from an explicit old layout
+ * (one barrier, immediate submit). Used by mip generation, where
+ * levels temporarily diverge. The range's tracked entries must all
+ * equal old_layout; they are updated only on success.
+ */
+lc_result lc_vulkan_image_transition_range(
+    lc_image *image, uint32_t base_mip, uint32_t level_count,
+    uint32_t base_layer, uint32_t layer_count, VkImageLayout old_layout,
+    VkImageLayout new_layout, uint32_t visibility);
+
+/* Opaque public image-view type, completed here. A view borrows its
+ * image (and thereby its device); image teardown destroys dependent
+ * views first. Views carry no layout state themselves. */
+struct lc_image_view {
+    lc_device *device;
+    lc_image *image;
+    lc_image_view_type type;
+    lc_format format;
+    uint32_t aspect; /* lc_image_aspect bits, as requested */
+    uint32_t base_mip_level;
+    uint32_t mip_level_count;
+    uint32_t base_array_layer;
+    uint32_t array_layer_count;
+    VkImageView vk_view;
+    lc_image_view *next;
+    lc_image_view *prev;
+};
+
+/*
+ * Validate `desc` against the live image (type/dimension match, aspect
+ * vs format, ranges, cube rules, format equality) and create the
+ * VkImageView. On failure the struct stays empty; the caller owns it.
+ */
+lc_result lc_vulkan_image_view_create(lc_image_view *view, lc_image *image,
+                                      const lc_image_view_desc *desc);
+
+/* Destroys the VkImageView. Device must still be alive. */
+void lc_vulkan_image_view_destroy(lc_image_view *view);
 
 /* Upload one tightly packed mip/layer region via staging. Assumes the
  * caller validated liveness, range, size, and TRANSFER_DST usage. */
@@ -512,5 +569,78 @@ lc_result lc_vulkan_frame_clear(lc_swapchain *swapchain, float r, float g,
  * index. Maps out-of-date/suboptimal to recoverable results.
  */
 lc_result lc_vulkan_frame_end(lc_swapchain *swapchain);
+
+/* Opaque public binding-layout type, completed here. Device-owned;
+ * pipelines and sets built from it hold non-owning anchors (see
+ * binding.c), so destroying a layout first invalidates them for
+ * binding, rejected where detectable. */
+struct lc_binding_layout {
+    lc_device *device;
+    lc_binding_desc *bindings; /* sorted copy, malloc'd */
+    uint32_t binding_count;
+    VkDescriptorSetLayout vk_layout;
+    lc_binding_layout *next;
+    lc_binding_layout *prev;
+};
+
+/*
+ * Validate `desc` (counts, duplicates, types, visibility, device
+ * limits) and create the VkDescriptorSetLayout. Sorted internal copy
+ * of the slots. On failure the struct stays empty.
+ */
+lc_result lc_vulkan_binding_layout_create(lc_binding_layout *layout,
+                                          lc_device *device,
+                                          const lc_binding_layout_desc *desc);
+
+/* Destroys the VkDescriptorSetLayout. Device must still be alive. */
+void lc_vulkan_binding_layout_destroy(lc_binding_layout *layout);
+
+/* Destroys all descriptor pools (all sets must already be freed via
+ * hooks). Called by lc_vulkan_device_destroy(). Safe on empty state. */
+void lc_vulkan_desc_teardown(lc_device *device);
+
+/* Opaque public binding-set type, completed here. References (never
+ * owns) its layout and resources; the set's VkDescriptorSet is freed
+ * back to the device allocator on destroy. The slot snapshot (copied
+ * at creation) keeps updates valid even if the layout object dies
+ * first; slot matching at bind time still uses the anchor. */
+struct lc_binding_set {
+    lc_device *device;
+    const lc_binding_layout *layout; /* creation anchor, non-owning */
+    lc_binding_desc *slots; /* sorted snapshot copy, malloc'd (maybe NULL) */
+    uint32_t slot_count;
+    VkDescriptorSet vk_set;
+    VkDescriptorPool vk_pool; /* owning pool, for individual free */
+    lc_binding_set *next;
+    lc_binding_set *prev;
+};
+
+/*
+ * Allocate a descriptor set for a live layout from the device
+ * allocator. On failure the struct stays empty.
+ */
+lc_result lc_vulkan_binding_set_create(lc_binding_set *set,
+                                       const lc_binding_layout *layout);
+
+/* Frees the descriptor allocation. Device must still be alive. */
+void lc_vulkan_binding_set_destroy(lc_binding_set *set);
+
+/*
+ * Validate every write against the set's layout (slot, type, array
+ * bounds, buffer ranges, device match, liveness) into temporary
+ * Vulkan structs, then record them with a single
+ * vkUpdateDescriptorSets call. All-or-nothing: a bad write leaves
+ * prior updates of the same call unrecorded. Image bindings require
+ * sampled-readable tracked state over the view's range.
+ */
+lc_result lc_vulkan_binding_set_update(lc_binding_set *set,
+                                       const lc_binding_write *writes,
+                                       uint32_t write_count);
+
+/* Record a descriptor-set bind at a pipeline slot. Compatibility was
+ * verified by the caller (exact layout anchor match). */
+lc_result lc_vulkan_frame_bind_set(lc_swapchain *swapchain,
+                                   const lc_pipeline *pipeline,
+                                   uint32_t slot, const lc_binding_set *set);
 
 #endif /* LUMAC_GRAPHICS_INTERNAL_H */

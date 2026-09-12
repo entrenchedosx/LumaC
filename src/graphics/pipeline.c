@@ -147,6 +147,12 @@ lc_result lc_graphics_pipeline_create(
         *out_pipeline = NULL;
         return LC_ERROR_INVALID_ARGUMENT;
     }
+    /* Binding-layout array must accompany a nonzero slot count
+     * (liveness and content validated by the backend). */
+    if (desc->binding_layout_count > 0 && desc->binding_layouts == NULL) {
+        *out_pipeline = NULL;
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
 
     pipeline = (lc_pipeline *)calloc(1, sizeof(lc_pipeline));
     if (pipeline == NULL) {

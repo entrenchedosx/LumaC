@@ -338,7 +338,31 @@ lc_result lc_vulkan_image_create(lc_image *image, lc_device *device,
         return LC_ERROR_IMAGE_CREATION_FAILED;
     }
 
-    image->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    /* Per-subresource layouts, all UNDEFINED. Sized mips x layers so
+     * mixed states stay representable and truthful. */
+    image->layouts = (VkImageLayout *)calloc(
+        (size_t)image->mip_levels * (size_t)image->array_layers,
+        sizeof(VkImageLayout));
+    if (image->layouts == NULL) {
+        vkDestroyImageView(device->device, image->default_view, NULL);
+        image->default_view = VK_NULL_HANDLE;
+        vkFreeMemory(device->device, image->vk_memory, NULL);
+        image->vk_memory = VK_NULL_HANDLE;
+        vkDestroyImage(device->device, image->vk_image, NULL);
+        image->vk_image = VK_NULL_HANDLE;
+        return LC_ERROR_OUT_OF_MEMORY;
+    }
+    {
+        uint32_t m;
+        uint32_t l;
+
+        for (l = 0; l < image->array_layers; l++) {
+            for (m = 0; m < image->mip_levels; m++) {
+                image->layouts[(size_t)l * image->mip_levels + m] =
+                    VK_IMAGE_LAYOUT_UNDEFINED;
+            }
+        }
+    }
     return LC_SUCCESS;
 }
 
@@ -350,6 +374,12 @@ void lc_vulkan_image_destroy(lc_image *image) {
     }
     if (image->device != NULL) {
         device_handle = image->device->device;
+    }
+    /* Layout tracking is host memory; free it on every path. Views are
+     * destroyed by image_view.c hooks before this runs. */
+    if (image->layouts != NULL) {
+        free(image->layouts);
+        image->layouts = NULL;
     }
     if (device_handle == VK_NULL_HANDLE) {
         image->default_view = VK_NULL_HANDLE;
@@ -371,22 +401,75 @@ void lc_vulkan_image_destroy(lc_image *image) {
     }
 }
 
-/*
- * Whole-image layout transition on the upload context. Stage/access
- * masks pair each supported endpoint; anything else fails rather than
- * emitting an invalid barrier. On success the tracked layout follows.
- */
-lc_result lc_vulkan_image_transition(lc_image *image,
-                                     VkImageLayout new_layout) {
+/* Stage selection for SHADER_READ endpoints from visibility flags
+ * (0 defaults to fragment, preserving historical behavior). */
+static VkPipelineStageFlags lc_vk_visible_stages(uint32_t visibility) {
+    VkPipelineStageFlags stages = 0;
+
+    if ((visibility & LC_SHADER_VISIBILITY_VERTEX) != 0) {
+        stages |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
+    }
+    if ((visibility & LC_SHADER_VISIBILITY_FRAGMENT) != 0) {
+        stages |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    }
+    if ((visibility & LC_SHADER_VISIBILITY_COMPUTE) != 0) {
+        stages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    }
+    if (stages == 0) {
+        stages = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    }
+    return stages;
+}
+
+/* Stage/access masks for one endpoint. Prior work always completed
+ * synchronously (immediate submits), so no earlier access needs
+ * waiting beyond what is listed. Returns 1, or 0 for unknown
+ * endpoints (UNDEFINED is source-only). */
+static int lc_vk_endpoint_masks(VkImageLayout layout, int is_source,
+                                uint32_t visibility,
+                                VkPipelineStageFlags *stage,
+                                VkAccessFlags *access) {
+    switch (layout) {
+    case VK_IMAGE_LAYOUT_UNDEFINED:
+        if (!is_source) {
+            return 0;
+        }
+        *stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        *access = 0;
+        return 1;
+    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+        *stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        *access = VK_ACCESS_TRANSFER_WRITE_BIT;
+        return 1;
+    case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+        *stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        *access = VK_ACCESS_TRANSFER_READ_BIT;
+        return 1;
+    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+        *stage = lc_vk_visible_stages(visibility);
+        *access = VK_ACCESS_SHADER_READ_BIT;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static size_t lc_vk_layout_index(const lc_image *image, uint32_t mip,
+                                 uint32_t layer) {
+    return (size_t)layer * image->mip_levels + mip;
+}
+
+lc_result lc_vulkan_image_transition(lc_image *image, VkImageLayout new_layout,
+                                     uint32_t visibility) {
     lc_device *device;
-    VkImageMemoryBarrier barrier;
-    VkPipelineStageFlags src_stage = 0;
-    VkAccessFlags src_access = 0;
     VkPipelineStageFlags dst_stage = 0;
     VkAccessFlags dst_access = 0;
+    uint32_t layer;
+    uint32_t mip;
     lc_result res;
 
-    if (image == NULL || image->device == NULL) {
+    if (image == NULL || image->device == NULL ||
+        image->layouts == NULL) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
     device = image->device;
@@ -394,55 +477,126 @@ lc_result lc_vulkan_image_transition(lc_image *image,
         image->vk_image == VK_NULL_HANDLE) {
         return LC_ERROR_IMAGE_CREATION_FAILED;
     }
-    if (image->layout == new_layout) {
-        return LC_SUCCESS;
+    if (!lc_vk_endpoint_masks(new_layout, 0, visibility, &dst_stage,
+                              &dst_access)) {
+        return LC_ERROR_INVALID_ARGUMENT;
     }
+    /* Validate every source endpoint before recording anything. */
+    for (layer = 0; layer < image->array_layers; layer++) {
+        for (mip = 0; mip < image->mip_levels; mip++) {
+            VkPipelineStageFlags src_stage = 0;
+            VkAccessFlags src_access = 0;
 
-    /* Source endpoint from current tracked layout. Prior work always
-     * completed synchronously (immediate submits), so no earlier
-     * access needs waiting beyond what is listed. */
-    switch (image->layout) {
-    case VK_IMAGE_LAYOUT_UNDEFINED:
-        src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-        src_access = 0;
-        break;
-    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
-        src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        src_access = VK_ACCESS_TRANSFER_WRITE_BIT;
-        break;
-    case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
-        src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        src_access = VK_ACCESS_TRANSFER_READ_BIT;
-        break;
-    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
-        /* Last use was a sampled read (or an upload-final state);
-         * nothing written is outstanding by construction. */
-        src_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        src_access = VK_ACCESS_SHADER_READ_BIT;
-        break;
-    default:
-        return LC_ERROR_INVALID_ARGUMENT;
-    }
-    /* Destination endpoint. Sampled reads target the fragment stage,
-     * covering graphics sampling; compute sampling extends this. */
-    switch (new_layout) {
-    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
-        dst_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        dst_access = VK_ACCESS_TRANSFER_WRITE_BIT;
-        break;
-    case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
-        dst_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        dst_access = VK_ACCESS_TRANSFER_READ_BIT;
-        break;
-    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
-        dst_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        dst_access = VK_ACCESS_SHADER_READ_BIT;
-        break;
-    default:
-        return LC_ERROR_INVALID_ARGUMENT;
+            if (!lc_vk_endpoint_masks(
+                    image->layouts[lc_vk_layout_index(image, mip, layer)], 1,
+                    visibility, &src_stage, &src_access)) {
+                return LC_ERROR_INVALID_ARGUMENT;
+            }
+        }
     }
 
     res = lc_vulkan_upload_begin(device);
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+    for (layer = 0; layer < image->array_layers; layer++) {
+        for (mip = 0; mip < image->mip_levels; mip++) {
+            VkImageMemoryBarrier barrier;
+            VkPipelineStageFlags src_stage = 0;
+            VkAccessFlags src_access = 0;
+            VkImageLayout old_layout =
+                image->layouts[lc_vk_layout_index(image, mip, layer)];
+
+            if (old_layout == new_layout) {
+                continue;
+            }
+            /* Validated above; cannot fail here. */
+            lc_vk_endpoint_masks(old_layout, 1, visibility, &src_stage,
+                                 &src_access);
+            memset(&barrier, 0, sizeof(barrier));
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.srcAccessMask = src_access;
+            barrier.dstAccessMask = dst_access;
+            barrier.oldLayout = old_layout;
+            barrier.newLayout = new_layout;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = image->vk_image;
+            barrier.subresourceRange.aspectMask =
+                lc_vk_aspect_for(image->format);
+            barrier.subresourceRange.baseMipLevel = mip;
+            barrier.subresourceRange.levelCount = 1;
+            barrier.subresourceRange.baseArrayLayer = layer;
+            barrier.subresourceRange.layerCount = 1;
+            vkCmdPipelineBarrier(lc_vulkan_upload_cmd(device), src_stage,
+                                 dst_stage, 0, 0, NULL, 0, NULL, 1, &barrier);
+        }
+    }
+    res = lc_vulkan_upload_submit(device);
+    if (res != LC_SUCCESS) {
+        /* Unknown GPU state: mark everything UNDEFINED, which is
+         * always a legal old layout to leave from. */
+        for (layer = 0; layer < image->array_layers; layer++) {
+            for (mip = 0; mip < image->mip_levels; mip++) {
+                image->layouts[lc_vk_layout_index(image, mip, layer)] =
+                    VK_IMAGE_LAYOUT_UNDEFINED;
+            }
+        }
+        return res;
+    }
+    for (layer = 0; layer < image->array_layers; layer++) {
+        for (mip = 0; mip < image->mip_levels; mip++) {
+            image->layouts[lc_vk_layout_index(image, mip, layer)] =
+                new_layout;
+        }
+    }
+    return LC_SUCCESS;
+}
+
+lc_result lc_vulkan_image_transition_range(
+    lc_image *image, uint32_t base_mip, uint32_t level_count,
+    uint32_t base_layer, uint32_t layer_count, VkImageLayout old_layout,
+    VkImageLayout new_layout, uint32_t visibility) {
+    VkPipelineStageFlags src_stage = 0;
+    VkAccessFlags src_access = 0;
+    VkPipelineStageFlags dst_stage = 0;
+    VkAccessFlags dst_access = 0;
+    VkImageMemoryBarrier barrier;
+    uint32_t layer;
+    uint32_t mip;
+    lc_result res;
+
+    if (image == NULL || image->device == NULL || image->layouts == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (level_count == 0 || layer_count == 0 ||
+        base_mip >= image->mip_levels ||
+        level_count > image->mip_levels - base_mip ||
+        base_layer >= image->array_layers ||
+        layer_count > image->array_layers - base_layer) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (image->device->device == VK_NULL_HANDLE ||
+        image->vk_image == VK_NULL_HANDLE) {
+        return LC_ERROR_IMAGE_CREATION_FAILED;
+    }
+    /* Every covered entry must actually hold the claimed old layout. */
+    for (layer = base_layer; layer < base_layer + layer_count; layer++) {
+        for (mip = base_mip; mip < base_mip + level_count; mip++) {
+            if (image->layouts[lc_vk_layout_index(image, mip, layer)] !=
+                old_layout) {
+                return LC_ERROR_INVALID_ARGUMENT;
+            }
+        }
+    }
+    if (!lc_vk_endpoint_masks(old_layout, 1, visibility, &src_stage,
+                              &src_access) ||
+        !lc_vk_endpoint_masks(new_layout, 0, visibility, &dst_stage,
+                              &dst_access)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+
+    res = lc_vulkan_upload_begin(image->device);
     if (res != LC_SUCCESS) {
         return res;
     }
@@ -450,23 +604,28 @@ lc_result lc_vulkan_image_transition(lc_image *image,
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     barrier.srcAccessMask = src_access;
     barrier.dstAccessMask = dst_access;
-    barrier.oldLayout = image->layout;
+    barrier.oldLayout = old_layout;
     barrier.newLayout = new_layout;
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.image = image->vk_image;
     barrier.subresourceRange.aspectMask = lc_vk_aspect_for(image->format);
-    barrier.subresourceRange.baseMipLevel = 0;
-    barrier.subresourceRange.levelCount = image->mip_levels;
-    barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount = image->array_layers;
-    vkCmdPipelineBarrier(lc_vulkan_upload_cmd(device), src_stage, dst_stage,
-                         0, 0, NULL, 0, NULL, 1, &barrier);
-    res = lc_vulkan_upload_submit(device);
+    barrier.subresourceRange.baseMipLevel = base_mip;
+    barrier.subresourceRange.levelCount = level_count;
+    barrier.subresourceRange.baseArrayLayer = base_layer;
+    barrier.subresourceRange.layerCount = layer_count;
+    vkCmdPipelineBarrier(lc_vulkan_upload_cmd(image->device), src_stage,
+                         dst_stage, 0, 0, NULL, 0, NULL, 1, &barrier);
+    res = lc_vulkan_upload_submit(image->device);
     if (res != LC_SUCCESS) {
         return res;
     }
-    image->layout = new_layout;
+    for (layer = base_layer; layer < base_layer + layer_count; layer++) {
+        for (mip = base_mip; mip < base_mip + level_count; mip++) {
+            image->layouts[lc_vk_layout_index(image, mip, layer)] =
+                new_layout;
+        }
+    }
     return LC_SUCCESS;
 }
 
@@ -590,7 +749,7 @@ lc_result lc_vulkan_image_write(lc_image *image,
     vkUnmapMemory(device->device, staging_mem);
 
     /* Level ends sampled-readable per API contract. */
-    res = lc_vulkan_image_transition(image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    res = lc_vulkan_image_transition(image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, LC_SHADER_VISIBILITY_ALL_GRAPHICS);
     if (res != LC_SUCCESS) {
         goto cleanup;
     }
@@ -620,7 +779,8 @@ lc_result lc_vulkan_image_write(lc_image *image,
         goto cleanup;
     }
     res = lc_vulkan_image_transition(image,
-                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                     LC_SHADER_VISIBILITY_ALL_GRAPHICS);
 
 cleanup:
     vkDestroyBuffer(device->device, staging, NULL);
@@ -662,7 +822,8 @@ LC_API lc_result lc_vulkan_copy_image_to_buffer(
     }
 
     res = lc_vulkan_image_transition(image,
-                                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                     LC_SHADER_VISIBILITY_ALL_GRAPHICS);
     if (res != LC_SUCCESS) {
         return res;
     }
@@ -692,7 +853,8 @@ LC_API lc_result lc_vulkan_copy_image_to_buffer(
         return res;
     }
     return lc_vulkan_image_transition(
-        image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        LC_SHADER_VISIBILITY_ALL_GRAPHICS);
 }
 
 lc_result lc_vulkan_image_generate_mipmaps(lc_image *image) {
@@ -717,7 +879,8 @@ lc_result lc_vulkan_image_generate_mipmaps(lc_image *image) {
      * No blit happens, so TRANSFER_SRC is not required here. */
     if (image->mip_levels < 2) {
         return lc_vulkan_image_transition(
-            image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            LC_SHADER_VISIBILITY_ALL_GRAPHICS);
     }
     if ((image->usage & (LC_IMAGE_USAGE_TRANSFER_SRC |
                          LC_IMAGE_USAGE_TRANSFER_DST)) !=
@@ -734,38 +897,21 @@ lc_result lc_vulkan_image_generate_mipmaps(lc_image *image) {
     }
 
     aspect = lc_vk_aspect_for(image->format);
+    /* Whole image to TRANSFER_DST first via tracked state, so every
+     * level below starts from a known layout. */
+    res = lc_vulkan_image_transition(image,
+                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     LC_SHADER_VISIBILITY_ALL_GRAPHICS);
+    if (res != LC_SUCCESS) {
+        return res;
+    }
     res = lc_vulkan_upload_begin(device);
     if (res != LC_SUCCESS) {
         return res;
     }
-    /* Whole image to TRANSFER_DST first, from whatever tracked
-     * layout it holds (fresh UNDEFINED, sampled, or a state left by
-     * an earlier failed operation). */
     {
-        VkImageLayout from = image->layout;
-        VkPipelineStageFlags src_stage =
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-        VkAccessFlags src_access = 0;
         VkCommandBuffer cmd = lc_vulkan_upload_cmd(device);
 
-        if (from == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-            src_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-            src_access = VK_ACCESS_SHADER_READ_BIT;
-        } else if (from == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-            src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-            src_access = VK_ACCESS_TRANSFER_WRITE_BIT;
-        } else if (from == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
-            src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-            src_access = VK_ACCESS_TRANSFER_READ_BIT;
-        }
-        if (from != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-            lc_vk_mip_barrier(cmd, image->vk_image, aspect, 0,
-                              image->mip_levels, src_access, src_stage,
-                              VK_ACCESS_TRANSFER_WRITE_BIT,
-                              VK_PIPELINE_STAGE_TRANSFER_BIT, from,
-                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                              image->array_layers);
-        }
         for (i = 1; i < image->mip_levels; i++) {
             uint32_t sw = 0;
             uint32_t sh = 0;
@@ -835,12 +981,186 @@ lc_result lc_vulkan_image_generate_mipmaps(lc_image *image) {
                           image->array_layers);
     }
     res = lc_vulkan_upload_submit(device);
-    if (res != LC_SUCCESS) {
-        /* Mid-sequence failure leaves mixed layouts; mark unknown so
-         * the next transition starts from UNDEFINED (always legal). */
-        image->layout = VK_IMAGE_LAYOUT_UNDEFINED;
-        return res;
+    {
+        /* Bulk state update: every level ends sampled-readable on
+         * success. On failure the real states are unknown, so mark
+         * everything UNDEFINED (always a legal old layout to leave
+         * from next time). */
+        uint32_t m;
+        uint32_t l;
+        VkImageLayout mark = (res == LC_SUCCESS)
+                                 ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                 : VK_IMAGE_LAYOUT_UNDEFINED;
+
+        if (image->layouts != NULL) {
+            for (l = 0; l < image->array_layers; l++) {
+                for (m = 0; m < image->mip_levels; m++) {
+                    image->layouts[(size_t)l * image->mip_levels + m] = mark;
+                }
+            }
+        }
     }
-    image->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    return res;
+}
+
+/* Map a backend-neutral view type onto Vulkan for an image of known
+ * dimensionality, enforcing the pairing rules. Returns 1 on success. */
+static int lc_vk_view_type_for(lc_image_view_type type, lc_image_type image_type,
+                               uint32_t layer_count, int cube_flag,
+                               VkImageViewType *out) {
+    switch (type) {
+    case LC_IMAGE_VIEW_1D:
+        if (image_type != LC_IMAGE_TYPE_1D || layer_count != 1) {
+            return 0;
+        }
+        *out = VK_IMAGE_VIEW_TYPE_1D;
+        return 1;
+    case LC_IMAGE_VIEW_1D_ARRAY:
+        if (image_type != LC_IMAGE_TYPE_1D) {
+            return 0;
+        }
+        *out = VK_IMAGE_VIEW_TYPE_1D_ARRAY;
+        return 1;
+    case LC_IMAGE_VIEW_2D:
+        if (image_type != LC_IMAGE_TYPE_2D || layer_count != 1) {
+            return 0;
+        }
+        *out = VK_IMAGE_VIEW_TYPE_2D;
+        return 1;
+    case LC_IMAGE_VIEW_2D_ARRAY:
+        if (image_type != LC_IMAGE_TYPE_2D) {
+            return 0;
+        }
+        *out = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+        return 1;
+    case LC_IMAGE_VIEW_3D:
+        if (image_type != LC_IMAGE_TYPE_3D || layer_count != 1) {
+            return 0;
+        }
+        *out = VK_IMAGE_VIEW_TYPE_3D;
+        return 1;
+    case LC_IMAGE_VIEW_CUBE:
+        if (image_type != LC_IMAGE_TYPE_2D || !cube_flag ||
+            layer_count != 6) {
+            return 0;
+        }
+        *out = VK_IMAGE_VIEW_TYPE_CUBE;
+        return 1;
+    case LC_IMAGE_VIEW_CUBE_ARRAY:
+        if (image_type != LC_IMAGE_TYPE_2D || !cube_flag ||
+            layer_count < 6 || (layer_count % 6) != 0) {
+            return 0;
+        }
+        *out = VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+lc_result lc_vulkan_image_view_create(lc_image_view *view, lc_image *image,
+                                      const lc_image_view_desc *desc) {
+    VkImageViewType vk_type = VK_IMAGE_VIEW_TYPE_2D;
+    VkImageViewCreateInfo info;
+    VkFormat vk_format;
+    VkImageAspectFlags aspect;
+    int cube_flag;
+
+    if (view == NULL || image == NULL || desc == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (image->device == NULL ||
+        image->device->device == VK_NULL_HANDLE ||
+        image->vk_image == VK_NULL_HANDLE) {
+        return LC_ERROR_IMAGE_CREATION_FAILED;
+    }
+    /* Aspect must be a nonzero subset of what the format carries. */
+    aspect = 0;
+    if ((desc->aspect & LC_IMAGE_ASPECT_COLOR) != 0 &&
+        lc_format_is_color(image->format)) {
+        aspect |= VK_IMAGE_ASPECT_COLOR_BIT;
+    }
+    if ((desc->aspect & LC_IMAGE_ASPECT_DEPTH) != 0 &&
+        lc_format_is_depth(image->format)) {
+        aspect |= VK_IMAGE_ASPECT_DEPTH_BIT;
+    }
+    if ((desc->aspect & LC_IMAGE_ASPECT_STENCIL) != 0 &&
+        lc_format_is_stencil(image->format)) {
+        aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
+    }
+    if (aspect == 0 ||
+        (desc->aspect & ~(LC_IMAGE_ASPECT_COLOR | LC_IMAGE_ASPECT_DEPTH |
+                          LC_IMAGE_ASPECT_STENCIL)) != 0) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    /* Ranges must be nonempty and fit. Subtraction order is
+     * overflow-safe: base is checked first. */
+    if (desc->mip_level_count == 0 ||
+        desc->base_mip_level >= image->mip_levels ||
+        desc->mip_level_count > image->mip_levels - desc->base_mip_level) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (desc->array_layer_count == 0 ||
+        desc->base_array_layer >= image->array_layers ||
+        desc->array_layer_count >
+            image->array_layers - desc->base_array_layer) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    cube_flag = (image->flags & LC_IMAGE_FLAG_CUBE_COMPATIBLE) != 0;
+    if (!lc_vk_view_type_for(desc->type, image->type,
+                             desc->array_layer_count, cube_flag, &vk_type)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    /* Format equality only (no reinterpretation yet, documented). */
+    if (desc->format == LC_FORMAT_UNDEFINED) {
+        vk_format = lc_vulkan_translate_format(image->format);
+    } else if (desc->format == image->format) {
+        vk_format = lc_vulkan_translate_format(desc->format);
+    } else {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (vk_format == VK_FORMAT_UNDEFINED) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+
+    view->device = image->device;
+    view->image = image;
+    view->type = desc->type;
+    view->format =
+        (desc->format == LC_FORMAT_UNDEFINED) ? image->format : desc->format;
+    view->aspect = desc->aspect;
+    view->base_mip_level = desc->base_mip_level;
+    view->mip_level_count = desc->mip_level_count;
+    view->base_array_layer = desc->base_array_layer;
+    view->array_layer_count = desc->array_layer_count;
+
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    info.image = image->vk_image;
+    info.viewType = vk_type;
+    info.format = vk_format;
+    info.subresourceRange.aspectMask = aspect;
+    info.subresourceRange.baseMipLevel = desc->base_mip_level;
+    info.subresourceRange.levelCount = desc->mip_level_count;
+    info.subresourceRange.baseArrayLayer = desc->base_array_layer;
+    info.subresourceRange.layerCount = desc->array_layer_count;
+    if (vkCreateImageView(image->device->device, &info, NULL,
+                          &view->vk_view) != VK_SUCCESS) {
+        view->vk_view = VK_NULL_HANDLE;
+        return LC_ERROR_IMAGE_CREATION_FAILED;
+    }
     return LC_SUCCESS;
+}
+
+void lc_vulkan_image_view_destroy(lc_image_view *view) {
+    if (view == NULL || view->vk_view == VK_NULL_HANDLE) {
+        return;
+    }
+    /* Device must still be alive; image teardown destroys dependent
+     * views before the image, and device teardown destroys views
+     * before VkDevice. */
+    if (view->device != NULL && view->device->device != VK_NULL_HANDLE) {
+        vkDestroyImageView(view->device->device, view->vk_view, NULL);
+    }
+    view->vk_view = VK_NULL_HANDLE;
 }

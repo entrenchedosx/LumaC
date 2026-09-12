@@ -393,6 +393,36 @@ lc_result lc_vulkan_frame_draw(lc_swapchain *swapchain, uint32_t vertex_count,
     return LC_SUCCESS;
 }
 
+lc_result lc_vulkan_frame_bind_set(lc_swapchain *swapchain,
+                                   const lc_pipeline *pipeline,
+                                   uint32_t slot, const lc_binding_set *set) {
+    lc_vk_flight *flight;
+
+    if (swapchain == NULL || pipeline == NULL || set == NULL ||
+        !swapchain->frame_active) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!lc_vk_frame_ready(swapchain) ||
+        swapchain->current_image >= swapchain->image_count) {
+        return LC_ERROR_UNKNOWN;
+    }
+    if (slot >= pipeline->layout_count ||
+        set->vk_set == VK_NULL_HANDLE ||
+        pipeline->layout == VK_NULL_HANDLE) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    flight = &swapchain->flights[swapchain->current_frame];
+
+    /* Descriptor binds need no open render pass; any record order
+     * relative to pipeline binds is legal. Compatibility was verified
+     * by the caller via layout anchors; Vulkan validation re-checks
+     * the real objects. */
+    vkCmdBindDescriptorSets(flight->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            pipeline->layout, slot, 1, &set->vk_set, 0,
+                            NULL);
+    return LC_SUCCESS;
+}
+
 lc_result lc_vulkan_frame_end(lc_swapchain *swapchain) {
     lc_device *device;
     lc_surface *surface;

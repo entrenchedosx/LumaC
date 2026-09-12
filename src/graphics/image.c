@@ -118,6 +118,8 @@ void lc_image_destroy(lc_image *image) {
     if (image == NULL) {
         return;
     }
+    /* Views reference the VkImage; they die before it. */
+    lc_image_view_destroy_for_image(image);
     lc_image_list_remove(image);
     lc_vulkan_image_destroy(image);
     free(image);

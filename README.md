@@ -5,7 +5,7 @@ Lightweight cross-platform graphics API written in C11, with native Windows/Linu
 [![C11](https://img.shields.io/badge/C-C11-blue)](https://en.cppreference.com/w/c/11)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-![LumaC triangle example](docs/images/triangle.png)
+![LumaC textured quad example](docs/images/textured-quad.png)
 
 ## Overview
 
@@ -43,8 +43,13 @@ material, or PBR system yet — those build on this foundation.
   (GPU-only / CPU-to-GPU / GPU-to-CPU) with mapping and bounds-checked
   staging writes, backend-neutral vertex layouts, device limits
 - Image foundation: 1D/2D/3D images with mips, array layers, and
-  cube-compatible structure; default full-resource views; whole-image
-  layout tracking; staging uploads; GPU mipmap generation
+  cube-compatible structure; default plus explicit subresource views
+  (mip/layer ranges, cube, depth aspects); per-subresource layout
+  tracking; staging uploads; GPU mipmap generation
+- Resource binding: backend-neutral binding layouts/sets, uniform /
+  storage / sampled-image / storage-image / sampler slots with
+  descriptor arrays, validated updates, device-level descriptor
+  allocator, per-frame set binding
 - Samplers: linear/nearest filtering, mipmap modes, four address
   modes, LOD control, capability-gated anisotropy
 - Explicit lifetime model: dependents are destroyed before the objects
@@ -55,9 +60,9 @@ material, or PBR system yet — those build on this foundation.
 
 ## Current Status
 
-Early development (`0.1.0-dev`). Image/sampler resources work with
-exact upload round-trips; there are no descriptors, materials, or PBR
-systems yet.
+Early development (`0.1.0-dev`). A textured, uniform-animated quad
+renders through the full binding system; there are no materials, PBR,
+or compute systems yet.
 
 | Feature              | Windows          | Linux            |
 | -------------------- | ---------------- | ---------------- |
@@ -71,6 +76,7 @@ systems yet.
 | Shaders / pipeline   | Implemented      | Implemented (compiled clean) |
 | Buffers / formats    | Verified         | Runtime verified (lavapipe) |
 | Images / samplers    | Verified         | Runtime verified (lavapipe) |
+| Bindings / textures  | Verified         | Runtime verified (lavapipe) |
 | Validation layers    | Clean            | Not available in test env |
 | D3D12                | Planned          | N/A              |
 | Wayland              | N/A              | Planned          |
@@ -86,17 +92,20 @@ cmake --build build --config Debug
 ctest --test-dir build -C Debug --output-on-failure
 ```
 
-Run the triangle examples — `triangle` (vertex-index generation) and
-`vertex_triangle` (real GPU vertex buffer; identical image):
+Run the triangle examples — `triangle` (vertex-index generation),
+`vertex_triangle` (real GPU vertex buffer), and `textured_quad`
+(checkerboard texture, animated uniform, mipmapped sampling):
 
 ```bash
 # Windows:
 .\build\examples\triangle\Debug\triangle.exe
 .\build\examples\vertex_triangle\Debug\vertex_triangle.exe
+.\build\examples\textured_quad\Debug\textured_quad.exe
 .\build\examples\texture_upload\Debug\texture_upload.exe
 # Linux:
 /build/triangle/triangle
 /build/vertex_triangle/vertex_triangle
+/build/textured_quad/textured_quad
 /build/texture_upload/texture_upload
 ```
 
@@ -209,6 +218,10 @@ int main(void)
   `lc_image_generate_mipmaps` (1D/2D/3D, mips, layers, cube-ready)
 - Samplers: `lc_sampler_create/destroy` (filters, mipmaps, address
   modes, LODs, anisotropy)
+- Views: `lc_image_view_create/destroy` (mip/layer ranges, cube,
+  aspects)
+- Bindings: `lc_binding_layout_create/destroy`,
+  `lc_binding_set_create/destroy/update`, `lc_bind_binding_set`
 
 See `include/lumac/lumac.h` for the authoritative documented API.
 
@@ -230,9 +243,10 @@ Public LumaC API  (include/lumac/lumac.h — opaque handles only)
     |
     +---- Swapchain + frame (src/graphics/swapchain.c, frame.c)
     |
-    +---- Resources (src/graphics/buffer.c, shader.c, pipeline.c)
-              |
-              +---- Vulkan backend (src/graphics/vulkan/)
+    +---- Resources (src/graphics/buffer.c, image.c, sampler.c,
+    |         shader.c, pipeline.c, binding.c, image_view.c)
+    |         |
+    |         +---- Vulkan backend (src/graphics/vulkan/)
 ```
 
 A swapchain borrows its device and surface; a surface borrows its
@@ -254,8 +268,8 @@ Foundation — done: core, Windows/X11 windows, Vulkan device, surface,
 swapchain, frame lifecycle, graphics pipeline, shaders, triangle,
 formats, buffers, GPU upload, vertex buffers.
 
-Near-term — done: images/textures, samplers. Next: descriptors and
-resource bindings, uniform/storage resources, index rendering,
+Near-term — done: images/textures, samplers, descriptors and
+resource bindings. Next: uniform/storage resources, index rendering,
 instancing, depth/stencil, 3D camera, meshes, offscreen rendering,
 HDR.
 
@@ -277,7 +291,7 @@ LumaC/
 ├── examples/            # basic_init, window, device_info,
 │                        # surface_info, swapchain_info, clear_screen,
 │                        # triangle (+ shaders/), vertex_triangle,
-│                        # texture_upload
+│                        # texture_upload, textured_quad (+ shaders/)
 ├── include/lumac/       # public lumac.h
 ├── src/                 # core, platform, graphics, vulkan backend
 ├── tests/               # headless unit tests + Vulkan integration tests

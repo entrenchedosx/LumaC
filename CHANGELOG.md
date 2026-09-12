@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Resource bindings: `lc_image_view` (mip/layer ranges, cube/depth
+  aspects), `lc_shader_visibility`, binding layouts/sets with
+  uniform/storage/sampled/storage-image/sampler slots, descriptor
+  arrays, validated batched updates, device-level descriptor
+  allocator, `lc_bind_binding_set`
+- Per-subresource image layout tracking; sampled-state-gated binding
+  with vertex/fragment/compute stage mapping
+- Pipelines take ordered binding-layout slots; `examples/textured_quad`
+  (mipmapped checkerboard, animated uniform, no descriptor rebuilds)
+- `LC_ERROR_PIPELINE_INCOMPATIBLE` now also covers layout mismatch
 - Image/texture foundation: `lc_image` (1D/2D/3D, mips incl. full
   chain, array layers, cube-compatible flag, multisample field),
   default full-resource views, whole-image layout tracking

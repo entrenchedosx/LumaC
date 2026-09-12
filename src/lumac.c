@@ -20,13 +20,17 @@ void lc_shutdown(void) {
     if (!s_state.initialized) {
         return;
     }
-    /* Policy: auto-destroy in dependency order - pipelines, shaders,
-     * samplers, images, buffers, swapchains, surfaces, devices,
-     * windows. A VkSwapchainKHR needs its device alive; a VkSurfaceKHR
-     * needs its device's instance and native window. */
+    /* Policy: auto-destroy in dependency order - pipelines, binding
+     * sets/layouts, shaders, samplers, image views, images, buffers,
+     * swapchains, surfaces, devices, windows. A VkSwapchainKHR needs
+     * its device alive; a VkSurfaceKHR needs its device's instance
+     * and native window. */
     lc_pipeline_destroy_all();
+    lc_binding_set_destroy_all();
+    lc_binding_layout_destroy_all();
     lc_shader_destroy_all();
     lc_sampler_destroy_all();
+    lc_image_view_destroy_all();
     lc_image_destroy_all();
     lc_buffer_destroy_all();
     lc_swapchain_destroy_all();

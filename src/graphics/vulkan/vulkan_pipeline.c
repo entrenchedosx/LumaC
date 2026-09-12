@@ -1,12 +1,13 @@
 /*
- * Vulkan pipeline backend (Phase 7: triangle drawing, no vertex buffers).
+ * Vulkan pipeline backend (graphics pipelines with resource slots).
  *
- * Builds an empty-layout graphics pipeline against the swapchain's
- * render pass: no vertex bindings or attributes (vertices come from the
- * shader's vertex index), triangle list, dynamic viewport/scissor, no
- * culling (winding can't hide the first triangle), one sample, blending
- * off, no depth. Only module handles are consumed, so shaders may be
- * destroyed once the pipeline exists.
+ * Builds a graphics pipeline against the swapchain's render pass from
+ * caller-supplied shaders, optional vertex input, and optional binding
+ * layouts: triangle list, dynamic viewport/scissor, no culling, one
+ * sample, blending off, no depth. Only module and set-layout handles
+ * are consumed, so shaders (and layouts, for binding purposes) may be
+ * destroyed once the pipeline exists; slot anchors are compared, never
+ * dereferenced, afterwards.
  */
 
 #include <stdlib.h>
@@ -17,6 +18,23 @@
 static VkShaderStageFlagBits lc_vk_stage_flag(lc_shader_stage stage) {
     return (stage == LC_SHADER_STAGE_VERTEX) ? VK_SHADER_STAGE_VERTEX_BIT
                                              : VK_SHADER_STAGE_FRAGMENT_BIT;
+}
+
+/* Pointer comparison only: dead anchors are rejected without ever
+ * dereferencing freed memory. */
+static int lc_pipeline_binding_layout_live(const lc_binding_layout *layout) {
+    lc_state *state = lc_get_internal_state();
+    const lc_binding_layout *it;
+
+    if (state == NULL || layout == NULL) {
+        return 0;
+    }
+    for (it = state->binding_layouts; it != NULL; it = it->next) {
+        if (it == layout) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 /* Validate the vertex layout against device limits and internal
@@ -126,10 +144,52 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
             return layout_res;
         }
     }
+    /* Binding layouts: live, same device, within set limits. Anchors
+     * are copied for bind-time slot matching; only Vulkan handles are
+     * consumed, so layouts may die while the pipeline lives (binds
+     * against dead anchors fail closed on pointer comparison). */
+    {
+        VkPhysicalDeviceProperties props;
+        uint32_t i;
+
+        if (desc->binding_layout_count > 0 &&
+            desc->binding_layouts == NULL) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        memset(&props, 0, sizeof(props));
+        vkGetPhysicalDeviceProperties(device->physical_device, &props);
+        if (desc->binding_layout_count >
+            props.limits.maxBoundDescriptorSets) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        for (i = 0; i < desc->binding_layout_count; i++) {
+            if (desc->binding_layouts[i] == NULL ||
+                !lc_pipeline_binding_layout_live(desc->binding_layouts[i]) ||
+                desc->binding_layouts[i]->device != device ||
+                desc->binding_layouts[i]->vk_layout == VK_NULL_HANDLE) {
+                return LC_ERROR_INVALID_ARGUMENT;
+            }
+        }
+    }
 
     pipeline->device = device;
     pipeline->swapchain = swapchain;
     pipeline->format = swapchain->format;
+    pipeline->layouts = NULL;
+    pipeline->layout_count = 0;
+    if (desc->binding_layout_count > 0) {
+        uint32_t i;
+
+        pipeline->layouts = (const lc_binding_layout **)malloc(
+            sizeof(const lc_binding_layout *) * desc->binding_layout_count);
+        if (pipeline->layouts == NULL) {
+            return LC_ERROR_OUT_OF_MEMORY;
+        }
+        for (i = 0; i < desc->binding_layout_count; i++) {
+            pipeline->layouts[i] = desc->binding_layouts[i];
+        }
+        pipeline->layout_count = desc->binding_layout_count;
+    }
 
     memset(stages, 0, sizeof(stages));
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -237,15 +297,44 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
     blend_state.attachmentCount = 1;
     blend_state.pAttachments = &blend_attachment;
 
-    /* Empty layout: no descriptor sets, no push constants yet. */
-    memset(&layout_info, 0, sizeof(layout_info));
-    layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    if (vkCreatePipelineLayout(device->device, &layout_info, NULL,
-                               &pipeline->layout) != VK_SUCCESS) {
-        pipeline->layout = VK_NULL_HANDLE;
-        free(vk_bindings);
-        free(vk_attributes);
-        return LC_ERROR_PIPELINE_CREATION_FAILED;
+    /* Pipeline layout from the binding-layout slots (empty when the
+     * pipeline takes no resources). Vulkan copies the set layouts at
+     * creation. */
+    {
+        VkDescriptorSetLayout *vk_layouts = NULL;
+        uint32_t i;
+
+        if (pipeline->layout_count > 0) {
+            vk_layouts = (VkDescriptorSetLayout *)malloc(
+                sizeof(VkDescriptorSetLayout) * pipeline->layout_count);
+            if (vk_layouts == NULL) {
+                free(pipeline->layouts);
+                pipeline->layouts = NULL;
+                pipeline->layout_count = 0;
+                free(vk_bindings);
+                free(vk_attributes);
+                return LC_ERROR_OUT_OF_MEMORY;
+            }
+            for (i = 0; i < pipeline->layout_count; i++) {
+                vk_layouts[i] = pipeline->layouts[i]->vk_layout;
+            }
+        }
+        memset(&layout_info, 0, sizeof(layout_info));
+        layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layout_info.setLayoutCount = pipeline->layout_count;
+        layout_info.pSetLayouts = vk_layouts;
+        if (vkCreatePipelineLayout(device->device, &layout_info, NULL,
+                                   &pipeline->layout) != VK_SUCCESS) {
+            pipeline->layout = VK_NULL_HANDLE;
+            free(vk_layouts);
+            free(pipeline->layouts);
+            pipeline->layouts = NULL;
+            pipeline->layout_count = 0;
+            free(vk_bindings);
+            free(vk_attributes);
+            return LC_ERROR_PIPELINE_CREATION_FAILED;
+        }
+        free(vk_layouts);
     }
 
     memset(&pipeline_info, 0, sizeof(pipeline_info));
@@ -278,6 +367,9 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
             pipeline->pipeline = VK_NULL_HANDLE;
             vkDestroyPipelineLayout(device->device, pipeline->layout, NULL);
             pipeline->layout = VK_NULL_HANDLE;
+            free(pipeline->layouts);
+            pipeline->layouts = NULL;
+            pipeline->layout_count = 0;
             free(vk_bindings);
             free(vk_attributes);
             return LC_ERROR_PIPELINE_CREATION_FAILED;
@@ -302,8 +394,14 @@ void lc_vulkan_pipeline_destroy(lc_pipeline *pipeline) {
     if (device_handle != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_handle);
     }
-    /* Pipeline first, then its layout. The render pass is owned by the
-     * swapchain and is only referenced here by compatibility. */
+    /* Pipeline first, then its layout, then the slot anchors. The
+     * render pass is owned by the swapchain and is only referenced
+     * here by compatibility. */
+    if (pipeline->layouts != NULL) {
+        free(pipeline->layouts);
+        pipeline->layouts = NULL;
+    }
+    pipeline->layout_count = 0;
     if (pipeline->pipeline != VK_NULL_HANDLE) {
         if (device_handle != VK_NULL_HANDLE) {
             vkDestroyPipeline(device_handle, pipeline->pipeline, NULL);
