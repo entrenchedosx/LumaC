@@ -4,8 +4,6 @@ Lightweight cross-platform graphics API written in C11, with native Windows/Linu
 
 [![C11](https://img.shields.io/badge/C-C11-blue)](https://en.cppreference.com/w/c/11)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Windows build](https://github.com/actions/workflows/windows.yml/badge.svg)](../../actions/workflows/windows.yml)
-[![Linux build](https://github.com/actions/workflows/linux.yml/badge.svg)](../../actions/workflows/linux.yml)
 
 ![LumaC clear-screen example](docs/images/clear-screen.png)
 
