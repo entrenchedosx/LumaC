@@ -34,6 +34,8 @@ typedef struct lc_state {
     lc_shader *shaders;
     lc_pipeline *pipelines;
     lc_buffer *buffers;
+    lc_image *images;
+    lc_sampler *samplers;
 } lc_state;
 
 /* Accessor for the single process-wide state (see src/lumac.c) */
@@ -103,6 +105,22 @@ void lc_buffer_destroy_all(void);
 /* Destroys all buffers owned by a device being torn down.
  * Called by lc_device_destroy(). See src/graphics/buffer.c. */
 void lc_buffer_destroy_for_device(const lc_device *device);
+
+/* Destroys all live images. Called by lc_shutdown().
+ * See src/graphics/image.c. */
+void lc_image_destroy_all(void);
+
+/* Destroys all images owned by a device being torn down.
+ * Called by lc_device_destroy(). See src/graphics/image.c. */
+void lc_image_destroy_for_device(const lc_device *device);
+
+/* Destroys all live samplers. Called by lc_shutdown().
+ * See src/graphics/sampler.c. */
+void lc_sampler_destroy_all(void);
+
+/* Destroys all samplers owned by a device being torn down.
+ * Called by lc_device_destroy(). See src/graphics/sampler.c. */
+void lc_sampler_destroy_for_device(const lc_device *device);
 
 /* Default title used when lc_window_desc.title is NULL */
 #define LC_DEFAULT_TITLE "LumaC"

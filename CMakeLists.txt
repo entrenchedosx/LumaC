@@ -39,6 +39,10 @@ set(LUMAC_SOURCES
     src/graphics/vulkan/vulkan_pipeline.c
     src/graphics/vulkan/vulkan_format.c
     src/graphics/vulkan/vulkan_buffer.c
+    src/graphics/image.c
+    src/graphics/sampler.c
+    src/graphics/vulkan/vulkan_image.c
+    src/graphics/vulkan/vulkan_sampler.c
 )
 
 # Platform backend selection (only the current OS backend is compiled)
@@ -154,6 +158,7 @@ if(LUMAC_BUILD_EXAMPLES)
     add_subdirectory(examples/clear_screen)
     add_subdirectory(examples/triangle)
     add_subdirectory(examples/vertex_triangle)
+    add_subdirectory(examples/texture_upload)
 endif()
 
 # Tests
@@ -272,4 +277,25 @@ if(LUMAC_BUILD_TESTS)
         add_dependencies(test_buffer_vulkan lumac_triangle_shaders)
     endif()
     add_test(NAME test_buffer_vulkan COMMAND test_buffer_vulkan)
+
+    # Headless-safe: validates image/sampler argument handling, never
+    # touches Vulkan or the window system
+    add_executable(test_image tests/test_image.c)
+    target_link_libraries(test_image PRIVATE lumac)
+    target_include_directories(test_image PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    add_test(NAME test_image COMMAND test_image)
+
+    add_executable(test_sampler tests/test_sampler.c)
+    target_link_libraries(test_sampler PRIVATE lumac)
+    target_include_directories(test_sampler PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    add_test(NAME test_sampler COMMAND test_sampler)
+
+    # Integration: real image allocation/upload/round-trip, mipmaps,
+    # arrays, cube structure, samplers; needs a Vulkan runtime + GPU
+    # (no display needed), skips otherwise. Uses internal headers for
+    # the copy path (no public copy API exists by design).
+    add_executable(test_image_vulkan tests/test_image_vulkan.c)
+    target_link_libraries(test_image_vulkan PRIVATE lumac Vulkan::Vulkan)
+    target_include_directories(test_image_vulkan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME test_image_vulkan COMMAND test_image_vulkan)
 endif()

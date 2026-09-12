@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Image/texture foundation: `lc_image` (1D/2D/3D, mips incl. full
+  chain, array layers, cube-compatible flag, multisample field),
+  default full-resource views, whole-image layout tracking
+- Staging uploads via `lc_image_write` (descriptor-based regions),
+  GPU linear-blit mipmap generation, exact upload round-trips
+- `lc_sampler` (filters, mipmap modes, address modes, LODs,
+  capability-gated anisotropy); device negotiates samplerAnisotropy
+- Depth formats in `lc_format` with color/depth/stencil metadata;
+  `examples/texture_upload`
+- `LC_ERROR_IMAGE_CREATION_FAILED/SAMPLER_CREATION_FAILED/UNSUPPORTED`
 - Production resource foundation: backend-neutral `lc_format` system
   with centralized Vulkan translation
 - Generic `lc_buffer` abstraction (GPU-only / CPU-to-GPU / GPU-to-CPU

@@ -78,13 +78,16 @@ void lc_device_destroy(lc_device *device) {
     if (device == NULL) {
         return;
     }
-    /* Dependents first: pipelines, shaders, buffers, swapchains, then
-     * surfaces. vkDestroySwapchainKHR and vkDestroySurfaceKHR both need
-     * the logical device / instance, which die with the device below.
-     * Buffers and the upload context die before VkDevice; the upload
-     * teardown runs inside lc_vulkan_device_destroy. */
+    /* Dependents first: pipelines, shaders, samplers, images, buffers,
+     * swapchains, then surfaces. vkDestroySwapchainKHR and
+     * vkDestroySurfaceKHR both need the logical device / instance,
+     * which die with the device below. Buffers, images, and the upload
+     * context die before VkDevice; the upload teardown runs inside
+     * lc_vulkan_device_destroy. */
     lc_pipeline_destroy_for_device(device);
     lc_shader_destroy_for_device(device);
+    lc_sampler_destroy_for_device(device);
+    lc_image_destroy_for_device(device);
     lc_buffer_destroy_for_device(device);
     lc_swapchain_destroy_for_device(device);
     lc_surface_destroy_for_device(device);
@@ -150,4 +153,8 @@ void lc_device_get_limits(const lc_device *device,
     out_limits->max_vertex_bindings = props.limits.maxVertexInputBindings;
     out_limits->max_uniform_buffer_size =
         (uint64_t)props.limits.maxUniformBufferRange;
+    out_limits->max_image_array_layers = props.limits.maxImageArrayLayers;
+    out_limits->max_sampler_anisotropy =
+        (device->anisotropy_supported != 0) ? props.limits.maxSamplerAnisotropy
+                                            : 1.0f;
 }

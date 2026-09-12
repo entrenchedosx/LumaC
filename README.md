@@ -9,18 +9,21 @@ Lightweight cross-platform graphics API written in C11, with native Windows/Linu
 
 ## Overview
 
-LumaC is a small, explicit graphics API for games and graphical
-applications. It hides backend complexity (window-system integration,
-device selection, swapchain negotiation, frame synchronization) behind
-a handful of opaque handles — `lc_window`, `lc_device`, `lc_surface`,
-`lc_swapchain`, `lc_shader`, `lc_pipeline` — while staying close to
-the underlying API semantics. There is no engine, no scene graph, and
-no hidden global state beyond a small explicit tracking registry used
+LumaC is an experimental pre-1.0 cross-platform graphics API for C
+focused on providing a compact foundation for modern rendering
+systems. It hides backend complexity (window-system integration,
+device selection, swapchain negotiation, frame synchronization,
+resource management) behind a handful of opaque handles — `lc_window`,
+`lc_device`, `lc_surface`, `lc_swapchain`, `lc_shader`, `lc_pipeline`,
+`lc_buffer`, `lc_image`, `lc_sampler` — while staying close to the
+underlying API semantics. There is no engine, no scene graph, and no
+hidden global state beyond a small explicit tracking registry used
 for safe teardown ordering.
 
 The current Vulkan backend can open a window, select a GPU, build a
-swapchain, and render a vertex-indexed RGB triangle with validation
-layers clean. Vertex buffers do not exist yet.
+swapchain, manage buffers and textured images with mipmaps, and render
+triangles with validation layers clean. There is no descriptor,
+material, or PBR system yet — those build on this foundation.
 
 ## Features
 
@@ -39,16 +42,22 @@ layers clean. Vertex buffers do not exist yet.
 - GPU resource foundation: backend-neutral formats, generic buffers
   (GPU-only / CPU-to-GPU / GPU-to-CPU) with mapping and bounds-checked
   staging writes, backend-neutral vertex layouts, device limits
+- Image foundation: 1D/2D/3D images with mips, array layers, and
+  cube-compatible structure; default full-resource views; whole-image
+  layout tracking; staging uploads; GPU mipmap generation
+- Samplers: linear/nearest filtering, mipmap modes, four address
+  modes, LOD control, capability-gated anisotropy
 - Explicit lifetime model: dependents are destroyed before the objects
-  they borrow; shutdown order is pipelines, shaders, buffers,
-  swapchains, surfaces, devices, windows
+  they borrow; shutdown order is pipelines, shaders, samplers, images,
+  buffers, swapchains, surfaces, devices, windows
 - Static or shared library builds; headless-safe unit tests plus
   Vulkan integration tests that skip cleanly without a GPU/display
 
 ## Current Status
 
-Early development (`0.1.0-dev`). Vertex-buffer triangle rendering
-works; there are no textures, descriptors, or uniform buffers yet.
+Early development (`0.1.0-dev`). Image/sampler resources work with
+exact upload round-trips; there are no descriptors, materials, or PBR
+systems yet.
 
 | Feature              | Windows          | Linux            |
 | -------------------- | ---------------- | ---------------- |
@@ -61,6 +70,7 @@ works; there are no textures, descriptors, or uniform buffers yet.
 | Triangle rendering   | Verified         | Runtime verified (lavapipe) |
 | Shaders / pipeline   | Implemented      | Implemented (compiled clean) |
 | Buffers / formats    | Verified         | Runtime verified (lavapipe) |
+| Images / samplers    | Verified         | Runtime verified (lavapipe) |
 | Validation layers    | Clean            | Not available in test env |
 | D3D12                | Planned          | N/A              |
 | Wayland              | N/A              | Planned          |
@@ -83,10 +93,16 @@ Run the triangle examples — `triangle` (vertex-index generation) and
 # Windows:
 .\build\examples\triangle\Debug\triangle.exe
 .\build\examples\vertex_triangle\Debug\vertex_triangle.exe
+.\build\examples\texture_upload\Debug\texture_upload.exe
 # Linux:
 /build/triangle/triangle
 /build/vertex_triangle/vertex_triangle
+/build/texture_upload/texture_upload
 ```
+
+The texture example needs no window: it uploads a checkerboard,
+generates mipmaps, and builds an anisotropic sampler, printing each
+step.
 
 ## Building
 
@@ -189,6 +205,10 @@ int main(void)
   (GPU-only / CPU-to-GPU / GPU-to-CPU)
 - Vertex input: bindings/attributes, `lc_bind_vertex_buffer`
 - Capabilities: `lc_device_get_limits`, `lc_swapchain_get_format`
+- Images: `lc_image_create/destroy`, getters, `lc_image_write`,
+  `lc_image_generate_mipmaps` (1D/2D/3D, mips, layers, cube-ready)
+- Samplers: `lc_sampler_create/destroy` (filters, mipmaps, address
+  modes, LODs, anisotropy)
 
 See `include/lumac/lumac.h` for the authoritative documented API.
 
@@ -231,17 +251,22 @@ internal tracking lists — no reference counting, no global singletons.
 ## Roadmap
 
 Foundation — done: core, Windows/X11 windows, Vulkan device, surface,
-swapchain, frame lifecycle, graphics pipeline, triangle, resource
-system (buffers).
+swapchain, frame lifecycle, graphics pipeline, shaders, triangle,
+formats, buffers, GPU upload, vertex buffers.
 
-Next: textures, samplers, resource bindings, uniform/storage buffers,
-index drawing, instancing, depth/stencil, offscreen rendering, MSAA,
-compute.
+Near-term — done: images/textures, samplers. Next: descriptors and
+resource bindings, uniform/storage resources, index rendering,
+instancing, depth/stencil, 3D camera, meshes, offscreen rendering,
+HDR.
 
-Long term: asynchronous uploads, pipeline cache, timestamp queries,
-indirect drawing, bindless resources, debugging markers, profiling
-hooks, multithreaded recording, custom allocators, memory budgeting,
-device-lost recovery, render-graph helpers, D3D12, Wayland.
+Renderer — later: materials, PBR, lighting, shadow maps, environment
+maps / IBL, skybox, post-processing, forward+, frustum culling, LOD,
+GPU-driven rendering.
+
+Advanced: compute, indirect rendering, bindless resources, render
+graph, async transfer, async compute, pipeline cache, GPU timestamps,
+debug markers, multithreaded recording, custom allocators, memory
+budgets, device-lost recovery, D3D12, Wayland.
 
 ## Repository Structure
 
@@ -251,7 +276,8 @@ LumaC/
 ├── docs/                # ARCHITECTURE.md, API_DESIGN.md, images/
 ├── examples/            # basic_init, window, device_info,
 │                        # surface_info, swapchain_info, clear_screen,
-│                        # triangle (+ shaders/), vertex_triangle
+│                        # triangle (+ shaders/), vertex_triangle,
+│                        # texture_upload
 ├── include/lumac/       # public lumac.h
 ├── src/                 # core, platform, graphics, vulkan backend
 ├── tests/               # headless unit tests + Vulkan integration tests

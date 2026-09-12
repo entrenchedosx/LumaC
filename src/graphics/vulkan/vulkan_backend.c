@@ -399,6 +399,7 @@ static lc_result lc_vk_create_logical(lc_device *device,
     uint32_t i;
     VkDeviceQueueCreateInfo *queue_infos = NULL;
     VkDeviceCreateInfo create_info;
+    VkPhysicalDeviceFeatures enabled_features;
     const char *device_extensions[1];
 
     vkGetPhysicalDeviceQueueFamilyProperties(physical, &family_count, NULL);
@@ -420,8 +421,26 @@ static lc_result lc_vk_create_logical(lc_device *device,
 
     /* VK_KHR_swapchain only: verified present on this physical device
      * during selection, so requesting it here cannot fail for missing
-     * support. No other device extensions, no optional features. */
+     * support. */
     device_extensions[0] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+
+    /* Deliberate minimal features: sampler anisotropy is enabled when
+     * supported so samplers can offer it; everything else stays off.
+     * Support is recorded on the device for sampler validation and
+     * capability queries. */
+    memset(&enabled_features, 0, sizeof(enabled_features));
+    {
+        VkPhysicalDeviceFeatures supported;
+
+        memset(&supported, 0, sizeof(supported));
+        vkGetPhysicalDeviceFeatures(physical, &supported);
+        if (supported.samplerAnisotropy != VK_FALSE) {
+            enabled_features.samplerAnisotropy = VK_TRUE;
+            device->anisotropy_supported = 1;
+        } else {
+            device->anisotropy_supported = 0;
+        }
+    }
 
     memset(&create_info, 0, sizeof(create_info));
     create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -429,6 +448,7 @@ static lc_result lc_vk_create_logical(lc_device *device,
     create_info.pQueueCreateInfos = queue_infos;
     create_info.enabledExtensionCount = 1;
     create_info.ppEnabledExtensionNames = device_extensions;
+    create_info.pEnabledFeatures = &enabled_features;
 
     if (vkCreateDevice(physical, &create_info, NULL, &device->device) !=
         VK_SUCCESS) {

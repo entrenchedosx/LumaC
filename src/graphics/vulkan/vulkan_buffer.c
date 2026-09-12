@@ -99,8 +99,9 @@ static void lc_vk_memory_policy(lc_memory_usage memory,
 }
 
 /* Raw storage block: create, size, bind. Optionally maps persistently.
- * Fully unwinding; shared by tracked buffers and staging. */
-static lc_result lc_vk_storage_create(
+ * Fully unwinding; shared by tracked buffers, staging scratch, and
+ * image staging. */
+lc_result lc_vulkan_storage_create(
     lc_device *device, uint64_t size, VkBufferUsageFlags usage,
     VkMemoryPropertyFlags required, VkMemoryPropertyFlags preferred,
     VkBuffer *out_buffer, VkDeviceMemory *out_memory, void **out_mapped) {
@@ -189,11 +190,11 @@ lc_result lc_vulkan_buffer_create(lc_buffer *buffer) {
     lc_vk_memory_policy(buffer->memory_usage, &required, &preferred);
 
     if (buffer->memory_usage == LC_MEMORY_GPU_ONLY) {
-        res = lc_vk_storage_create(device, buffer->size, usage, required,
+        res = lc_vulkan_storage_create(device, buffer->size, usage, required,
                                    preferred, &buffer->vk_buffer,
                                    &buffer->vk_memory, NULL);
     } else {
-        res = lc_vk_storage_create(device, buffer->size, usage, required,
+        res = lc_vulkan_storage_create(device, buffer->size, usage, required,
                                    preferred, &buffer->vk_buffer,
                                    &buffer->vk_memory, &mapped);
     }
@@ -315,13 +316,14 @@ void lc_vulkan_upload_teardown(lc_device *device) {
     }
 }
 
-lc_result lc_vulkan_copy_buffer(lc_device *device, VkBuffer dst,
-                                uint64_t dst_offset, VkBuffer src,
-                                uint64_t src_offset, uint64_t size) {
+/* Immediate-submit upload session: ensure the context, drain any
+ * prior use, and leave the command buffer recording. Callers record
+ * arbitrary upload work (copies, blits, barriers), then finish with
+ * lc_vulkan_upload_submit(). Private; later replaceable by async
+ * upload queues without touching callers. */
+lc_result lc_vulkan_upload_begin(lc_device *device) {
     VkDevice dev_handle;
     VkCommandBufferBeginInfo begin_info;
-    VkBufferCopy region;
-    VkSubmitInfo submit_info;
     lc_result res;
 
     if (device == NULL) {
@@ -350,15 +352,29 @@ lc_result lc_vulkan_copy_buffer(lc_device *device, VkBuffer dst,
     if (vkBeginCommandBuffer(device->upload_cmd, &begin_info) != VK_SUCCESS) {
         return LC_ERROR_UNKNOWN;
     }
-    memset(&region, 0, sizeof(region));
-    region.srcOffset = (VkDeviceSize)src_offset;
-    region.dstOffset = (VkDeviceSize)dst_offset;
-    region.size = (VkDeviceSize)size;
-    vkCmdCopyBuffer(device->upload_cmd, src, dst, 1, &region);
+    return LC_SUCCESS;
+}
+
+VkCommandBuffer lc_vulkan_upload_cmd(const lc_device *device) {
+    if (device == NULL) {
+        return VK_NULL_HANDLE;
+    }
+    return device->upload_cmd;
+}
+
+lc_result lc_vulkan_upload_submit(lc_device *device) {
+    VkDevice dev_handle;
+    VkSubmitInfo submit_info;
+
+    if (device == NULL || device->device == VK_NULL_HANDLE ||
+        device->upload_cmd == VK_NULL_HANDLE) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    dev_handle = device->device;
+
     if (vkEndCommandBuffer(device->upload_cmd) != VK_SUCCESS) {
         return LC_ERROR_UNKNOWN;
     }
-
     memset(&submit_info, 0, sizeof(submit_info));
     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit_info.commandBufferCount = 1;
@@ -372,6 +388,27 @@ lc_result lc_vulkan_copy_buffer(lc_device *device, VkBuffer dst,
         return LC_ERROR_UNKNOWN;
     }
     return LC_SUCCESS;
+}
+
+lc_result lc_vulkan_copy_buffer(lc_device *device, VkBuffer dst,
+                                uint64_t dst_offset, VkBuffer src,
+                                uint64_t src_offset, uint64_t size) {
+    VkBufferCopy region;
+    lc_result res;
+
+    if (device == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    res = lc_vulkan_upload_begin(device);
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+    memset(&region, 0, sizeof(region));
+    region.srcOffset = (VkDeviceSize)src_offset;
+    region.dstOffset = (VkDeviceSize)dst_offset;
+    region.size = (VkDeviceSize)size;
+    vkCmdCopyBuffer(lc_vulkan_upload_cmd(device), src, dst, 1, &region);
+    return lc_vulkan_upload_submit(device);
 }
 
 lc_result lc_vulkan_buffer_write(lc_buffer *buffer, uint64_t offset,
@@ -405,7 +442,7 @@ lc_result lc_vulkan_buffer_write(lc_buffer *buffer, uint64_t offset,
      * immediate-submit copy. Staging is untracked host-side scratch:
      * created and destroyed inside this call. */
     lc_vk_memory_policy(LC_MEMORY_CPU_TO_GPU, &required, &preferred);
-    res = lc_vk_storage_create(device, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+    res = lc_vulkan_storage_create(device, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                required, preferred, &staging, &staging_mem,
                                &staging_ptr);
     if (res != LC_SUCCESS) {

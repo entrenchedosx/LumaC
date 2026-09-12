@@ -64,7 +64,13 @@ typedef enum lc_result {
     LC_SUBOPTIMAL = 16,
     LC_ERROR_SHADER_CREATION_FAILED = 17,
     LC_ERROR_PIPELINE_CREATION_FAILED = 18,
-    LC_ERROR_PIPELINE_INCOMPATIBLE = 19
+    LC_ERROR_PIPELINE_INCOMPATIBLE = 19,
+    LC_ERROR_IMAGE_CREATION_FAILED = 20,
+    LC_ERROR_SAMPLER_CREATION_FAILED = 21,
+    /* Recoverable capability gap (e.g. format lacks linear blit
+     * support, anisotropy unavailable): valid request, valid device,
+     * unsupported combination. Not fatal. */
+    LC_ERROR_UNSUPPORTED = 22
 } lc_result;
 
 /* -------------------------------------------------------------------------
@@ -514,10 +520,12 @@ typedef struct lc_pipeline lc_pipeline;
  * Threading: use only from the application's main thread.
  * ------------------------------------------------------------------------- */
 
-/* Backend-neutral GPU data formats for vertex attributes, color data,
- * and future textures/render targets. Names describe layout; exact
- * bit patterns follow the Vulkan convention (e.g. RGBA8 is R in the
- * lowest byte). LC_FORMAT_UNDEFINED means "no format". */
+/* Backend-neutral GPU data formats for vertex attributes, color and
+ * depth data, textures, and render targets. Names describe layout;
+ * exact bit patterns follow the Vulkan convention (e.g. RGBA8 is R in
+ * the lowest byte). LC_FORMAT_UNDEFINED means "no format". Compressed
+ * (BC/ASTC/ETC) formats are future work; no API here assumes one
+ * uncompressed texel. */
 typedef enum lc_format {
     LC_FORMAT_UNDEFINED = 0,
 
@@ -541,7 +549,13 @@ typedef enum lc_format {
     LC_FORMAT_R32_UINT,
     LC_FORMAT_RG32_UINT,
     LC_FORMAT_RGB32_UINT,
-    LC_FORMAT_RGBA32_UINT
+    LC_FORMAT_RGBA32_UINT,
+
+    /* Depth/stencil formats. Creatable as images today (allocation,
+     * views, uploads); depth *rendering* arrives in a later phase. */
+    LC_FORMAT_D16_UNORM,
+    LC_FORMAT_D24_UNORM_S8_UINT,
+    LC_FORMAT_D32_FLOAT
 } lc_format;
 
 /* Per-vertex or per-instance stepping. */
@@ -766,12 +780,17 @@ LC_API lc_result lc_bind_vertex_buffer(
  * Device capabilities (Phase 8: engine-oriented queries)
  * ------------------------------------------------------------------------- */
 
-/* Small backend-neutral capability set for resource planning. */
+/* Small backend-neutral capability set for resource planning.
+ * max_texture_2d_dimension also bounds 2D images. Anisotropy:
+ * max_sampler_anisotropy is 1.0 when unsupported, otherwise the clamp
+ * upper bound for lc_sampler_desc.max_anisotropy. */
 typedef struct lc_device_limits {
     uint32_t max_texture_2d_dimension;
     uint32_t max_vertex_attributes;
     uint32_t max_vertex_bindings;
     uint64_t max_uniform_buffer_size;
+    uint32_t max_image_array_layers;
+    float max_sampler_anisotropy;
 } lc_device_limits;
 
 /**
@@ -789,6 +808,234 @@ LC_API void lc_device_get_limits(
  * Returns LC_FORMAT_UNDEFINED for NULL.
  */
 LC_API lc_format lc_swapchain_get_format(const lc_swapchain *swapchain);
+
+/* -------------------------------------------------------------------------
+ * Image API (Phase 9: texture/image resource foundation)
+ *
+ * An image owns GPU storage (dimensions, mips, layers, format); a
+ * sampler (below) describes how it is sampled. The two are independent
+ * objects by design. Images belong to one device, never to a
+ * swapchain, so they survive swapchain recreation.
+ * Threading: use only from the application's main thread.
+ * ------------------------------------------------------------------------- */
+
+/* Opaque GPU image handle. Never dereference; use API below. */
+typedef struct lc_image lc_image;
+
+/* Image dimensionality. Only 2D is heavily exercised yet, but the
+ * architecture carries 1D/3D, mips, and layers from the start. */
+typedef enum lc_image_type {
+    LC_IMAGE_TYPE_1D = 0,
+    LC_IMAGE_TYPE_2D = 1,
+    LC_IMAGE_TYPE_3D = 2
+} lc_image_type;
+
+/* Backend-neutral image usage flags (bitmask, combine with |). */
+typedef enum lc_image_usage {
+    LC_IMAGE_USAGE_SAMPLED          = 1 << 0,
+    LC_IMAGE_USAGE_STORAGE          = 1 << 1,
+    LC_IMAGE_USAGE_COLOR_ATTACHMENT = 1 << 2,
+    LC_IMAGE_USAGE_DEPTH_STENCIL    = 1 << 3,
+    LC_IMAGE_USAGE_TRANSFER_SRC     = 1 << 4,
+    LC_IMAGE_USAGE_TRANSFER_DST     = 1 << 5
+} lc_image_usage;
+
+/* Optional image flags (bitmask). */
+typedef enum lc_image_flags {
+    LC_IMAGE_FLAG_NONE = 0,
+    /* 2D image with a layer count that is a multiple of 6, created so
+     * each consecutive 6-layer group can become a cubemap view later.
+     * No cubemap rendering exists yet; this reserves the structure. */
+    LC_IMAGE_FLAG_CUBE_COMPATIBLE = 1 << 0
+} lc_image_flags;
+
+/* Number of samples per texel (multisampling). Only 1 is exercised
+ * yet; the enum exists so the descriptor never needs reshaping when
+ * MSAA work begins. */
+typedef enum lc_sample_count {
+    LC_SAMPLE_COUNT_1 = 1,
+    LC_SAMPLE_COUNT_2 = 2,
+    LC_SAMPLE_COUNT_4 = 4,
+    LC_SAMPLE_COUNT_8 = 8
+} lc_sample_count;
+
+/* Image creation parameters. Dimension semantics:
+ *   1D: width > 0, height/depth conceptually 1;
+ *   2D: width > 0, height > 0, depth conceptually 1;
+ *   3D: width/height/depth > 0 and array_layers == 1.
+ * mip_levels >= 1, or 0 for the full chain
+ * (floor(log2(max dimension))) + 1. array_layers >= 1; cube-compatible
+ * images need a multiple of 6. `usage` needs at least one known bit.
+ * `flags` accepts lc_image_flags bits (0 for none). */
+typedef struct lc_image_desc {
+    lc_image_type type;
+    lc_format format;
+    uint32_t width;
+    uint32_t height;
+    uint32_t depth;
+    uint32_t mip_levels;
+    uint32_t array_layers;
+    uint32_t usage;
+    uint32_t flags;
+    lc_sample_count samples;
+} lc_image_desc;
+
+/**
+ * Create a GPU image on a device. Requires lc_init() first and a
+ * live device. The image carries a default full-resource view.
+ *
+ * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
+ *         LC_ERROR_INVALID_ARGUMENT (NULL device/desc/out, bad
+ *         dimensions for the type, UNDEFINED format, empty/unknown
+ *         usage, bad mip/layer counts, bad cube combination, bad
+ *         sample count, dead device), LC_ERROR_OUT_OF_MEMORY,
+ *         LC_ERROR_IMAGE_CREATION_FAILED.
+ */
+LC_API lc_result lc_image_create(
+    lc_device *device,
+    const lc_image_desc *desc,
+    lc_image **out_image
+);
+
+/**
+ * Destroy an image, its view, and its memory. Safe with NULL.
+ */
+LC_API void lc_image_destroy(lc_image *image);
+
+/**
+ * Get the image format in backend-neutral form.
+ * Returns LC_FORMAT_UNDEFINED for NULL.
+ */
+LC_API lc_format lc_image_get_format(const lc_image *image);
+
+/**
+ * Get the image width in texels (base mip level). Returns 0 for NULL.
+ */
+LC_API uint32_t lc_image_get_width(const lc_image *image);
+
+/**
+ * Get the image height in texels (base mip level, 1 for 1D).
+ * Returns 0 for NULL.
+ */
+LC_API uint32_t lc_image_get_height(const lc_image *image);
+
+/**
+ * Get the image mip level count. Returns 0 for NULL.
+ */
+LC_API uint32_t lc_image_get_mip_levels(const lc_image *image);
+
+/**
+ * Get the image array layer count. Returns 0 for NULL.
+ */
+LC_API uint32_t lc_image_get_array_layers(const lc_image *image);
+
+/* Upload region: one mip level of one array layer. Dimensions must fit
+ * inside that mip (`extent >> mip_level`, minimum 1 per axis);
+ * `data_size` must hold the tightly packed region
+ * (width*height*depth*element bytes). Uploads beyond mip 0 require the
+ * image to have been created with enough mip levels; generation (see
+ * below) is the normal way to fill the rest. */
+typedef struct lc_image_upload_desc {
+    uint32_t mip_level;
+    uint32_t array_layer;
+    uint32_t width;
+    uint32_t height;
+    uint32_t depth;
+    const void *data;
+    uint64_t data_size;
+} lc_image_upload_desc;
+
+/**
+ * Upload tightly packed texels into one mip level of one array layer
+ * through a staging buffer. The level ends in a sampled-readable
+ * layout (upper levels are generated separately, if at all).
+ *
+ * @return LC_SUCCESS, LC_ERROR_INVALID_ARGUMENT (NULL image/upload,
+ *         NULL data with nonzero size, dead image, level/layer out of
+ *         range, region exceeds the mip, short data, missing
+ *         TRANSFER_DST usage), LC_ERROR_OUT_OF_MEMORY (staging),
+ *         LC_ERROR_UNKNOWN (transfer failure).
+ */
+LC_API lc_result lc_image_write(
+    lc_image *image,
+    const lc_image_upload_desc *upload
+);
+
+/**
+ * Generate a full mip chain on the GPU with linear filtering, ending
+ * with every level sampled-readable. Requires TRANSFER_SRC and
+ * TRANSFER_DST usage; the format must support linear blits.
+ *
+ * @return LC_SUCCESS, LC_ERROR_INVALID_ARGUMENT (NULL/dead image),
+ *         LC_ERROR_UNSUPPORTED (usage or format cannot blit),
+ *         LC_ERROR_UNKNOWN (transfer failure).
+ */
+LC_API lc_result lc_image_generate_mipmaps(lc_image *image);
+
+/* -------------------------------------------------------------------------
+ * Sampler API (Phase 9: sampling configuration, no bindings yet)
+ * ------------------------------------------------------------------------- */
+
+/* Opaque sampler handle. Never dereference; use API below. */
+typedef struct lc_sampler lc_sampler;
+
+/* Backend-neutral magnification/minification filters. */
+typedef enum lc_filter {
+    LC_FILTER_NEAREST = 0,
+    LC_FILTER_LINEAR = 1
+} lc_filter;
+
+/* Backend-neutral mip filter. */
+typedef enum lc_mipmap_mode {
+    LC_MIPMAP_MODE_NEAREST = 0,
+    LC_MIPMAP_MODE_LINEAR = 1
+} lc_mipmap_mode;
+
+/* Backend-neutral sampler address modes. */
+typedef enum lc_address_mode {
+    LC_ADDRESS_REPEAT = 0,
+    LC_ADDRESS_MIRRORED_REPEAT = 1,
+    LC_ADDRESS_CLAMP_TO_EDGE = 2,
+    LC_ADDRESS_CLAMP_TO_BORDER = 3
+} lc_address_mode;
+
+/* Sampler creation parameters. LODs satisfy min_lod <= max_lod >= 0.
+ * max_anisotropy <= 1 disables anisotropy; larger values require
+ * device support (see lc_device_limits) and are clamped to it. */
+typedef struct lc_sampler_desc {
+    lc_filter min_filter;
+    lc_filter mag_filter;
+    lc_mipmap_mode mipmap_mode;
+    lc_address_mode address_u;
+    lc_address_mode address_v;
+    lc_address_mode address_w;
+    float mip_lod_bias;
+    float min_lod;
+    float max_lod;
+    float max_anisotropy;
+} lc_sampler_desc;
+
+/**
+ * Create a sampler on a device. Requires lc_init() first and a live
+ * device. Anisotropy above 1 needs device support; values are clamped
+ * to the device maximum.
+ *
+ * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
+ *         LC_ERROR_INVALID_ARGUMENT (NULL device/desc/out, unknown
+ *         filter/address enums, inverted/negative LOD range, anisotropy
+ *         below 1, dead device), LC_ERROR_OUT_OF_MEMORY,
+ *         LC_ERROR_SAMPLER_CREATION_FAILED.
+ */
+LC_API lc_result lc_sampler_create(
+    lc_device *device,
+    const lc_sampler_desc *desc,
+    lc_sampler **out_sampler
+);
+
+/**
+ * Destroy a sampler. Safe to call with NULL.
+ */
+LC_API void lc_sampler_destroy(lc_sampler *sampler);
 
 #ifdef __cplusplus
 }

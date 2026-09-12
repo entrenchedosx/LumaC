@@ -73,6 +73,13 @@ struct lc_device {
     VkCommandPool upload_pool;
     VkCommandBuffer upload_cmd;
     VkFence upload_fence;
+
+    /* Capability state negotiated at creation: the beginning of a
+     * supported-vs-enabled model. Anisotropy is enabled when the
+     * physical device offers it; samplers clamp to the device maximum
+     * (see lc_device_get_limits). Nothing else is enabled: features
+     * stay minimal and deliberate. */
+    int anisotropy_supported;
 };
 
 /* Opaque public buffer type, completed here. A buffer belongs to one
@@ -328,6 +335,13 @@ lc_format lc_vulkan_untranslate_format(VkFormat format);
 /* Byte size of one lc_format element (0 for UNDEFINED). */
 uint32_t lc_format_byte_size(lc_format format);
 
+/* Format classification (0 for UNDEFINED/unknown). Backs aspect-mask
+ * choice, upload validation, and future depth paths. */
+int lc_format_is_color(lc_format format);
+int lc_format_is_depth(lc_format format);
+int lc_format_is_stencil(lc_format format);
+uint32_t lc_format_component_count(lc_format format);
+
 /*
  * Fill an allocated (zeroed) lc_buffer whose size/usage/memory fields
  * are already set: create VkBuffer, allocate and bind memory
@@ -351,12 +365,26 @@ lc_result lc_vulkan_buffer_write(lc_buffer *buffer, uint64_t offset,
 
 /*
  * Device upload context (lazy immediate-submit on the graphics queue).
- * Ensure creates pool/buffer/fence on first use; copy records, submits,
- * and waits a buffer-to-buffer copy; teardown destroys all three.
- * Safe on empty state; device must be alive.
+ * Ensure creates pool/buffer/fence on first use; begin drains prior
+ * use and starts recording; cmd exposes the recording buffer; submit
+ * ends, submits, and waits; teardown destroys all three. One session
+ * records arbitrary upload work (copies, blits, barriers) without a
+ * public command API. Safe on empty state; device must be alive.
  */
 lc_result lc_vulkan_upload_ensure(lc_device *device);
 void lc_vulkan_upload_teardown(lc_device *device);
+lc_result lc_vulkan_upload_begin(lc_device *device);
+VkCommandBuffer lc_vulkan_upload_cmd(const lc_device *device);
+lc_result lc_vulkan_upload_submit(lc_device *device);
+
+/* Raw buffer storage block shared by tracked buffers and staging
+ * scratch (tracked and untracked alike): create, size, bind, optional
+ * persistent map. Fully unwinding. `out_mapped` may be NULL to skip
+ * mapping. */
+lc_result lc_vulkan_storage_create(
+    lc_device *device, uint64_t size, VkBufferUsageFlags usage,
+    VkMemoryPropertyFlags required, VkMemoryPropertyFlags preferred,
+    VkBuffer *out_buffer, VkDeviceMemory *out_memory, void **out_mapped);
 /* Exported (but not in the public header) so white-box integration
  * tests can drive the copy path directly; not part of the API. */
 LC_API lc_result lc_vulkan_copy_buffer(lc_device *device, VkBuffer dst,
@@ -370,6 +398,100 @@ lc_result lc_vulkan_frame_bind_vertex(lc_swapchain *swapchain,
                                       uint32_t binding,
                                       const lc_buffer *buffer,
                                       uint64_t offset);
+
+/* Opaque public image type, completed here. An image belongs to one
+ * device and never to a swapchain, so it survives swapchain
+ * recreation; device teardown destroys dependent images before
+ * VkDevice. `layout` tracks the whole image uniformly (see below);
+ * per-subresource state is documented future work. The default view
+ * covers all mips and layers; specialized views arrive later. */
+struct lc_image {
+    lc_device *device;
+
+    lc_image_type type;
+    lc_format format;
+    uint32_t width;
+    uint32_t height;
+    uint32_t depth;
+    uint32_t mip_levels;
+    uint32_t array_layers;
+    uint32_t usage; /* lc_image_usage bits, as requested */
+    uint32_t flags; /* lc_image_flags bits, as requested */
+    uint32_t samples;
+
+    VkImage vk_image;
+    VkDeviceMemory vk_memory;
+    VkImageView default_view;
+
+    /* Whole-image layout tracking. Every transition helper moves all
+     * mips and layers together. Future render-target and compute use
+     * will need per-subresource state; until then this is the single
+     * source of truth and uploads/mips always leave defined states. */
+    VkImageLayout layout;
+
+    lc_image *next;
+    lc_image *prev;
+};
+
+/*
+ * Validate `desc` (dimensions per type, format, usage, mips, layers,
+ * cube combination, samples) and create the VkImage, memory, and
+ * default full-resource view. Starts in UNDEFINED layout. On failure
+ * tears down whatever stage was reached; the caller owns the struct.
+ */
+lc_result lc_vulkan_image_create(lc_image *image, lc_device *device,
+                                 const lc_image_desc *desc);
+
+/* Destroys view, image, and memory. Device must still be alive;
+ * callers guarantee ordering via device-teardown hooks. */
+void lc_vulkan_image_destroy(lc_image *image);
+
+/*
+ * Transition the whole image to a new layout on the upload context
+ * (immediate submit). Records one barrier over all mips/layers with
+ * stage/access masks suited to the endpoints. Unknown transitions
+ * fail rather than emit invalid barriers.
+ */
+lc_result lc_vulkan_image_transition(lc_image *image, VkImageLayout new_layout);
+
+/* Upload one tightly packed mip/layer region via staging. Assumes the
+ * caller validated liveness, range, size, and TRANSFER_DST usage. */
+lc_result lc_vulkan_image_write(lc_image *image,
+                                const lc_image_upload_desc *upload);
+
+/* Generate the full mip chain with linear blits, ending all levels
+ * sampled-readable. Requires TRANSFER_SRC + TRANSFER_DST usage and
+ * linear-blit support for the format. */
+lc_result lc_vulkan_image_generate_mipmaps(lc_image *image);
+
+/* Copy one mip/layer region into a buffer, leaving the image
+ * sampled-readable. Exported (but not in the public header) so
+ * white-box integration tests can verify round-trips exactly; not
+ * part of the API. */
+LC_API lc_result lc_vulkan_copy_image_to_buffer(
+    lc_device *device, lc_image *image, uint32_t mip_level,
+    uint32_t array_layer, uint32_t width, uint32_t height, uint32_t depth,
+    VkBuffer dst, uint64_t dst_offset);
+
+/* Opaque public sampler type, completed here. Device-owned, fully
+ * independent of images (no bindings exist yet). */
+struct lc_sampler {
+    lc_device *device;
+    VkSampler vk_sampler;
+    lc_sampler *next;
+    lc_sampler *prev;
+};
+
+/*
+ * Validate `desc` (enums, LOD range, anisotropy against device
+ * support) and create the VkSampler. On failure the struct is left
+ * empty; the caller still owns it.
+ */
+lc_result lc_vulkan_sampler_create(lc_sampler *sampler, lc_device *device,
+                                   const lc_sampler_desc *desc);
+
+/* Destroys the VkSampler. Device must still be alive. */
+void lc_vulkan_sampler_destroy(lc_sampler *sampler);
 
 /*
  * Begin a frame on a live, idle swapchain struct: wait for a flight

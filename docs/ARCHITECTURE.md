@@ -32,6 +32,14 @@ Applications / Games / Editors / UI / Engines / Visualization
   GPU buffers with a three-way memory model (GPU-only, CPU-to-GPU,
   GPU-to-CPU). Buffers belong to a device, never to a swapchain, so
   they survive swapchain recreation.
+- **Images** (`src/graphics/image.c`, `vulkan_image.c`): 1D/2D/3D
+  GPU images with mips, array layers, and cube-compatible structure;
+  default full-resource views; whole-image layout tracking (documented
+  limitation vs future per-subresource state); staging uploads and GPU
+  mipmap generation through the shared upload context.
+- **Samplers** (`src/graphics/sampler.c`): standalone sampling
+  configuration (filters, mipmap modes, address modes, LODs,
+  capability-gated anisotropy). No bindings yet by design.
 - **Shaders** (`src/graphics/shader.c`): SPIR-V (Vulkan) / bytecode
   modules. Independent after pipeline creation.
 - **Pipelines** (`src/graphics/pipeline.c`): vertex+fragment pair
@@ -57,9 +65,10 @@ Applications / Games / Editors / UI / Engines / Visualization
 - Caller-created handles are caller-owned (`lc_*_destroy`).
 - A handle borrows what it was built from; dependents die first,
   enforced by internal tracking lists (no reference counting):
-  `pipelines -> shaders -> buffers -> swapchains -> surfaces ->
-  devices -> windows -> core`. (Shaders are independent of pipelines
-  post-creation but still die before their device.)
+  `pipelines -> shaders -> samplers -> images -> buffers ->
+  swapchains -> surfaces -> devices -> windows -> core`. (Shaders are
+  independent of pipelines post-creation but still die before their
+  device; images/samplers are device children like buffers.)
 - Destroying a parent first auto-destroys dependents; shutdown
   follows the same order.
 
