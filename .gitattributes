@@ -1,0 +1,16 @@
+# Normalize line endings to LF in the repository; check out native endings.
+* text=auto
+
+# C sources, headers, build files, and docs are always text.
+*.c text
+*.h text
+*.txt text
+*.md text
+*.cmake text
+CMakeLists.txt text
+.gitignore text
+.gitattributes text
+
+# Windows batch / PowerShell helpers stay CRLF-proof via text=auto above;
+# no binary classification needed (no binaries are versioned).
+*.png binary

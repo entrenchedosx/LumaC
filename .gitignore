@@ -1,0 +1,51 @@
+# Build trees (all configurations / generators)
+build/
+build_shared/
+build-release/
+build_verify/
+build_wsl/
+out/
+
+# CMake generated files (in-source configure leftovers)
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+DartConfiguration.tcl
+Testing/
+install_manifest.txt
+
+# Visual Studio
+.vs/
+*.vcxproj.user
+*.suo
+*.sdf
+*.opensdf
+
+# Compiled objects and binaries
+*.obj
+*.o
+*.lib
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary logs and captures
+*.log
