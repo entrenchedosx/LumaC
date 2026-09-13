@@ -87,6 +87,7 @@ lc_result lc_image_view_create(lc_image *image,
         *out_view = NULL;
         return LC_ERROR_OUT_OF_MEMORY;
     }
+    view->resource_id = lc_issue_resource_id();
 
     res = lc_vulkan_image_view_create(view, image, desc);
     if (res != LC_SUCCESS) {
@@ -104,6 +105,9 @@ void lc_image_view_destroy(lc_image_view *view) {
     if (view == NULL) {
         return;
     }
+    /* Render targets borrow views: dependents die first so no stale
+     * attachment pointer survives. */
+    lc_render_target_destroy_for_view(view);
     lc_image_view_list_remove(view);
     lc_vulkan_image_view_destroy(view);
     free(view);

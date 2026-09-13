@@ -27,6 +27,7 @@
  */
 typedef struct lc_state {
     int initialized;
+    uint64_t next_resource_id; /* monotonic stable IDs, starts at 1 */
     lc_window *windows;
     lc_device *devices;
     lc_surface *surfaces;
@@ -39,6 +40,7 @@ typedef struct lc_state {
     lc_sampler *samplers;
     lc_binding_layout *binding_layouts;
     lc_binding_set *binding_sets;
+    lc_render_target *render_targets;
 } lc_state;
 
 /* Accessor for the single process-wide state (see src/lumac.c) */
@@ -92,10 +94,6 @@ void lc_pipeline_destroy_all(void);
 /* Destroys all pipelines owned by a device being torn down.
  * Called by lc_device_destroy(). See src/graphics/pipeline.c. */
 void lc_pipeline_destroy_for_device(const lc_device *device);
-
-/* Destroys all pipelines anchored to a swapchain being torn down.
- * Called by lc_swapchain_destroy(). See src/graphics/pipeline.c. */
-void lc_pipeline_destroy_for_swapchain(const lc_swapchain *swapchain);
 
 /* Nonzero when a pipeline handle is live. Shared by frame.c for
  * bind/draw validation. See src/graphics/pipeline.c. */
@@ -152,6 +150,22 @@ void lc_binding_set_destroy_all(void);
 /* Destroys all binding sets owned by a device being torn down.
  * Called by lc_device_destroy(). See src/graphics/binding.c. */
 void lc_binding_set_destroy_for_device(const lc_device *device);
+
+/* Nonzero when a render-target handle is live. Shared by frame and
+ * encoder validation. See src/graphics/render_target.c. */
+int lc_render_target_is_live(const lc_render_target *target);
+
+/* Destroys all live render targets. Called by lc_shutdown().
+ * See src/graphics/render_target.c. */
+void lc_render_target_destroy_all(void);
+
+/* Destroys all render targets owned by a device being torn down.
+ * Called by lc_device_destroy(). See src/graphics/render_target.c. */
+void lc_render_target_destroy_for_device(const lc_device *device);
+
+/* Destroys all render targets referencing a view being torn down.
+ * Called by lc_image_view_destroy(). See src/graphics/render_target.c. */
+void lc_render_target_destroy_for_view(const lc_image_view *view);
 
 /* Default title used when lc_window_desc.title is NULL */
 #define LC_DEFAULT_TITLE "LumaC"

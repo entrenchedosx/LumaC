@@ -24,7 +24,7 @@ static int g_failed = 0;
 int main(void) {
     lc_device *sentinel = (lc_device *)0x1; /* never dereferenced */
     lc_device *out = sentinel;
-    lc_device_desc desc;
+    lc_device_desc desc = { 0 };
     lc_result r;
 
     printf("Running LumaC device validation tests...\n");

@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <string.h>
 
 #include "lumac/lumac.h"
 #include "internal/lumac_internal.h"
@@ -101,6 +102,7 @@ lc_result lc_image_create(lc_device *device, const lc_image_desc *desc,
         *out_image = NULL;
         return LC_ERROR_OUT_OF_MEMORY;
     }
+    image->resource_id = lc_issue_resource_id();
 
     res = lc_vulkan_image_create(image, device, desc);
     if (res != LC_SUCCESS) {
@@ -158,6 +160,25 @@ uint32_t lc_image_get_array_layers(const lc_image *image) {
         return 0;
     }
     return image->array_layers;
+}
+
+void lc_image_get_memory_info(const lc_image *image,
+                              lc_resource_memory_info *out_info) {
+    if (out_info == NULL) {
+        return;
+    }
+    memset(out_info, 0, sizeof(*out_info));
+    if (image == NULL || !lc_is_live_image(image)) {
+        return;
+    }
+    /* Mip-0 footprint (mips add on top; allocation_size is exact). */
+    out_info->requested_size =
+        (uint64_t)image->width * (uint64_t)image->height *
+        (uint64_t)image->depth * (uint64_t)image->array_layers *
+        (uint64_t)lc_format_byte_size(image->format);
+    out_info->allocation_size = image->allocation_size;
+    out_info->dedicated = image->memory_dedicated;
+    out_info->memory_class = image->memory_class;
 }
 
 lc_result lc_image_write(lc_image *image,

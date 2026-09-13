@@ -176,12 +176,25 @@ typedef enum lc_backend {
     LC_BACKEND_VULKAN = 1
 } lc_backend;
 
-/* Device creation parameters. enable_validation != 0 requests Vulkan
+/* Device creation parameters. Zero-initialize the whole struct
+ * (e.g. `= { 0 }`) and set the fields you use: an uninitialized
+ * pipeline_cache_path pointer is undefined behavior (Vulkan-style
+ * create-info discipline). enable_validation != 0 requests Vulkan
  * validation layers; if they are unavailable, creation continues without
- * validation after a brief stderr notice (best-effort diagnostics). */
+ * validation after a brief stderr notice (best-effort diagnostics).
+ * Phase 18: pipeline_cache_path optionally names a file backing the
+ * persistent Vulkan pipeline cache (backend-neutral name; a future
+ * D3D12 backend may use its own representation). NULL or empty means
+ * in-memory cache only (no file I/O). disable_pipeline_cache != 0
+ * disables even the in-memory VkPipelineCache (no file I/O either;
+ * for tests and sandboxed environments). The path is copied at
+ * creation; the caller keeps ownership. Parent directories must
+ * already exist; unwritable paths fail safely (cache disabled). */
 typedef struct lc_device_desc {
     lc_backend backend;
     int enable_validation;
+    const char *pipeline_cache_path;
+    int disable_pipeline_cache;
 } lc_device_desc;
 
 /**
@@ -212,10 +225,35 @@ LC_API lc_result lc_device_create(
 LC_API void lc_device_destroy(lc_device *device);
 
 /**
+ * Block until all previously submitted device work completes.
+ * Safe with NULL (no-op) and with dead devices. Needed before
+ * destroying resources the GPU may still reference (e.g. sampled
+ * attachments being recreated) and before teardown without
+ * external synchronization. Best effort: wait failures are
+ * swallowed (nothing useful to report to a sync primitive).
+ */
+LC_API void lc_device_wait_idle(lc_device *device);
+
+/**
  * Get the GPU name (e.g. "NVIDIA GeForce RTX 5060").
  * Valid for the lifetime of the device. Returns NULL for NULL device.
  */
 LC_API const char *lc_device_get_name(const lc_device *device);
+
+/* -------------------------------------------------------------------------
+ * Monotonic clock (Phase 18: profiling foundation).
+ *
+ * Backend-neutral high-resolution monotonic ticks for CPU-side timing
+ * (renderer frame profiles, pipeline-creation timing). Never wall
+ * time; never Vulkan timestamps (GPU timing is deferred debt).
+ * Threading: callable from any thread.
+ * ------------------------------------------------------------------------- */
+
+/** Ticks per second (> 0 always; fallback scale when unavailable). */
+LC_API uint64_t lc_clock_frequency(void);
+
+/** Current monotonic tick count (arbitrary epoch; differences only). */
+LC_API uint64_t lc_clock_now(void);
 
 /**
  * Get the backend this device was created with.
@@ -567,6 +605,72 @@ typedef enum lc_vertex_input_rate {
     LC_VERTEX_INPUT_PER_INSTANCE = 1
 } lc_vertex_input_rate;
 
+/* Backend-neutral index element types for indexed drawing. Maps to
+ * Vulkan index types and D3D12 index-buffer formats alike. */
+typedef enum lc_index_type {
+    LC_INDEX_UINT16 = 0,
+    LC_INDEX_UINT32 = 1
+} lc_index_type;
+
+/* Backend-neutral rasterizer state. Zero-initialized descriptors
+ * preserve the legacy behavior (no culling, clockwise front). */
+typedef enum lc_cull_mode {
+    LC_CULL_NONE = 0,
+    LC_CULL_FRONT = 1,
+    LC_CULL_BACK = 2
+} lc_cull_mode;
+
+typedef enum lc_front_face {
+    LC_FRONT_FACE_CLOCKWISE = 0,
+    LC_FRONT_FACE_COUNTER_CLOCKWISE = 1
+} lc_front_face;
+
+/* One push-constant range: a byte window owned by the pipeline
+ * layout, addressed with lc_push_constants(). `visibility` uses
+ * lc_shader_visibility bits (graphics pipelines accept VERTEX and/or
+ * FRAGMENT). `offset` and `size` are in bytes, both multiples of 4,
+ * with size > 0 and offset + size inside the device limit
+ * (at least 128 bytes on Vulkan/D3D12-class hardware). Ranges must
+ * not overlap. Zero-initialize descriptors you do not use. */
+typedef struct lc_push_constant_range {
+    uint32_t visibility;
+    uint32_t offset;
+    uint32_t size;
+} lc_push_constant_range;
+
+/* Maximum color attachments per render target / pass. Targets with
+ * more are rejected; devices may support fewer (see
+ * lc_device_limits.max_color_attachments). */
+#define LC_MAX_COLOR_ATTACHMENTS 8
+
+/* Number of samples per texel (multisampling). Only 1 is exercised
+ * yet; the enum exists so descriptors never need reshaping when MSAA
+ * work begins. Render-target compatibility includes the sample count
+ * even before MSAA resolve exists. */
+typedef enum lc_sample_count {
+    LC_SAMPLE_COUNT_1 = 1,
+    LC_SAMPLE_COUNT_2 = 2,
+    LC_SAMPLE_COUNT_4 = 4,
+    LC_SAMPLE_COUNT_8 = 8
+} lc_sample_count;
+
+/* Backend-neutral render-target compatibility description (Phase 12).
+ * Pipelines are compatible with targets whose structural signature
+ * matches: color count + color formats + depth format + sample count.
+ * Width/height are NOT part of pipeline compatibility (dynamic
+ * viewport/scissor); they describe a concrete target object. Depth
+ * LC_FORMAT_UNDEFINED means "no depth". Zero attachments of both
+ * kinds is invalid for real targets; for pipeline descs an all-zero
+ * struct means "legacy: infer from the creation swapchain". */
+typedef struct lc_render_target_desc {
+    uint32_t width;
+    uint32_t height;
+    uint32_t color_attachment_count;
+    lc_format color_formats[LC_MAX_COLOR_ATTACHMENTS];
+    lc_format depth_stencil_format;
+    lc_sample_count samples;
+} lc_render_target_desc;
+
 /* One vertex buffer binding: `stride` bytes per element. */
 typedef struct lc_vertex_binding_desc {
     uint32_t binding;
@@ -583,12 +687,27 @@ typedef struct lc_vertex_attribute_desc {
     uint32_t offset;
 } lc_vertex_attribute_desc;
 
-/* Minimal graphics-pipeline description. Both shaders are required.
+/* Minimal graphics-pipeline description. The vertex shader is
+ * required; the fragment shader is optional (NULL selects
+ * rasterization without fragment processing — no color attachment
+ * is ever written, so this is only useful with depth-only targets,
+ * e.g. shadow-map depth passes).
  * Optional vertex input: zero counts mean no vertex buffers (shader
  * vertex-index generation, as in the first triangle). Optional
  * resource slots: an ordered array of binding layouts, indexed by
  * slot at bind time (backend-neutral numbering shared with D3D12
  * root-signature slots). Counts are validated at creation.
+ * Raster state defaults to no culling with a clockwise front face
+ * (legacy behavior). Depth is off by default; enable test/write for
+ * 3D rendering (LESS comparison). Optional push-constant ranges
+ * default to none.
+ * Render target (Phase 13): a valid structural compatibility
+ * description is MANDATORY (no legacy inference): 1..8 color formats
+ * and/or a depth format, color formats with color, depth format with
+ * depth, known sample count. Depth test/write require a depth format.
+ * Width/height are ignored for pipeline compatibility (pipelines are
+ * extent-independent). Use lc_swapchain_get_render_target_desc() to
+ * build a presentation-compatible description deliberately.
  * Zero-initialize the whole struct (e.g. `= { 0 }`) and set the
  * fields you use. */
 typedef struct lc_graphics_pipeline_desc {
@@ -600,22 +719,32 @@ typedef struct lc_graphics_pipeline_desc {
     uint32_t vertex_attribute_count;
     const lc_binding_layout *const *binding_layouts;
     uint32_t binding_layout_count;
+    lc_cull_mode cull_mode;
+    lc_front_face front_face;
+    int depth_test_enable;
+    int depth_write_enable;
+    const lc_push_constant_range *push_constant_ranges;
+    uint32_t push_constant_range_count;
+    lc_render_target_desc render_target;
 } lc_graphics_pipeline_desc;
 
 /**
- * Create a graphics pipeline for a swapchain's color format.
- * The shaders must be live, correctly staged, and owned by `device`;
- * they may be destroyed afterwards without affecting the pipeline.
+ * Create a graphics pipeline for a structural render-target
+ * signature. Requires lc_init() first and a live device. The shaders
+ * must be live, correctly staged, and owned by `device`; they may be
+ * destroyed afterwards without affecting the pipeline. The pipeline
+ * holds only the structural signature (never any target object) and
+ * works with every target or pass sharing it.
  *
  * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
- *         LC_ERROR_INVALID_ARGUMENT (NULL device/swapchain/desc/out,
- *         NULL/mis-staged/dead shaders, cross-device use, dead
- *         handles, invalid vertex layout), LC_ERROR_OUT_OF_MEMORY,
- *         LC_ERROR_PIPELINE_CREATION_FAILED.
+ *         LC_ERROR_INVALID_ARGUMENT (NULL device/desc/out, dead
+ *         device, NULL/mis-staged/dead shaders, cross-device use,
+ *         invalid vertex layout, invalid render-target description,
+ *         depth enabled without a depth format),
+ *         LC_ERROR_OUT_OF_MEMORY, LC_ERROR_PIPELINE_CREATION_FAILED.
  */
 LC_API lc_result lc_graphics_pipeline_create(
     lc_device *device,
-    lc_swapchain *swapchain,
     const lc_graphics_pipeline_desc *desc,
     lc_pipeline **out_pipeline
 );
@@ -629,6 +758,8 @@ LC_API void lc_pipeline_destroy(lc_pipeline *pipeline);
  * Bind a pipeline for subsequent lc_draw() calls. Only valid inside
  * an open frame. The pipeline must belong to the frame's device and
  * match the swapchain's current color format.
+ * Legacy convenience: operates on the frame's implicit swapchain
+ * pass. New code should prefer the encoder path.
  *
  * @return LC_SUCCESS, LC_ERROR_INVALID_ARGUMENT (NULL/dead handles,
  *         no open frame, cross-device use),
@@ -652,6 +783,119 @@ LC_API lc_result lc_draw(
     lc_swapchain *swapchain,
     uint32_t vertex_count,
     uint32_t first_vertex
+);
+
+/* -------------------------------------------------------------------------
+ * Phase 11: indexed drawing, instancing, push constants, depth clears
+ *
+ * Index buffers reuse lc_buffer with LC_BUFFER_USAGE_INDEX. Push
+ * constants reuse the pipeline's declared ranges. Depth comes from
+ * the swapchain's owned depth buffer (cleared to 1.0 by default).
+ * Threading: main thread only, inside an open frame unless noted.
+ * ------------------------------------------------------------------------- */
+
+/* Forward declaration: full lc_buffer definition follows in the
+ * Buffer API section; only the pointer is used here. */
+typedef struct lc_buffer lc_buffer;
+
+/**
+ * Bind an index buffer for subsequent lc_draw_indexed() calls. Only
+ * valid inside an open frame; like vertex bindings this is
+ * command-buffer state and must be re-established every frame.
+ *
+ * @param swapchain Live swapchain with an open frame.
+ * @param buffer Live buffer with LC_BUFFER_USAGE_INDEX, same device.
+ * @param offset Byte offset into the buffer (multiple of the index
+ *        size: 2 for UINT16, 4 for UINT32; must be inside the buffer).
+ * @param index_type Element width for index interpretation.
+ * @return LC_SUCCESS or LC_ERROR_INVALID_ARGUMENT (NULL/dead handles,
+ *         no open frame, cross-device use, missing INDEX usage, bad
+ *         offset/type).
+ */
+LC_API lc_result lc_bind_index_buffer(
+    lc_swapchain *swapchain,
+    lc_buffer *buffer,
+    uint64_t offset,
+    lc_index_type index_type
+);
+
+/**
+ * Draw indexed geometry with instancing. Requires a bound pipeline
+ * and a bound index buffer in the open frame.
+ *
+ * @param index_count Indices to process (> 0; offset + range must
+ *        fit the bound index buffer).
+ * @param instance_count Instances to draw (> 0; 1 for non-instanced).
+ * @param first_index First index inside the index buffer view.
+ * @param vertex_offset Signed offset added to each index before
+ *        vertex fetching (negative values address relative vertices).
+ * @param first_instance First instance ID (offsets gl_InstanceIndex
+ *        and per-instance attributes).
+ * @return LC_SUCCESS or LC_ERROR_INVALID_ARGUMENT (NULL/dead
+ *         swapchain, no open frame, nothing bound, no index buffer,
+ *         zero counts, out-of-range indices).
+ */
+LC_API lc_result lc_draw_indexed(
+    lc_swapchain *swapchain,
+    uint32_t index_count,
+    uint32_t instance_count,
+    uint32_t first_index,
+    int32_t vertex_offset,
+    uint32_t first_instance
+);
+
+/**
+ * Draw non-indexed geometry with instancing. Requires a bound
+ * pipeline in the open frame.
+ *
+ * @return LC_SUCCESS or LC_ERROR_INVALID_ARGUMENT (NULL/dead
+ *         swapchain, no open frame, nothing bound, zero counts).
+ */
+LC_API lc_result lc_draw_instanced(
+    lc_swapchain *swapchain,
+    uint32_t vertex_count,
+    uint32_t instance_count,
+    uint32_t first_vertex,
+    uint32_t first_instance
+);
+
+/**
+ * Push small constants (e.g. a 64-byte MVP matrix) for subsequent
+ * draws. Only valid inside an open frame with the matching pipeline
+ * bound. The byte window [offset, offset + size) must sit inside one
+ * declared pipeline range with a compatible stage mask.
+ *
+ * @param swapchain Live swapchain with an open frame.
+ * @param pipeline Bound pipeline owning the push-constant layout.
+ * @param visibility Stage mask for this push (subset of the range).
+ * @param offset Byte offset (multiple of 4).
+ * @param size Byte count (multiple of 4, > 0, <= 128 typically).
+ * @param data Source bytes (must be non-NULL when size > 0).
+ * @return LC_SUCCESS or LC_ERROR_INVALID_ARGUMENT (NULL/dead handles,
+ *         no open frame, pipeline not bound, bad range/visibility).
+ */
+LC_API lc_result lc_push_constants(
+    lc_swapchain *swapchain,
+    lc_pipeline *pipeline,
+    uint32_t visibility,
+    uint32_t offset,
+    uint32_t size,
+    const void *data
+);
+
+/**
+ * Clear the current frame's depth buffer. The value is clamped to
+ * [0, 1] (1.0 is the far plane). Only valid between lc_begin_frame
+ * and lc_end_frame; may be called multiple times (latest wins before
+ * the render pass opens, exact ordering via clear attachments after).
+ * When never called, depth clears to 1.0.
+ *
+ * @return LC_SUCCESS or LC_ERROR_INVALID_ARGUMENT (NULL/dead
+ *         swapchain, or no open frame).
+ */
+LC_API lc_result lc_clear_depth(
+    lc_swapchain *swapchain,
+    float depth
 );
 
 /* -------------------------------------------------------------------------
@@ -789,9 +1033,11 @@ LC_API lc_result lc_bind_vertex_buffer(
  * ------------------------------------------------------------------------- */
 
 /* Small backend-neutral capability set for resource planning.
- * max_texture_2d_dimension also bounds 2D images. Anisotropy:
- * max_sampler_anisotropy is 1.0 when unsupported, otherwise the clamp
- * upper bound for lc_sampler_desc.max_anisotropy. */
+ * max_texture_2d_dimension also bounds 2D images and render targets.
+ * Anisotropy: max_sampler_anisotropy is 1.0 when unsupported,
+ * otherwise the clamp upper bound for lc_sampler_desc.max_anisotropy.
+ * max_color_attachments bounds render-target/pass color counts
+ * (at most LC_MAX_COLOR_ATTACHMENTS). */
 typedef struct lc_device_limits {
     uint32_t max_texture_2d_dimension;
     uint32_t max_vertex_attributes;
@@ -802,6 +1048,7 @@ typedef struct lc_device_limits {
     uint32_t min_uniform_buffer_offset_alignment;
     uint32_t min_storage_buffer_offset_alignment;
     uint32_t max_bound_resource_slots;
+    uint32_t max_color_attachments;
 } lc_device_limits;
 
 /**
@@ -815,10 +1062,42 @@ LC_API void lc_device_get_limits(
 );
 
 /**
+ * Debug accounting for the internal render-pass cache (Phase 12/13):
+ * how many VkRenderPass objects are currently cached on the device.
+ * The cache never evicts by design (one entry per structure+policy
+ * key, shared); everything is destroyed with the device. Returns 0
+ * for NULL device.
+ */
+LC_API uint32_t lc_device_get_pass_cache_count(const lc_device *device);
+
+/**
  * Get a swapchain's color format in backend-neutral form.
  * Returns LC_FORMAT_UNDEFINED for NULL.
  */
 LC_API lc_format lc_swapchain_get_format(const lc_swapchain *swapchain);
+
+/**
+ * Get a swapchain's depth format in backend-neutral form (Phase 11).
+ * Every swapchain owns a depth buffer; the format is selected from
+ * device-supported depth formats at creation. Returns
+ * LC_FORMAT_UNDEFINED for NULL.
+ */
+LC_API lc_format lc_swapchain_get_depth_format(const lc_swapchain *swapchain);
+
+/**
+ * Fill a structural render-target description matching a swapchain
+ * (Phase 13 helper for presentation-compatible pipelines).
+ * Width/height mirror the current extent; color count is 1 with the
+ * swapchain color format; depth mirrors the swapchain depth format;
+ * samples are 1.
+ *
+ * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
+ *         LC_ERROR_INVALID_ARGUMENT (NULL swapchain/desc/out, dead
+ *         swapchain).
+ */
+LC_API lc_result lc_swapchain_get_render_target_desc(
+    const lc_swapchain *swapchain,
+    lc_render_target_desc *out_desc);
 
 /* -------------------------------------------------------------------------
  * Image API (Phase 9: texture/image resource foundation)
@@ -860,15 +1139,7 @@ typedef enum lc_image_flags {
     LC_IMAGE_FLAG_CUBE_COMPATIBLE = 1 << 0
 } lc_image_flags;
 
-/* Number of samples per texel (multisampling). Only 1 is exercised
- * yet; the enum exists so the descriptor never needs reshaping when
- * MSAA work begins. */
-typedef enum lc_sample_count {
-    LC_SAMPLE_COUNT_1 = 1,
-    LC_SAMPLE_COUNT_2 = 2,
-    LC_SAMPLE_COUNT_4 = 4,
-    LC_SAMPLE_COUNT_8 = 8
-} lc_sample_count;
+/* (lc_sample_count is defined with the render-target types above.) */
 
 /* Image creation parameters. Dimension semantics:
  *   1D: width > 0, height/depth conceptually 1;
@@ -982,6 +1253,126 @@ LC_API lc_result lc_image_write(
  *         LC_ERROR_UNKNOWN (transfer failure).
  */
 LC_API lc_result lc_image_generate_mipmaps(lc_image *image);
+
+/* -------------------------------------------------------------------------
+ * Image readback (Phase 18: public CPU-visible capture).
+ *
+ * Synchronous convenience API: image -> transfer to staging -> wait
+ * for completion -> copy to CPU. No Vulkan staging buffers, command
+ * buffers, fences, or query pools are exposed.
+ *
+ * PERFORMANCE WARNING: synchronous readback stalls both GPU and CPU
+ * (device idle + immediate transfer + staging copy). Use for
+ * screenshots, tests, editor thumbnails, and debugging — never every
+ * frame in normal gameplay. Normal rendering performs no readback
+ * unless explicitly requested.
+ *
+ * Layout semantics: CPU output is ALWAYS tightly packed deterministic
+ * rows (row_pitch == width * element_bytes), even when backend
+ * staging uses a larger pitch internally. Element bytes follow
+ * lc_format_byte_size; no reinterpretation ever happens (sRGB stays
+ * encoded, float stays float, BGRA stays BGRA, depth stays raw).
+ *
+ * Eligibility: the image MUST carry LC_IMAGE_USAGE_TRANSFER_SRC;
+ * otherwise INVALID_ARGUMENT is returned loudly (never silent
+ * zeros — the Phase 14 bug class). Renderer-owned capture-capable
+ * targets (HDR, post intermediates, environment maps, shadow maps)
+ * include TRANSFER_SRC automatically.
+ *
+ * Synchronization: the call drains prior device work before copying,
+ * so a readback immediately after lc_end_frame observes the finished
+ * frame. Images written by the STILL-OPEN recording must NOT be read
+ * until after lc_end_frame: layout tracking describes recorded (not
+ * yet executed) passes, and an immediate-submit copy issued
+ * mid-recording names layouts the GPU has not reached (validation
+ * error + garbage bytes). This is the same reason the test harness
+ * reads back only after end_frame.
+ *
+ * Future async path (reserved, not implemented): lc_readback_request
+ * / lc_readback_poll / lc_readback_map will build on these structs
+ * without breaking this synchronous API.
+ * ------------------------------------------------------------------------- */
+
+/* Which subresource to read: one mip level of one array layer
+ * (cube faces are array layers 0..5 of a cube-compatible image). */
+typedef struct lc_image_readback_desc {
+    uint32_t mip_level;
+    uint32_t array_layer;
+} lc_image_readback_desc;
+
+/* Deterministic CPU layout of a readback result. */
+typedef struct lc_image_readback_info {
+    uint32_t width;     /* texels of the selected mip */
+    uint32_t height;    /* texels of the selected mip */
+    lc_format format;   /* image format (no conversion) */
+    size_t row_pitch;   /* == width * element bytes (tight) */
+    size_t size;        /* == row_pitch * height (* depth for 3D) */
+} lc_image_readback_info;
+
+/**
+ * Query the CPU layout (and required byte size) for reading one
+ * mip/layer of an image without copying anything.
+ *
+ * Supported formats: all color formats plus D16_UNORM, D32_FLOAT,
+ * and D24_UNORM_S8_UINT (raw 4 bytes/texel). Multisampled images
+ * (samples != 1) are rejected. Requires TRANSFER_SRC usage.
+ *
+ * @return LC_SUCCESS, LC_ERROR_INVALID_ARGUMENT (NULL image/desc/
+ *         out, dead image, bad mip/layer, unsupported format,
+ *         multisampled, missing TRANSFER_SRC).
+ */
+LC_API lc_result lc_image_query_readback(
+    const lc_image *image,
+    const lc_image_readback_desc *desc,
+    lc_image_readback_info *out_info);
+
+/**
+ * Read one mip/layer of an image into tightly packed CPU memory.
+ * When dst == NULL or dst_size == 0, no bytes are written but
+ * *out_required_size still receives the required size (sizing
+ * query). When dst is provided but too small, nothing is written
+ * and INVALID_ARGUMENT is returned with the required size written
+ * when out_required_size != NULL.
+ *
+ * @return LC_SUCCESS, LC_ERROR_INVALID_ARGUMENT (NULL image/desc,
+ *         dead image, bad mip/layer, unsupported format,
+ *         multisampled, missing TRANSFER_SRC, short destination),
+ *         LC_ERROR_OUT_OF_MEMORY (staging), LC_ERROR_UNKNOWN
+ *         (transfer failure).
+ */
+LC_API lc_result lc_image_readback(
+    lc_image *image,
+    const lc_image_readback_desc *desc,
+    void *dst,
+    size_t dst_size,
+    size_t *out_required_size);
+
+/* -------------------------------------------------------------------------
+ * Pipeline-cache introspection (Phase 18: backend-neutral).
+ *
+ * The persistent Vulkan pipeline cache stays entirely behind LumaC;
+ * these fields expose only load/save facts (never Vulkan UUIDs).
+ * ------------------------------------------------------------------------- */
+typedef struct lc_pipeline_cache_info {
+    int enabled;           /* a VkPipelineCache exists for this device */
+    int loaded_from_file;  /* initial bytes came from pipeline_cache_path */
+    int saved_to_file;     /* shutdown wrote bytes back to that path */
+    uint64_t bytes_loaded; /* blob bytes accepted at creation */
+    uint64_t bytes_saved;  /* blob bytes written at shutdown */
+} lc_pipeline_cache_info;
+/* NOTE: saved_to_file/bytes_saved are set during lc_device_destroy
+ * (which frees the device struct), so post-shutdown verification
+ * should stat the file itself; the flags are best-effort live
+ * state, mainly useful to confirm "no save attempted". */
+
+/**
+ * Copy out pipeline-cache status (zeros for NULL device or NULL out
+ * handling: NULL device zeroes *out when provided; NULL out is a
+ * no-op).
+ */
+LC_API void lc_device_get_pipeline_cache_info(
+    const lc_device *device,
+    lc_pipeline_cache_info *out_info);
 
 /* -------------------------------------------------------------------------
  * Sampler API (Phase 9: sampling configuration, no bindings yet)
@@ -1252,6 +1643,8 @@ LC_API lc_result lc_binding_set_update(
 /**
  * Bind a resource set at a pipeline slot during an open frame.
  * The set's layout must be the pipeline's layout at `slot`.
+ * Legacy convenience: operates on the frame's implicit swapchain
+ * pass. New code should prefer the encoder path.
  *
  * @return LC_SUCCESS, LC_ERROR_INVALID_ARGUMENT (NULL/dead handles,
  *         no open frame, cross-device use, slot out of range,
@@ -1263,6 +1656,547 @@ LC_API lc_result lc_bind_binding_set(
     uint32_t slot,
     lc_binding_set *set
 );
+
+/* -------------------------------------------------------------------------
+ * Render targets + command encoders (Phase 12: offscreen rendering)
+ *
+ * A swapchain is a presentation mechanism, not the universal render
+ * target. Offscreen targets render 3D scenes into textures (editor
+ * viewports, thumbnails, G-buffers, shadow maps); a second pass
+ * samples the result to the swapchain. Pipelines are compatible
+ * structurally (formats + samples), never by target pointer.
+ * Threading: main thread only.
+ * ------------------------------------------------------------------------- */
+
+/* Opaque render-target handle. Never dereference; use API below.
+ * Offscreen targets are caller-owned (create/destroy). Swapchain
+ * targets are borrowed (never destroy). Targets hold non-owning
+ * references to their views; views must outlive their targets. */
+typedef struct lc_render_target lc_render_target;
+
+/* Opaque command-encoder handle. Borrowed from an open swapchain
+ * frame (see lc_swapchain_get_encoder); never destroy, never store
+ * past lc_end_frame. All generic recording happens through it. */
+typedef struct lc_command_encoder lc_command_encoder;
+
+/* Backend-neutral attachment load/store policies. */
+typedef enum lc_load_op {
+    LC_LOAD_OP_LOAD = 0,
+    LC_LOAD_OP_CLEAR = 1,
+    LC_LOAD_OP_DONT_CARE = 2
+} lc_load_op;
+
+typedef enum lc_store_op {
+    LC_STORE_OP_STORE = 0,
+    LC_STORE_OP_DONT_CARE = 1
+} lc_store_op;
+
+/* One offscreen color attachment reference. The view's image must
+ * carry LC_IMAGE_USAGE_COLOR_ATTACHMENT and (Phase 12 finals always
+ * land sampled-readable) LC_IMAGE_USAGE_SAMPLED. Dimensions must
+ * match the target extent (base mip level covering width x height). */
+typedef struct lc_render_target_attachment {
+    lc_image_view *view;
+} lc_render_target_attachment;
+
+/* Offscreen target creation parameters. At least one color attachment
+ * or a depth attachment is required. All color views must share one
+ * device, one extent (width x height at their subresource), one
+ * sample count, and color formats; the depth view (when present) must
+ * share the device/extent/samples with a depth format. Formats are
+ * inferred from the views (never duplicated). */
+typedef struct lc_render_target_create_desc {
+    uint32_t width;
+    uint32_t height;
+    const lc_render_target_attachment *color_attachments;
+    uint32_t color_attachment_count;
+    lc_image_view *depth_stencil_attachment;
+} lc_render_target_create_desc;
+
+/**
+ * Create an offscreen render target on a device. Requires lc_init()
+ * first and a live device. Views are borrowed (non-owning); the
+ * target becomes invalid for recording once any attachment view is
+ * destroyed (use is then rejected, never dereferenced).
+ *
+ * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
+ *         LC_ERROR_INVALID_ARGUMENT (NULL device/desc/out, dead device,
+ *         zero extent, zero attachments of both kinds, too many colors,
+ *         NULL color array with nonzero count, NULL/dead views,
+ *         cross-device use, dimension/sample mismatch, missing
+ *         COLOR_ATTACHMENT or DEPTH_STENCIL usage, color format used
+ *         as depth or vice versa, over device limits),
+ *         LC_ERROR_OUT_OF_MEMORY.
+ */
+LC_API lc_result lc_render_target_create(
+    lc_device *device,
+    const lc_render_target_create_desc *desc,
+    lc_render_target **out_target
+);
+
+/**
+ * Destroy an offscreen target and its backend framebuffers (views and
+ * images are untouched). Safe to call with NULL. Borrowed swapchain
+ * targets must never be passed here.
+ */
+LC_API void lc_render_target_destroy(lc_render_target *target);
+
+/**
+ * Get a target's extent width. Returns 0 for NULL.
+ */
+LC_API uint32_t lc_render_target_get_width(const lc_render_target *target);
+
+/**
+ * Get a target's extent height. Returns 0 for NULL.
+ */
+LC_API uint32_t lc_render_target_get_height(const lc_render_target *target);
+
+/**
+ * Get a target's color attachment count. Returns 0 for NULL.
+ */
+LC_API uint32_t
+lc_render_target_get_color_count(const lc_render_target *target);
+
+/**
+ * Get one color attachment format. Returns LC_FORMAT_UNDEFINED for
+ * NULL target or out-of-range index.
+ */
+LC_API lc_format
+lc_render_target_get_color_format(const lc_render_target *target,
+                                  uint32_t index);
+
+/**
+ * Get a target's depth format (UNDEFINED when depthless).
+ * Returns LC_FORMAT_UNDEFINED for NULL.
+ */
+LC_API lc_format
+lc_render_target_get_depth_format(const lc_render_target *target);
+
+/**
+ * Get a target's sample count (0 for NULL).
+ */
+LC_API lc_sample_count
+lc_render_target_get_samples(const lc_render_target *target);
+
+/**
+ * Get one color attachment view (borrowed, do not destroy). Needed by
+ * render layers that build explicit passes from targets without
+ * tracking views themselves. Returns NULL for NULL target or
+ * out-of-range index.
+ */
+LC_API lc_image_view *lc_render_target_get_color_view(
+    const lc_render_target *target,
+    uint32_t index);
+
+/**
+ * Get the depth attachment view (borrowed, do not destroy), or NULL
+ * when depthless or for NULL target.
+ */
+LC_API lc_image_view *
+lc_render_target_get_depth_view(const lc_render_target *target);
+
+/**
+ * Structural compatibility query: nonzero when `target` and
+ * `pipeline` share color count/formats, depth format, and samples.
+ * Returns 0 for NULL/dead handles (never crashes).
+ */
+LC_API int lc_render_target_is_compatible_with_pipeline(
+    const lc_render_target *target,
+    const lc_pipeline *pipeline);
+
+/**
+ * Borrow a swapchain's render-target representation (color + depth as
+ * created with the swapchain). The pointer is valid until the next
+ * swapchain recreate/destroy; re-query after recreation. Never
+ * destroy it. Returns NULL for NULL swapchain.
+ */
+LC_API lc_render_target *
+lc_swapchain_get_render_target(lc_swapchain *swapchain);
+
+/**
+ * Borrow the open frame's command encoder. Requires an open frame on
+ * a live swapchain (between lc_begin_frame and lc_end_frame).
+ *
+ * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
+ *         LC_ERROR_INVALID_ARGUMENT (NULL/out NULL, dead swapchain,
+ *         no open frame).
+ */
+LC_API lc_result lc_swapchain_get_encoder(
+    lc_swapchain *swapchain,
+    lc_command_encoder **out_encoder);
+
+/* One color attachment for an explicit render pass: the view to
+ * render into plus load/store policy and clear color. A NULL view is
+ * never valid here (views come from the target or swapchain). */
+typedef struct lc_render_color_attachment {
+    lc_image_view *view;
+    lc_load_op load_op;
+    lc_store_op store_op;
+    float clear_color[4];
+} lc_render_color_attachment;
+
+/* Depth attachment for an explicit render pass (nullable as a whole
+ * via a NULL desc pointer). Stencil must stay DONT_CARE with
+ * clear_stencil 0 (stencil rendering is deferred past Phase 12). */
+typedef struct lc_render_depth_attachment {
+    lc_image_view *view;
+    lc_load_op depth_load_op;
+    lc_store_op depth_store_op;
+    float clear_depth;
+    lc_load_op stencil_load_op;
+    lc_store_op stencil_store_op;
+    uint32_t clear_stencil;
+} lc_render_depth_attachment;
+
+/* Explicit offscreen render-pass description. Views must belong to
+ * one live lc_render_target created for the same extent; the
+ * attachment count/formats/samples must equal that target's
+ * signature (checked structurally). Width/height must equal the
+ * target extent. */
+typedef struct lc_render_pass_desc {
+    const lc_render_color_attachment *color_attachments;
+    uint32_t color_attachment_count;
+    const lc_render_depth_attachment *depth_attachment;
+    uint32_t width;
+    uint32_t height;
+} lc_render_pass_desc;
+
+/* Explicit swapchain render-pass description. Renders into the
+ * swapchain's current image (+ owned depth). Color must CLEAR (swap
+ * images start UNDEFINED each frame, so LOAD is rejected); depth may
+ * CLEAR or DONT_CARE. */
+typedef struct lc_render_swapchain_pass_desc {
+    lc_load_op color_load_op;
+    lc_store_op color_store_op;
+    float clear_color[4];
+    lc_load_op depth_load_op;
+    lc_store_op depth_store_op;
+    float clear_depth;
+} lc_render_swapchain_pass_desc;
+
+/**
+ * Begin an explicit offscreen render pass on an encoder. Exactly one
+ * pass may be open per frame (legacy implicit passes count too).
+ *
+ * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
+ *         LC_ERROR_INVALID_ARGUMENT (NULL encoder/desc, dead objects,
+ *         no open frame, pass already open, legacy pass state pending,
+ *         bad counts/enums/dimensions, views not from one live target,
+ *         signature mismatch, missing attachment usage, LOAD from
+ *         UNDEFINED state, stencil misuse).
+ */
+LC_API lc_result lc_encoder_begin_render_pass(
+    lc_command_encoder *encoder,
+    const lc_render_pass_desc *desc);
+
+/**
+ * Begin an explicit swapchain render pass on an encoder (same
+ * single-pass rules as above).
+ *
+ * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
+ *         LC_ERROR_INVALID_ARGUMENT (NULL encoder/swapchain/desc, dead
+ *         objects, encoder belongs to another swapchain, no open frame,
+ *         pass already open, legacy pass state pending, bad enums,
+ *         LOAD color on UNDEFINED swap image, stencil misuse).
+ */
+LC_API lc_result lc_encoder_begin_swapchain_pass(
+    lc_command_encoder *encoder,
+    lc_swapchain *swapchain,
+    const lc_render_swapchain_pass_desc *desc);
+
+/**
+ * End the open explicit pass. Requires a pass opened through this
+ * encoder.
+ *
+ * @return LC_SUCCESS or LC_ERROR_INVALID_ARGUMENT (NULL/dead encoder,
+ *         no open frame, no open pass).
+ */
+LC_API lc_result lc_encoder_end_render_pass(lc_command_encoder *encoder);
+
+/**
+ * Bind a pipeline for subsequent encoder draws. Requires an open
+ * explicit pass; the pipeline must be structurally compatible with
+ * the pass target (count/formats/samples) on the same device.
+ *
+ * @return LC_SUCCESS, LC_ERROR_INVALID_ARGUMENT (NULL/dead handles,
+ *         no open frame, no open pass, cross-device use),
+ *         LC_ERROR_PIPELINE_INCOMPATIBLE (signature mismatch).
+ */
+LC_API lc_result lc_encoder_bind_pipeline(
+    lc_command_encoder *encoder,
+    lc_pipeline *pipeline);
+
+/**
+ * Bind a resource set at a pipeline slot in the open explicit pass.
+ * Signature matching is canonical (contents, never pointers).
+ */
+LC_API lc_result lc_encoder_bind_binding_set(
+    lc_command_encoder *encoder,
+    lc_pipeline *pipeline,
+    uint32_t slot,
+    lc_binding_set *set);
+
+/**
+ * Bind a vertex buffer in the open explicit pass.
+ */
+LC_API lc_result lc_encoder_bind_vertex_buffer(
+    lc_command_encoder *encoder,
+    uint32_t binding,
+    lc_buffer *buffer,
+    uint64_t offset);
+
+/**
+ * Bind an index buffer in the open explicit pass.
+ */
+LC_API lc_result lc_encoder_bind_index_buffer(
+    lc_command_encoder *encoder,
+    lc_buffer *buffer,
+    uint64_t offset,
+    lc_index_type index_type);
+
+/**
+ * Push constants in the open explicit pass. The bound pipeline must
+ * equal `pipeline`; the window must fit a declared range.
+ */
+LC_API lc_result lc_encoder_push_constants(
+    lc_command_encoder *encoder,
+    lc_pipeline *pipeline,
+    uint32_t visibility,
+    uint32_t offset,
+    uint32_t size,
+    const void *data);
+
+/**
+ * Draw in the open explicit pass. Requires a bound compatible
+ * pipeline (and index buffer for indexed draws).
+ */
+LC_API lc_result lc_encoder_draw(
+    lc_command_encoder *encoder,
+    uint32_t vertex_count,
+    uint32_t first_vertex);
+
+LC_API lc_result lc_encoder_draw_indexed(
+    lc_command_encoder *encoder,
+    uint32_t index_count,
+    uint32_t instance_count,
+    uint32_t first_index,
+    int32_t vertex_offset,
+    uint32_t first_instance);
+
+LC_API lc_result lc_encoder_draw_instanced(
+    lc_command_encoder *encoder,
+    uint32_t vertex_count,
+    uint32_t instance_count,
+    uint32_t first_vertex,
+    uint32_t first_instance);
+
+/* -------------------------------------------------------------------------
+ * Resource states + explicit transitions (Phase 19: AAA
+ * synchronization foundation).
+ *
+ * Backend-neutral semantic states. LumaC converts them to
+ * backend synchronization (Vulkan: layouts, stages, access masks)
+ * internally — those never cross this header, so the same states
+ * map onto future D3D12 barriers. No state names any queue;
+ * graphics/compute/transfer scheduling arrives later without
+ * replacing this model.
+ * ------------------------------------------------------------------------- */
+typedef enum lc_resource_state {
+    LC_RESOURCE_STATE_UNDEFINED = 0,
+    LC_RESOURCE_STATE_COLOR_ATTACHMENT_WRITE = 1,
+    LC_RESOURCE_STATE_DEPTH_ATTACHMENT_WRITE = 2,
+    LC_RESOURCE_STATE_SHADER_READ = 3,
+    /* General read/write (mapped, reserved for future storage/
+     * compute use; valid to name, tracked, transitioned). */
+    LC_RESOURCE_STATE_SHADER_READ_WRITE = 4,
+    LC_RESOURCE_STATE_TRANSFER_SRC = 5,
+    LC_RESOURCE_STATE_TRANSFER_DST = 6,
+    /* Swapchain presentation state (swapchain images are untracked;
+     * present for completeness and future use). */
+    LC_RESOURCE_STATE_PRESENT = 7,
+    /* Buffer-oriented states (tracked when buffer-state tracking
+     * lands with compute/indirect work; valid enum values today so
+     * the abstraction never needs replacing). */
+    LC_RESOURCE_STATE_VERTEX_READ = 8,
+    LC_RESOURCE_STATE_INDEX_READ = 9,
+    LC_RESOURCE_STATE_UNIFORM_READ = 10,
+    LC_RESOURCE_STATE_STORAGE_READ = 11,
+    LC_RESOURCE_STATE_STORAGE_WRITE = 12,
+    LC_RESOURCE_STATE_INDIRECT_READ = 13
+} lc_resource_state;
+
+/* One subresource range: mip/layer subset (cubemap faces are array
+ * layers). Counts are exact (>= 1); whole-image callers pass the
+ * full range explicitly. */
+typedef struct lc_image_subresource_range {
+    uint32_t base_mip_level;
+    uint32_t level_count;
+    uint32_t base_array_layer;
+    uint32_t layer_count;
+} lc_image_subresource_range;
+
+/**
+ * Record an explicit image transition into the open frame's command
+ * buffer (no immediate submit). The old state comes from LumaC
+ * tracking — callers name only the destination (PART F). Updates
+ * tracking immediately (recorded-not-executed discipline, same as
+ * render-pass finals).
+ *
+ * Suitable states for images: UNDEFINED, COLOR_ATTACHMENT_WRITE,
+ * DEPTH_ATTACHMENT_WRITE, SHADER_READ, SHADER_READ_WRITE,
+ * TRANSFER_SRC, TRANSFER_DST. Buffer-only states and PRESENT are
+ * rejected for images.
+ *
+ * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
+ *         LC_ERROR_INVALID_ARGUMENT (NULL handles, dead objects, no
+ *         open frame, bad/overflowing range, bad state for images).
+ */
+LC_API lc_result lc_encoder_transition_image(
+    lc_command_encoder *encoder,
+    lc_image *image,
+    const lc_image_subresource_range *range,
+    lc_resource_state new_state);
+
+/* -------------------------------------------------------------------------
+ * GPU memory statistics + introspection (Phase 19: AAA allocator).
+ *
+ * Backend-neutral committed/used accounting over allocator memory
+ * classes. device_local covers GPU-resident blocks; host_visible
+ * covers CPU-visible upload/readback blocks. free/largest-free
+ * expose fragmentation; counts expose sharing (resource_count >>
+ * block_count proves suballocation). D3D12 maps these onto heap
+ * categories (DEFAULT / UPLOAD / READBACK) later.
+ * ------------------------------------------------------------------------- */
+typedef struct lc_memory_stats {
+    uint64_t device_local_allocated; /* committed block bytes */
+    uint64_t device_local_used;      /* live suballocation bytes */
+    uint64_t device_local_free;      /* allocated - used */
+    uint64_t host_visible_allocated;
+    uint64_t host_visible_used;
+    uint64_t host_visible_free;
+    uint64_t allocation_count;       /* live suballocations */
+    uint64_t block_count;            /* live VkDeviceMemory blocks */
+    uint64_t dedicated_allocation_count;
+    uint64_t largest_free_range;     /* biggest single free range */
+} lc_memory_stats;
+
+/**
+ * Copy out allocator statistics (zeros for NULL device or NULL out
+ * handling: NULL device zeroes *out when provided; NULL out is a
+ * no-op).
+ */
+LC_API void lc_device_get_memory_stats(
+    const lc_device *device,
+    lc_memory_stats *out_stats);
+
+/* Backend-neutral memory class for one resource (D3D12-mappable). */
+typedef enum lc_memory_class {
+    LC_MEMORY_CLASS_UNKNOWN = 0,
+    LC_MEMORY_CLASS_DEVICE_LOCAL = 1, /* GPU-resident */
+    LC_MEMORY_CLASS_UPLOAD = 2,       /* CPU->GPU visible */
+    LC_MEMORY_CLASS_READBACK = 3      /* GPU->CPU visible */
+} lc_memory_class;
+
+/* Per-resource memory introspection (no backend handles). */
+typedef struct lc_resource_memory_info {
+    uint64_t requested_size;  /* resource size as created */
+    uint64_t allocation_size; /* aligned suballocation (or whole) */
+    int dedicated;            /* nonzero: own VkDeviceMemory */
+    lc_memory_class memory_class;
+} lc_resource_memory_info;
+
+/**
+ * Copy out one buffer's memory info (zeros for NULL/dead buffer;
+ * out may be NULL for a no-op).
+ */
+LC_API void lc_buffer_get_memory_info(
+    const lc_buffer *buffer,
+    lc_resource_memory_info *out_info);
+
+/**
+ * Copy out one image's memory info (zeros for NULL/dead image;
+ * out may be NULL for a no-op).
+ */
+LC_API void lc_image_get_memory_info(
+    const lc_image *image,
+    lc_resource_memory_info *out_info);
+
+/* One heap's budget (backend-neutral; unknown when unsupported). */
+typedef struct lc_memory_heap_budget {
+    uint64_t budget; /* usable budget bytes, 0 when unknown */
+    uint64_t usage;  /* current usage bytes, 0 when unknown */
+} lc_memory_heap_budget;
+
+#define LC_MAX_MEMORY_HEAPS 16
+
+/* Memory budget query (Vulkan: VK_EXT_memory_budget when present;
+ * never faked — unknown reports available == 0 with zero heaps). */
+typedef struct lc_memory_budget {
+    int available; /* nonzero when backend reported real numbers */
+    uint32_t heap_count;
+    lc_memory_heap_budget heaps[LC_MAX_MEMORY_HEAPS];
+} lc_memory_budget;
+
+/**
+ * Copy out memory budget (zeros for NULL device or NULL out
+ * handling as above; available == 0 when unsupported).
+ */
+LC_API void lc_device_get_memory_budget(
+    const lc_device *device,
+    lc_memory_budget *out_budget);
+
+/* -------------------------------------------------------------------------
+ * Resource identity (Phase 18: ABA hardening).
+ *
+ * Every LumaC resource carries a stable unique identity assigned at
+ * creation that is NEVER reused, even when the allocator recycles the
+ * same wrapper pointer address after a destroy/create cycle. Pointer
+ * equality is NOT resource identity: caches (notably renderer
+ * binding caches) must compare these IDs, never raw pointers.
+ * Zero means "no resource" (NULL handle).
+ * ------------------------------------------------------------------------- */
+
+/* Generic stable resource identity (monotonic per process). */
+typedef uint64_t lc_resource_id;
+
+/** Stable ID of an image (0 for NULL/dead). */
+LC_API lc_resource_id lc_image_get_resource_id(const lc_image *image);
+
+/** Stable ID of an image view (0 for NULL/dead). */
+LC_API lc_resource_id lc_image_view_get_resource_id(
+    const lc_image_view *view);
+
+/** Stable ID of a buffer (0 for NULL/dead). */
+LC_API lc_resource_id lc_buffer_get_resource_id(const lc_buffer *buffer);
+
+/** Stable ID of a sampler (0 for NULL/dead). */
+LC_API lc_resource_id lc_sampler_get_resource_id(
+    const lc_sampler *sampler);
+
+/** Stable ID of a render target (0 for NULL/dead; borrowed swapchain
+ *  targets report a stable per-swapchain ID that survives recreation). */
+LC_API lc_resource_id lc_render_target_get_resource_id(
+    const lc_render_target *target);
+
+/** Stable ID of a pipeline (0 for NULL/dead). */
+LC_API lc_resource_id lc_pipeline_get_resource_id(
+    const lc_pipeline *pipeline);
+
+/** Stable ID of a binding set (0 for NULL/dead). */
+LC_API lc_resource_id lc_binding_set_get_resource_id(
+    const lc_binding_set *set);
+
+/** Stable ID of a binding layout (0 for NULL/dead). */
+LC_API lc_resource_id lc_binding_layout_get_resource_id(
+    const lc_binding_layout *layout);
+
+/**
+ * Borrow the image a view was created from (do not destroy).
+ * Needed so public readback (which takes lc_image*) can inspect
+ * renderer-borrowed views (HDR, shadow, environment, BRDF) without
+ * backend-private access. Returns NULL for NULL/dead views.
+ */
+LC_API lc_image *lc_image_view_get_image(lc_image_view *view);
 
 #ifdef __cplusplus
 }

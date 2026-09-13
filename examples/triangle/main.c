@@ -74,7 +74,7 @@ int main(void) {
     lc_shader *fragment_shader = NULL;
     lc_pipeline *pipeline = NULL;
     lc_window_desc window_desc;
-    lc_device_desc device_desc;
+    lc_device_desc device_desc = { 0 };
     lc_swapchain_desc swapchain_desc;
     lc_shader_desc shader_desc;
     lc_graphics_pipeline_desc pipeline_desc = { 0 };
@@ -185,8 +185,23 @@ int main(void) {
 
     pipeline_desc.vertex_shader = vertex_shader;
     pipeline_desc.fragment_shader = fragment_shader;
-    res = lc_graphics_pipeline_create(device, swapchain, &pipeline_desc,
-                                      &pipeline);
+    /* Presentation-compatible signature, built deliberately (Phase 13:
+     * pipeline creation takes no swapchain). */
+    res = lc_swapchain_get_render_target_desc(swapchain,
+                                              &pipeline_desc.render_target);
+    if (res != LC_SUCCESS) {
+        fprintf(stderr, "lc_swapchain_get_render_target_desc failed (%d)\n",
+                res);
+        lc_shader_destroy(fragment_shader);
+        lc_shader_destroy(vertex_shader);
+        lc_swapchain_destroy(swapchain);
+        lc_surface_destroy(surface);
+        lc_device_destroy(device);
+        lc_window_destroy(window);
+        lc_shutdown();
+        return 1;
+    }
+    res = lc_graphics_pipeline_create(device, &pipeline_desc, &pipeline);
     if (res != LC_SUCCESS) {
         fprintf(stderr, "lc_graphics_pipeline_create failed (%d)\n", res);
         lc_shader_destroy(fragment_shader);

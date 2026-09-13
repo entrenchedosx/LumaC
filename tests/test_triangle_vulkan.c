@@ -90,7 +90,7 @@ static int g_failed = 0;
 
 /* 0 = ready, 1 = environmental SKIP, -1 = hard failure */
 static int make_device(lc_device **out) {
-    lc_device_desc desc;
+    lc_device_desc desc = { 0 };
 
     desc.backend = LC_BACKEND_VULKAN;
     desc.enable_validation = 1; /* exercises messenger when layers exist */
@@ -468,8 +468,11 @@ int main(void) {
 
             pdesc.vertex_shader = fs; /* fragment in vertex slot */
             pdesc.fragment_shader = vs;
-            TEST_CHECK(lc_graphics_pipeline_create(ctx.device, ctx.swapchain,
-                                                   &pdesc,
+            TEST_CHECK(lc_swapchain_get_render_target_desc(
+                           ctx.swapchain, &pdesc.render_target) ==
+                           LC_SUCCESS,
+                       "swapchain target desc for stage test");
+            TEST_CHECK(lc_graphics_pipeline_create(ctx.device, &pdesc,
                                                    &nope) ==
                            LC_ERROR_INVALID_ARGUMENT,
                        "swapped stages -> INVALID_ARGUMENT");
@@ -483,8 +486,11 @@ int main(void) {
 
             pdesc.vertex_shader = vs;
             pdesc.fragment_shader = fs;
-            TEST_CHECK(lc_graphics_pipeline_create(ctx.device, ctx.swapchain,
-                                                   &pdesc,
+            TEST_CHECK(lc_swapchain_get_render_target_desc(
+                           ctx.swapchain, &pdesc.render_target) ==
+                           LC_SUCCESS,
+                       "swapchain target desc for pipeline");
+            TEST_CHECK(lc_graphics_pipeline_create(ctx.device, &pdesc,
                                                    &pipeline) == LC_SUCCESS,
                        "graphics pipeline creation succeeds");
             lc_shader_destroy(vs);
@@ -500,7 +506,7 @@ int main(void) {
                 lc_surface *other_surf = NULL;
                 lc_swapchain *other_sc = NULL;
                 lc_swapchain_desc sdesc;
-                lc_device_desc ddesc;
+                lc_device_desc ddesc = { 0 };
 
                 ddesc.backend = LC_BACKEND_VULKAN;
                 ddesc.enable_validation = 0;
@@ -589,8 +595,10 @@ int main(void) {
                    "fragment shader for 120-frame test");
         pdesc.vertex_shader = vs;
         pdesc.fragment_shader = fs;
-        TEST_CHECK(lc_graphics_pipeline_create(ctx.device, ctx.swapchain,
-                                               &pdesc,
+        TEST_CHECK(lc_swapchain_get_render_target_desc(
+                       ctx.swapchain, &pdesc.render_target) == LC_SUCCESS,
+                   "swapchain target desc for 120-frame test");
+        TEST_CHECK(lc_graphics_pipeline_create(ctx.device, &pdesc,
                                                &pipeline) == LC_SUCCESS,
                    "pipeline for 120-frame test");
         lc_shader_destroy(vs);
@@ -645,8 +653,10 @@ int main(void) {
                    "fragment shader for resize stress");
         pdesc.vertex_shader = vs;
         pdesc.fragment_shader = fs;
-        TEST_CHECK(lc_graphics_pipeline_create(ctx.device, ctx.swapchain,
-                                               &pdesc,
+        TEST_CHECK(lc_swapchain_get_render_target_desc(
+                       ctx.swapchain, &pdesc.render_target) == LC_SUCCESS,
+                   "swapchain target desc for resize stress");
+        TEST_CHECK(lc_graphics_pipeline_create(ctx.device, &pdesc,
                                                &pipeline) == LC_SUCCESS,
                    "pipeline for resize stress");
         lc_shader_destroy(vs);
@@ -740,8 +750,10 @@ int main(void) {
                    "fragment shader for minimize test");
         pdesc.vertex_shader = vs;
         pdesc.fragment_shader = fs;
-        TEST_CHECK(lc_graphics_pipeline_create(ctx.device, ctx.swapchain,
-                                               &pdesc,
+        TEST_CHECK(lc_swapchain_get_render_target_desc(
+                       ctx.swapchain, &pdesc.render_target) == LC_SUCCESS,
+                   "swapchain target desc for minimize test");
+        TEST_CHECK(lc_graphics_pipeline_create(ctx.device, &pdesc,
                                                &pipeline) == LC_SUCCESS,
                    "pipeline for minimize test");
         lc_shader_destroy(vs);
@@ -845,8 +857,12 @@ int main(void) {
         free(frag_code);
         pdesc.vertex_shader = vs;
         pdesc.fragment_shader = fs;
-        TEST_CHECK(lc_graphics_pipeline_create(device, sc_a, &pdesc,
-                                               &pipeline) == LC_SUCCESS,
+        TEST_CHECK(lc_swapchain_get_render_target_desc(sc_a,
+                                                       &pdesc.render_target) ==
+                       LC_SUCCESS,
+                   "swapchain target desc for multi test");
+        TEST_CHECK(lc_graphics_pipeline_create(device, &pdesc, &pipeline) ==
+                       LC_SUCCESS,
                    "one pipeline for both windows");
         lc_shader_destroy(vs);
         lc_shader_destroy(fs);
@@ -869,9 +885,11 @@ int main(void) {
         TEST_CHECK(ok_a == 30, "30 triangle frames on window A");
         TEST_CHECK(ok_b == 30, "30 triangle frames on window B");
 
-        /* The pipeline dies with its creation swapchain: binding it
-         * elsewhere afterwards must fail cleanly. The pointer is only
-         * ever compared, never dereferenced, once dead. */
+        /* Phase 12: pipelines are device children with structural
+         * compatibility (never anchored to a swapchain), so destroying
+         * the creation swapchain leaves the pipeline live and bindable
+         * on the surviving swapchain. The pointer stays valid until an
+         * explicit destroy. */
         lc_swapchain_destroy(sc_a);
         sc_a = NULL;
         TEST_CHECK(lc_begin_frame(sc_b) == LC_SUCCESS,
@@ -879,16 +897,16 @@ int main(void) {
         TEST_CHECK(lc_clear_color(sc_b, 0.0f, 0.0f, 0.0f, 1.0f) ==
                        LC_SUCCESS,
                    "clear on B after A destroyed");
-        TEST_CHECK(lc_bind_pipeline(sc_b, pipeline) ==
-                       LC_ERROR_INVALID_ARGUMENT,
-                   "bind dead pipeline -> INVALID_ARGUMENT");
+        TEST_CHECK(lc_bind_pipeline(sc_b, pipeline) == LC_SUCCESS,
+                   "pipeline survives creation-swapchain destroy");
         {
-            /* End the intentionally unbound frame. */
+            /* End the bound-but-undrawn frame. */
             lc_result end_res = lc_end_frame(sc_b);
             TEST_CHECK(end_res == LC_SUCCESS || end_res == LC_SUBOPTIMAL,
-                       "end unbound frame succeeds");
+                       "end bound frame succeeds");
         }
-        pipeline = NULL; /* owned (and destroyed) by the swapchain hook */
+        lc_pipeline_destroy(pipeline);
+        pipeline = NULL;
 
         lc_swapchain_destroy(sc_b);
         lc_surface_destroy(surf_a);

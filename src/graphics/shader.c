@@ -86,6 +86,7 @@ lc_result lc_shader_create(lc_device *device, const lc_shader_desc *desc,
         *out_shader = NULL;
         return LC_ERROR_OUT_OF_MEMORY;
     }
+    shader->resource_id = lc_issue_resource_id();
 
     res = lc_vulkan_shader_create(shader, device, desc);
     if (res != LC_SUCCESS) {

@@ -1,5 +1,4 @@
 #include <stdlib.h>
-
 #include "lumac/lumac.h"
 #include "internal/lumac_internal.h"
 #include "graphics/graphics_internal.h"
@@ -149,6 +148,7 @@ lc_result lc_binding_layout_create(lc_device *device,
         *out_layout = NULL;
         return LC_ERROR_OUT_OF_MEMORY;
     }
+    layout->resource_id = lc_issue_resource_id();
 
     res = lc_vulkan_binding_layout_create(layout, device, desc);
     if (res != LC_SUCCESS) {
@@ -223,6 +223,7 @@ lc_result lc_binding_set_create(lc_binding_layout *layout,
         *out_set = NULL;
         return LC_ERROR_OUT_OF_MEMORY;
     }
+    set->resource_id = lc_issue_resource_id();
 
     res = lc_vulkan_binding_set_create(set, layout);
     if (res != LC_SUCCESS) {
@@ -291,4 +292,30 @@ lc_result lc_binding_set_update(lc_binding_set *set,
     /* The backend validates every write before recording anything,
      * so a rejected batch leaves prior state untouched. */
     return lc_vulkan_binding_set_update(set, writes, write_count);
+}
+
+/* Canonical signature comparison for Phase 11 anchor-discipline fix.
+ * Both arrays are sorted by binding number (backend invariant); compare
+ * element-wise by contents. NULL with zero count equals NULL/empty. */
+int lc_binding_signature_equal(const lc_binding_desc *a, uint32_t a_count,
+                               const lc_binding_desc *b, uint32_t b_count) {
+    uint32_t i;
+
+    if (a_count != b_count) {
+        return 0;
+    }
+    if (a_count == 0) {
+        return 1;
+    }
+    if (a == NULL || b == NULL) {
+        return 0;
+    }
+    for (i = 0; i < a_count; i++) {
+        if (a[i].binding != b[i].binding || a[i].type != b[i].type ||
+            a[i].count != b[i].count ||
+            a[i].visibility != b[i].visibility) {
+            return 0;
+        }
+    }
+    return 1;
 }

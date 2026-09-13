@@ -61,8 +61,18 @@ lc_result lc_device_create(const lc_device_desc *desc, lc_device **out_device) {
         return LC_ERROR_OUT_OF_MEMORY;
     }
     device->backend = LC_BACKEND_VULKAN;
+    device->resource_id = lc_issue_resource_id();
+    if (desc->pipeline_cache_path != NULL) {
+        size_t n = strlen(desc->pipeline_cache_path);
 
-    res = lc_vulkan_device_create(device, desc->enable_validation);
+        if (n >= sizeof(device->pipeline_cache_path)) {
+            n = sizeof(device->pipeline_cache_path) - 1;
+        }
+        memcpy(device->pipeline_cache_path, desc->pipeline_cache_path, n);
+        device->pipeline_cache_path[n] = '\0';
+    }
+
+    res = lc_vulkan_device_create(device, desc);
     if (res != LC_SUCCESS) {
         *out_device = NULL;
         free(device);
@@ -74,14 +84,14 @@ lc_result lc_device_create(const lc_device_desc *desc, lc_device **out_device) {
     return LC_SUCCESS;
 }
 
-void lc_device_destroy(lc_device *device) {
-    if (device == NULL) {
+void lc_device_destroy(lc_device *device) {    if (device == NULL) {
         return;
     }
     /* Dependents first: pipelines, binding sets and layouts, shaders,
-     * samplers, images (with views), buffers, swapchains, then
-     * surfaces. Descriptor pools die inside lc_vulkan_device_destroy,
-     * after every set is freed. vkDestroySwapchainKHR and
+     * samplers, render targets (borrow views), images (with views),
+     * buffers, swapchains, then surfaces. Descriptor pools and the
+     * render-pass cache die inside lc_vulkan_device_destroy, after
+     * every set/target/framebuffer is freed. vkDestroySwapchainKHR and
      * vkDestroySurfaceKHR both need the logical device / instance,
      * which die with the device below. */
     lc_pipeline_destroy_for_device(device);
@@ -89,6 +99,7 @@ void lc_device_destroy(lc_device *device) {
     lc_binding_layout_destroy_for_device(device);
     lc_shader_destroy_for_device(device);
     lc_sampler_destroy_for_device(device);
+    lc_render_target_destroy_for_device(device);
     lc_image_view_destroy_for_device(device);
     lc_image_destroy_for_device(device);
     lc_buffer_destroy_for_device(device);
@@ -99,6 +110,28 @@ void lc_device_destroy(lc_device *device) {
     free(device);
 }
 
+void lc_device_wait_idle(lc_device *device) {
+    lc_state *state = lc_get_internal_state();
+    const lc_device *it;
+    int live = 0;
+
+    if (state == NULL || device == NULL) {
+        return;
+    }
+    for (it = state->devices; it != NULL; it = it->next) {
+        if (it == device) {
+            live = 1;
+            break;
+        }
+    }
+    if (!live) {
+        return;
+    }
+    if (device->device != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(device->device);
+    }
+}
+
 void lc_device_destroy_all(void) {
     lc_state *state = lc_get_internal_state();
     if (state == NULL) {
@@ -107,6 +140,13 @@ void lc_device_destroy_all(void) {
     while (state->devices != NULL) {
         lc_device_destroy(state->devices);
     }
+}
+
+uint32_t lc_device_get_pass_cache_count(const lc_device *device) {
+    if (device == NULL) {
+        return 0;
+    }
+    return device->pass_cache_count;
 }
 
 const char *lc_device_get_name(const lc_device *device) {
@@ -137,6 +177,38 @@ uint32_t lc_device_get_device_id(const lc_device *device) {
     return device->device_id;
 }
 
+void lc_device_get_pipeline_cache_info(
+    const lc_device *device,
+    lc_pipeline_cache_info *out_info) {    if (out_info == NULL) {
+        return;
+    }
+    memset(out_info, 0, sizeof(*out_info));
+    if (device == NULL) {
+        return;
+    }
+    out_info->enabled = device->pipeline_cache_enabled;
+    out_info->loaded_from_file = device->pipeline_cache_loaded;
+    out_info->saved_to_file = device->pipeline_cache_saved;
+    out_info->bytes_loaded = device->pipeline_cache_bytes_loaded;
+    out_info->bytes_saved = device->pipeline_cache_bytes_saved;
+}
+
+lc_resource_id lc_issue_resource_id(void) {
+    lc_state *state = lc_get_internal_state();
+
+    if (state == NULL) {
+        return 0;
+    }
+    if (state->next_resource_id == 0) {
+        state->next_resource_id = 1;
+    }
+    /* Wrap guard: 0 is reserved for NULL; skip it on overflow. */
+    if (state->next_resource_id == 0) {
+        state->next_resource_id = 1;
+    }
+    return state->next_resource_id++;
+}
+
 void lc_device_get_limits(const lc_device *device,
                           lc_device_limits *out_limits) {
     VkPhysicalDeviceProperties props;
@@ -160,4 +232,69 @@ void lc_device_get_limits(const lc_device *device,
     out_limits->max_sampler_anisotropy =
         (device->anisotropy_supported != 0) ? props.limits.maxSamplerAnisotropy
                                             : 1.0f;
+    out_limits->min_uniform_buffer_offset_alignment =
+        props.limits.minUniformBufferOffsetAlignment;
+    out_limits->min_storage_buffer_offset_alignment =
+        props.limits.minStorageBufferOffsetAlignment;
+    out_limits->max_bound_resource_slots = props.limits.maxBoundDescriptorSets;
+    /* Never promise more than the public structural maximum. */
+    out_limits->max_color_attachments = props.limits.maxColorAttachments;
+    if (out_limits->max_color_attachments > LC_MAX_COLOR_ATTACHMENTS) {
+        out_limits->max_color_attachments = LC_MAX_COLOR_ATTACHMENTS;
+    }
+}
+
+void lc_device_get_memory_stats(const lc_device *device,
+                                lc_memory_stats *out_stats) {
+    if (out_stats == NULL) {
+        return;
+    }
+    memset(out_stats, 0, sizeof(*out_stats));
+    if (device == NULL) {
+        return;
+    }
+    lc_vk_mem_stats(device, out_stats);
+}
+
+void lc_device_get_memory_budget(const lc_device *device,
+                                 lc_memory_budget *out_budget) {
+    if (out_budget == NULL) {
+        return;
+    }
+    memset(out_budget, 0, sizeof(*out_budget));
+    if (device == NULL ||
+        device->physical_device == VK_NULL_HANDLE ||
+        device->instance == VK_NULL_HANDLE ||
+        !device->mem_budget_supported) {
+        return;
+    }
+    {
+        /* Resolved per call: static-linking 1.1+ entry points would
+         * break load on 1.0 loaders. */
+        PFN_vkGetPhysicalDeviceMemoryProperties2 pfn =
+            (PFN_vkGetPhysicalDeviceMemoryProperties2)
+                vkGetInstanceProcAddr(
+                    device->instance,
+                    "vkGetPhysicalDeviceMemoryProperties2");
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT budget;
+        VkPhysicalDeviceMemoryProperties2 props2;
+        uint32_t i;
+
+        if (pfn == NULL) {
+            return;
+        }
+        memset(&budget, 0, sizeof(budget));
+        budget.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+        memset(&props2, 0, sizeof(props2));
+        props2.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+        props2.pNext = &budget;
+        pfn(device->physical_device, &props2);
+        for (i = 0; i < props2.memoryProperties.memoryHeapCount && i < LC_MAX_MEMORY_HEAPS; i++) {
+            out_budget->heaps[i].budget = budget.heapBudget[i];
+            out_budget->heaps[i].usage = budget.heapUsage[i];
+            out_budget->heap_count++;
+        }
+        out_budget->available = (out_budget->heap_count > 0) ? 1 : 0;
+    }
 }

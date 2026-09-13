@@ -12,7 +12,7 @@ int main(void) {
     lc_device *device = NULL;
     lc_surface *surface = NULL;
     lc_window_desc window_desc;
-    lc_device_desc device_desc;
+    lc_device_desc device_desc = { 0 };
     lc_result res;
 
     if (lc_init() != LC_SUCCESS) {

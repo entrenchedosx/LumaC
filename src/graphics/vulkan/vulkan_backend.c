@@ -487,6 +487,23 @@ static lc_result lc_vk_create_logical(lc_device *device,
         lc_vulkan_device_destroy(device);
         return LC_ERROR_DEVICE_CREATION_FAILED;
     }
+    /* Allocator mutex (PART AL): internal lock only, never a giant
+     * LumaC lock. Best effort: without it the allocator runs
+     * unlocked (single-threaded contract still holds). */
+#if defined(_WIN32) || defined(_WIN64)
+    if (InitializeCriticalSectionAndSpinCount(&device->mem_mutex,
+                                              4000) != 0) {
+        device->mem_mutex_init = 1;
+    } else {
+        device->mem_mutex_init = 0;
+    }
+#else
+    device->mem_mutex_init =
+        (pthread_mutex_init(&device->mem_mutex, NULL) == 0) ? 1 : 0;
+#endif
+    /* Memory-budget extension (optional; queried per use). */
+    device->mem_budget_supported = lc_vk_has_device_extension(
+        physical, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
     return LC_SUCCESS;
 }
 
@@ -517,18 +534,230 @@ static void lc_vk_store_properties(lc_device *device,
     device->device_id = props->deviceID;
 }
 
-lc_result lc_vulkan_device_create(lc_device *device, int enable_validation) {
+/* Maximum pipeline-cache blob kept on disk (64 MiB). Larger blobs
+ * are kept in memory for the session but never written (no
+ * truncation — truncating a cache blob corrupts it). */
+#define LC_PIPELINE_CACHE_MAX_BYTES (64u * 1024u * 1024u)
+
+/* Warning-clean fopen (C4996 on MSVC): fopen_s where available,
+ * plain fopen elsewhere. */
+static FILE *lc_vk_cache_fopen(const char *path, const char *mode) {
+#if defined(_MSC_VER)
+    FILE *f = NULL;
+
+    if (fopen_s(&f, path, mode) != 0) {
+        return NULL;
+    }
+    return f;
+#else
+    return fopen(path, mode);
+#endif
+}
+
+/* Load a cache blob from disk. Returns NULL when no usable file
+ * exists (missing, unreadable, empty, oversized). Corrupt content
+ * is NOT rejected here — Vulkan validates the header at
+ * vkCreatePipelineCache and we fall back to empty on failure. */
+static void *lc_vk_cache_load(const char *path, size_t *out_size) {
+    FILE *f = NULL;
+    long size = 0;
+    void *data = NULL;
+    size_t got = 0;
+
+    if (out_size != NULL) {
+        *out_size = 0;
+    }
+    if (path == NULL || path[0] == '\0' || out_size == NULL) {
+        return NULL;
+    }
+    f = lc_vk_cache_fopen(path, "rb");
+    if (f == NULL) {
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    size = ftell(f);
+    if (size <= 0 || (uint64_t)size > LC_PIPELINE_CACHE_MAX_BYTES) {
+        fclose(f);
+        return NULL;
+    }
+    rewind(f);
+    data = malloc((size_t)size);
+    if (data == NULL) {
+        fclose(f);
+        return NULL;
+    }
+    got = fread(data, 1, (size_t)size, f);
+    fclose(f);
+    if (got != (size_t)size) {
+        free(data);
+        return NULL;
+    }
+    *out_size = (size_t)size;
+    return data;
+}
+
+/* Atomically replace `path` with `data[0..size)`: write sibling tmp,
+ * flush/close, then rename over the destination. Returns nonzero on
+ * success. Never truncates the destination on failure. */
+static int lc_vk_cache_save_atomic(const char *path, const void *data,
+                                   size_t size) {
+    char tmp[576];
+    FILE *f = NULL;
+    size_t wrote = 0;
+
+    if (path == NULL || path[0] == '\0' || data == NULL || size == 0) {
+        return 0;
+    }
+    if (size > LC_PIPELINE_CACHE_MAX_BYTES) {
+        fprintf(stderr,
+                "[lumac] pipeline cache blob too large (%lu bytes); "
+                "keeping in-memory only\n",
+                (unsigned long)size);
+        return 0;
+    }
+    memset(tmp, 0, sizeof(tmp));
+    /* Sibling tmp path; snprintf truncation still NUL-terminates. */
+    snprintf(tmp, sizeof(tmp) - 1, "%s.tmp", path);
+    f = lc_vk_cache_fopen(tmp, "wb");
+    if (f == NULL) {
+        return 0;
+    }
+    wrote = fwrite(data, 1, size, f);
+    if (fflush(f) != 0) {
+        wrote = 0;
+    }
+    fclose(f);
+    if (wrote != size) {
+        remove(tmp);
+        return 0;
+    }
+    /* Windows rename fails when the destination exists; remove first
+     * (a crash between remove and rename loses the old cache, but
+     * never corrupts it — the new tmp remains for manual recovery). */
+    remove(path);
+    if (rename(tmp, path) != 0) {
+        remove(tmp);
+        return 0;
+    }
+    return 1;
+}
+
+/* Create device->pipeline_cache: empty, or seeded from the configured
+ * path when compatible. Never fails device creation: bad blobs fall
+ * back to an empty cache with a stderr notice. */
+static void lc_vk_cache_create(lc_device *device) {
+    VkPipelineCacheCreateInfo info;
+    void *blob = NULL;
+    size_t blob_size = 0;
+
+    device->pipeline_cache = VK_NULL_HANDLE;
+    device->pipeline_cache_enabled = 0;
+    device->pipeline_cache_loaded = 0;
+    device->pipeline_cache_bytes_loaded = 0;
+    if (device->device == VK_NULL_HANDLE) {
+        return;
+    }
+    if (device->pipeline_cache_path[0] != '\0') {
+        blob = lc_vk_cache_load(device->pipeline_cache_path, &blob_size);
+    }
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    if (blob != NULL && blob_size > 0) {
+        info.initialDataSize = blob_size;
+        info.pInitialData = blob;
+    }
+    if (vkCreatePipelineCache(device->device, &info, NULL,
+                              &device->pipeline_cache) != VK_SUCCESS) {
+        /* Incompatible/corrupt blob: retry empty (Vulkan validates
+         * vendor/device/driver UUIDs in the header). */
+        if (blob != NULL) {
+            fprintf(stderr,
+                    "[lumac] pipeline cache incompatible or corrupt; "
+                    "starting empty\n");
+        }
+        info.initialDataSize = 0;
+        info.pInitialData = NULL;
+        if (vkCreatePipelineCache(device->device, &info, NULL,
+                                  &device->pipeline_cache) != VK_SUCCESS) {
+            device->pipeline_cache = VK_NULL_HANDLE;
+            free(blob);
+            return;
+        }
+        free(blob);
+        blob = NULL;
+        blob_size = 0;
+    } else if (blob != NULL && blob_size > 0) {
+        device->pipeline_cache_loaded = 1;
+        device->pipeline_cache_bytes_loaded = (uint64_t)blob_size;
+    }
+    free(blob);
+    device->pipeline_cache_enabled =
+        (device->pipeline_cache != VK_NULL_HANDLE) ? 1 : 0;
+}
+
+/* Save device->pipeline_cache back to the configured path (atomic).
+ * No-op without a path or without a cache. */
+static void lc_vk_cache_save(lc_device *device) {
+    void *data = NULL;
+    size_t size = 0;
+    VkResult res;
+
+    device->pipeline_cache_saved = 0;
+    device->pipeline_cache_bytes_saved = 0;
+    if (device->pipeline_cache == VK_NULL_HANDLE ||
+        device->device == VK_NULL_HANDLE ||
+        device->pipeline_cache_path[0] == '\0') {
+        return;
+    }
+    res = vkGetPipelineCacheData(device->device, device->pipeline_cache,
+                                 &size, NULL);
+    if (res != VK_SUCCESS || size == 0) {
+        return;
+    }
+    if (size > LC_PIPELINE_CACHE_MAX_BYTES) {
+        fprintf(stderr,
+                "[lumac] pipeline cache blob too large (%lu bytes); "
+                "keeping in-memory only\n",
+                (unsigned long)size);
+        return;
+    }
+    data = malloc(size);
+    if (data == NULL) {
+        return;
+    }
+    res = vkGetPipelineCacheData(device->device, device->pipeline_cache,
+                                 &size, data);
+    if (res != VK_SUCCESS || size == 0) {
+        free(data);
+        return;
+    }
+    if (lc_vk_cache_save_atomic(device->pipeline_cache_path, data, size)) {
+        device->pipeline_cache_saved = 1;
+        device->pipeline_cache_bytes_saved = (uint64_t)size;
+    }
+    free(data);
+}
+
+lc_result lc_vulkan_device_create(lc_device *device,
+                                  const lc_device_desc *desc) {
     int use_validation = 0;
+    int enable_validation = 0;
+    int disable_cache = 0;
     uint32_t api_version;
     VkPhysicalDevice physical = VK_NULL_HANDLE;
     VkPhysicalDeviceProperties props;
     uint32_t family = UINT32_MAX;
     lc_result res;
 
-    if (device == NULL) {
+    if (device == NULL || desc == NULL) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
     memset(&props, 0, sizeof(props));
+    enable_validation = desc->enable_validation;
+    disable_cache = (desc->disable_pipeline_cache != 0) ? 1 : 0;
 
     if (enable_validation != 0) {
         if (lc_vk_has_validation_layer() &&
@@ -567,6 +796,9 @@ lc_result lc_vulkan_device_create(lc_device *device, int enable_validation) {
     }
 
     lc_vk_store_properties(device, &props);
+    if (!disable_cache) {
+        lc_vk_cache_create(device);
+    }
     return LC_SUCCESS;
 
 fail:
@@ -579,11 +811,24 @@ void lc_vulkan_device_destroy(lc_device *device) {
     if (device == NULL) {
         return;
     }
-    /* Upload context and descriptor pools first: their pools/fences
-     * die before VkDevice. Tracked sets, buffers, and images are
-     * already gone (device-destroy hooks). */
+    /* Pipeline-cache save first (needs VkDevice alive), then the
+     * usual teardown: upload context, descriptor pools, pass cache,
+     * VkDevice, queues, messenger, instance. */
+    lc_vk_cache_save(device);
+    if (device->pipeline_cache != VK_NULL_HANDLE &&
+        device->device != VK_NULL_HANDLE) {
+        vkDestroyPipelineCache(device->device, device->pipeline_cache,
+                               NULL);
+    }
+    device->pipeline_cache = VK_NULL_HANDLE;
+    /* Memory allocator first (frees all blocks; tracked dependents
+     * already gone via device-destroy hooks), then upload context,
+     * descriptor pools, and the Phase 12 render-pass cache:
+     * pools/fences/passes die before VkDevice. */
+    lc_vk_mem_teardown(device);
     lc_vulkan_upload_teardown(device);
     lc_vulkan_desc_teardown(device);
+    lc_vulkan_pass_cache_teardown(device);
     if (device->device != VK_NULL_HANDLE) {
         vkDestroyDevice(device->device, NULL);
         device->device = VK_NULL_HANDLE;

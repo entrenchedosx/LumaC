@@ -83,7 +83,7 @@ static int g_failed = 0;
 
 /* 0 = ready, 1 = environmental SKIP, -1 = hard failure */
 static int make_device(lc_device **out) {
-    lc_device_desc desc;
+    lc_device_desc desc = { 0 };
 
     desc.backend = LC_BACKEND_VULKAN;
     desc.enable_validation = 1; /* exercises messenger when layers exist */
@@ -282,7 +282,7 @@ int main(void) {
 
         /* Device/surface mismatch is rejected. */
         {
-            lc_device_desc ddesc;
+            lc_device_desc ddesc = { 0 };
             lc_swapchain_desc sdesc;
             lc_swapchain *bad = (lc_swapchain *)0x1;
 

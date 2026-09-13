@@ -69,3 +69,118 @@ changes are permitted with a changelog entry.
 - Tests cover: pre-init, NULLs, dead handles, bounds/overflow,
   misuse ordering (begin-twice, draw-unbound), and real GPU
   round-trips where behavior (not just `VkResult`) is asserted.
+
+## Render targets (Phase 12)
+
+- A swapchain presents; a render target renders. Presentation is one
+  possible destination, never the definition of rendering.
+- Targets borrow views (non-owning); views outlive targets, enforced
+  by tracking hooks. Destroying a view first invalidates dependents,
+  rejected where detectable, never dereferenced.
+- Formats are inferred from views, never duplicated in the create
+  call. Compatibility is structural (counts, formats, samples) with
+  a hash fast-path and structural resolve — never pointer identity —
+  so equivalent targets share pipelines.
+- Pipelines hold only the signature, never the target object.
+
+## Command recording (Phase 12)
+
+- Recording flows through a borrowed per-frame encoder with an
+  explicit state machine: exactly one pass open max, no nesting, no
+  submit while open, no draws outside a pass. Misuse returns
+  `LC_ERROR_INVALID_ARGUMENT` (or `LC_ERROR_PIPELINE_INCOMPATIBLE`
+  for signature drift) without emitting backend commands.
+- Legacy swapchain-bound recording remains as mutually-exclusive
+  convenience while the codebase migrates; new recording must use
+  encoders. Two renderers never coexist: both paths record into the
+  same frame command buffer through shared backend helpers.
+- Load/store are backend-neutral concepts (`lc_load_op`,
+  `lc_store_op`); UNDEFINED is never a final layout and swap images
+  always start UNDEFINED (LOAD there is rejected, not silently
+  miscompiled).
+
+## Renderer layering (Phase 13)
+
+- Luma Renderer (`lr_*`) depends only on the public LumaC API. No
+  `Vk*`, `vulkan/`, `windows.h`, or X11 symbols may appear under
+  `renderer/` (audited by source grep); the renderer does not know
+  which backend LumaC selected.
+- Renderer objects are plain owned handles with NULL-safe destroys;
+  cross-renderer use is rejected; per-frame queues are caller-visible
+  only through statistics. No global renderer state (multiple
+  instances share one device freely).
+- LumaC validates recording; the renderer validates scene data. Both
+  layers fail safely (explicit result codes, never crashes, never
+  blind dereferences) and never allocate per-frame on hot paths.
+
+## Phase 18 additions
+
+- Readback (`lc_image_query_readback` / `lc_image_readback`,
+  `lc_image_readback_desc/_info`): tight deterministic CPU rows,
+  no reinterpretation, TRANSFER_SRC-gated loudly, sync-only with a
+  reserved async path (`lc_readback_request/poll/map`).
+- Identity (`lc_resource_id` + per-type getters, 0 = none):
+  pointer equality is not identity; caches compare IDs.
+- View→image borrower (`lc_image_view_get_image`) so capture
+  needs no backend access.
+- Pipeline cache (`lc_device_desc.pipeline_cache_path`,
+  `disable_pipeline_cache`, `lc_pipeline_cache_info`): backend owns
+  bytes, API owns policy. Descriptors must be zero-initialized.
+- Clock (`lc_clock_now` / `lc_clock_frequency`): monotonic ticks
+  for profiling; GPU timestamps deferred.
+- Renderer: `lr_frame_profile`, `lr_frame_diagnostics`,
+  `lr_post_stage` (+ tint verify), `lr_renderer_capture_hdr`,
+  `lr_renderer_capture_output`, `lr_renderer_get_brdf_view`.
+
+## Pre-1.0 API debt list (PART AY audit)
+
+Deliberately NOT fixed in Phase 18 (no breaking rewrite); clean up
+before 1.0:
+
+- `lc_image_query_readback` vs `lc_device_get_*` naming: `query_`
+  is new; decide one convention (`get_readback_info`?).
+- `LC_CACHE_SPV_DIR` duplicates `LC_TRIANGLE_SPV_DIR`/`LC_SPV_DIR`
+  for the same shader staging dir (test-only macros).
+- Legacy swapchain-era recording (`lc_bind_pipeline`, `lc_draw`,
+  `lc_clear_color`, …) still sits beside the encoder path; the
+  encoder is preferred but the legacy path is un-deprecated.
+- `lc_device_desc` grows by appending (Vulkan create-info
+  discipline); consider a version/size field before 1.0 if more
+  platform policy accrues.
+- `lr_renderer_capture_output` reads attachment 0 only; MRT
+  capture wants an index parameter later.
+- `lc_pipeline_cache_info.saved_*` are set during destroy (freed
+  struct); a future explicit flush would make them observable.
+- Test-only `fopen`/`snprintf` usage is fine, but any promotion
+  of file helpers into the library must use the MSVC-safe
+  wrappers (C4996).
+- `lr_frame_profile` doubles `cpu_prepare_ms`/`cpu_shadow_ms`
+  today (split reserved for a future prepare/record division).
+
+## Phase 19 additions
+
+- States (`lc_resource_state`, `lc_image_subresource_range`,
+  `lc_encoder_transition_image`): destination-only transitions;
+  buffer states named but untracked until compute/indirect work.
+- Memory (`lc_memory_stats`, `lc_memory_budget`,
+  `lc_resource_memory_info`, `lc_memory_class`,
+  `lc_device_get_memory_stats/budget`,
+  `lc_buffer/image_get_memory_info`): committed/used/free,
+  counts, largest free, real-or-unknown budgets, no handles.
+- Allocator stays fully private (no block/heap/type APIs).
+
+## Pre-1.0 API review, Phase 19 pass (PART 20)
+
+- States map cleanly both ways: Vulkan (layouts/stages/access
+  derived centrally) and D3D12 (per-subresource barriers with the
+  same granularity) need nothing else.
+- Memory classes (DEVICE_LOCAL/UPLOAD/READBACK) mirror D3D12
+  heaps (DEFAULT/UPLOAD/READBACK); stats/budget/info carry no
+  Vulkan types.
+- Small apps unaffected: buffer/image creation signatures
+  unchanged; zero-init discipline already applied tree-wide.
+- New debt (do not fix now): `lc_encoder_transition_image` is
+  image-only (buffer transitions arrive with buffer tracking);
+  `lc_memory_stats` has no fragmentation percentage (largest-free
+  suffices); OOM has no retry-with-smaller-blocks policy (callers
+  size explicitly).

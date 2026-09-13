@@ -1,9 +1,12 @@
 # Build trees (all configurations / generators)
 build/
 build_shared/
+build-rel/
+build-shared/
 build-release/
 build_verify/
 build_wsl/
+build-wsl/
 out/
 
 # CMake generated files (in-source configure leftovers)
@@ -49,3 +52,4 @@ desktop.ini
 
 # Temporary logs and captures
 *.log
+*.ppm

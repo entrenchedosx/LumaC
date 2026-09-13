@@ -36,7 +36,7 @@ int main(void) {
     lc_device *device = NULL;
     lc_image *image = NULL;
     lc_sampler *sampler = NULL;
-    lc_device_desc device_desc;
+    lc_device_desc device_desc = { 0 };
     lc_image_desc image_desc;
     lc_image_upload_desc upload;
     lc_sampler_desc sampler_desc;

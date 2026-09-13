@@ -1,13 +1,15 @@
 /*
- * Vulkan pipeline backend (graphics pipelines with resource slots).
+ * Vulkan pipeline backend (graphics pipelines with resource slots,
+ * raster state, depth, and push constants).
  *
- * Builds a graphics pipeline against the swapchain's render pass from
- * caller-supplied shaders, optional vertex input, and optional binding
- * layouts: triangle list, dynamic viewport/scissor, no culling, one
- * sample, blending off, no depth. Only module and set-layout handles
- * are consumed, so shaders (and layouts, for binding purposes) may be
- * destroyed once the pipeline exists; slot anchors are compared, never
- * dereferenced, afterwards.
+ * Builds a graphics pipeline against the swapchain's color+depth render
+ * pass from caller-supplied shaders, optional vertex input, optional
+ * binding layouts, raster/depth state, and push-constant ranges:
+ * triangle list, dynamic viewport/scissor, one sample, blending off.
+ * Only module and set-layout handles are consumed for Vulkan objects;
+ * canonical binding signatures plus push ranges are copied into the
+ * lc_pipeline for content-based bind/push validation, so layouts may
+ * be destroyed once the pipeline exists without invalidating it.
  */
 
 #include <stdlib.h>
@@ -18,6 +20,88 @@
 static VkShaderStageFlagBits lc_vk_stage_flag(lc_shader_stage stage) {
     return (stage == LC_SHADER_STAGE_VERTEX) ? VK_SHADER_STAGE_VERTEX_BIT
                                              : VK_SHADER_STAGE_FRAGMENT_BIT;
+}
+
+static VkCullModeFlags lc_vk_cull_mode(lc_cull_mode mode) {
+    switch (mode) {
+    case LC_CULL_FRONT:
+        return VK_CULL_MODE_FRONT_BIT;
+    case LC_CULL_BACK:
+        return VK_CULL_MODE_BACK_BIT;
+    case LC_CULL_NONE:
+    default:
+        return VK_CULL_MODE_NONE;
+    }
+}
+
+static VkFrontFace lc_vk_front_face(lc_front_face face) {
+    return (face == LC_FRONT_FACE_COUNTER_CLOCKWISE)
+               ? VK_FRONT_FACE_COUNTER_CLOCKWISE
+               : VK_FRONT_FACE_CLOCKWISE;
+}
+
+static VkShaderStageFlags lc_vk_push_stages(uint32_t visibility) {
+    VkShaderStageFlags stages = 0;
+
+    if ((visibility & LC_SHADER_VISIBILITY_VERTEX) != 0) {
+        stages |= VK_SHADER_STAGE_VERTEX_BIT;
+    }
+    if ((visibility & LC_SHADER_VISIBILITY_FRAGMENT) != 0) {
+        stages |= VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
+    return stages;
+}
+
+/* Validate push-constant ranges: known graphics visibility, 4-byte
+ * alignment, nonzero size, inside the device limit, no overlaps. */
+static lc_result lc_vk_validate_push_ranges(
+    VkPhysicalDevice physical, const lc_push_constant_range *ranges,
+    uint32_t range_count) {
+    VkPhysicalDeviceProperties props;
+    uint32_t i;
+    uint32_t j;
+    const uint32_t known =
+        (uint32_t)LC_SHADER_VISIBILITY_VERTEX | (uint32_t)LC_SHADER_VISIBILITY_FRAGMENT;
+
+    if (range_count == 0) {
+        return LC_SUCCESS;
+    }
+    if (ranges == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    memset(&props, 0, sizeof(props));
+    vkGetPhysicalDeviceProperties(physical, &props);
+    /* Vulkan guarantees at least 128 bytes; clamp defensively. */
+    if (props.limits.maxPushConstantsSize < 4) {
+        return LC_ERROR_PIPELINE_CREATION_FAILED;
+    }
+    for (i = 0; i < range_count; i++) {
+        uint32_t vis = ranges[i].visibility;
+        uint32_t size = ranges[i].size;
+        uint32_t offset = ranges[i].offset;
+
+        if (vis == 0 || (vis & ~known) != 0) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        if (size == 0 || (offset % 4u) != 0u || (size % 4u) != 0u) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        if (offset + size < offset ||
+            offset + size > props.limits.maxPushConstantsSize) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        for (j = 0; j < i; j++) {
+            uint32_t a0 = ranges[j].offset;
+            uint32_t a1 = ranges[j].offset + ranges[j].size;
+            uint32_t b0 = offset;
+            uint32_t b1 = offset + size;
+
+            if (!(b1 <= a0 || b0 >= a1)) {
+                return LC_ERROR_INVALID_ARGUMENT;
+            }
+        }
+    }
+    return LC_SUCCESS;
 }
 
 /* Pointer comparison only: dead anchors are rejected without ever
@@ -93,8 +177,32 @@ static lc_result lc_vk_validate_vertex_layout(
     return LC_SUCCESS;
 }
 
+/* Free canonical copies on failure paths (pipeline struct itself is
+ * owned by the caller). Safe on partial state. */
+static void lc_vk_pipeline_free_copies(lc_pipeline *pipeline) {
+    uint32_t i;
+
+    if (pipeline == NULL) {
+        return;
+    }
+    if (pipeline->slot_signatures != NULL) {
+        for (i = 0; i < pipeline->layout_count; i++) {
+            free(pipeline->slot_signatures[i]);
+        }
+        free(pipeline->slot_signatures);
+        pipeline->slot_signatures = NULL;
+    }
+    free(pipeline->slot_signature_counts);
+    pipeline->slot_signature_counts = NULL;
+    free(pipeline->layouts);
+    pipeline->layouts = NULL;
+    pipeline->layout_count = 0;
+    free(pipeline->push_ranges);
+    pipeline->push_ranges = NULL;
+    pipeline->push_range_count = 0;
+}
+
 lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
-                                    lc_swapchain *swapchain,
                                     const lc_graphics_pipeline_desc *desc) {
     const lc_shader *vertex_shader;
     const lc_shader *fragment_shader;
@@ -106,21 +214,37 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
     VkPipelineViewportStateCreateInfo viewport_state;
     VkPipelineRasterizationStateCreateInfo rasterization;
     VkPipelineMultisampleStateCreateInfo multisample;
-    VkPipelineColorBlendAttachmentState blend_attachment;
+    VkPipelineDepthStencilStateCreateInfo depth_stencil;
+    VkPipelineColorBlendAttachmentState
+        blend_attachments[LC_MAX_COLOR_ATTACHMENTS];
     VkPipelineColorBlendStateCreateInfo blend_state;
     VkPipelineLayoutCreateInfo layout_info;
     VkGraphicsPipelineCreateInfo pipeline_info;
     VkDynamicState dynamic_states[2];
+    VkPushConstantRange *vk_push_ranges = NULL;
+    lc_render_target_desc target_sig;
 
-    if (pipeline == NULL || device == NULL || swapchain == NULL ||
-        desc == NULL || desc->vertex_shader == NULL ||
-        desc->fragment_shader == NULL) {
+    if (pipeline == NULL || device == NULL || desc == NULL ||
+        desc->vertex_shader == NULL) {
         return LC_ERROR_INVALID_ARGUMENT;
+    }
+    /* Phase 13: the structural target signature is mandatory (public
+     * validation already checked shape; device limits re-checked
+     * here). No swapchain is involved. */
+    {
+        lc_result target_res =
+            lc_vulkan_target_desc_validate(device, &desc->render_target);
+
+        if (target_res != LC_SUCCESS) {
+            return target_res;
+        }
+        target_sig = desc->render_target;
     }
     vertex_shader = desc->vertex_shader;
     fragment_shader = desc->fragment_shader;
     if (vertex_shader->stage != LC_SHADER_STAGE_VERTEX ||
-        fragment_shader->stage != LC_SHADER_STAGE_FRAGMENT) {
+        (fragment_shader != NULL &&
+         fragment_shader->stage != LC_SHADER_STAGE_FRAGMENT)) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
     if ((desc->vertex_binding_count > 0 && desc->vertex_bindings == NULL) ||
@@ -128,11 +252,23 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
          desc->vertex_attributes == NULL)) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
+    if (desc->cull_mode != LC_CULL_NONE && desc->cull_mode != LC_CULL_FRONT &&
+        desc->cull_mode != LC_CULL_BACK) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (desc->front_face != LC_FRONT_FACE_CLOCKWISE &&
+        desc->front_face != LC_FRONT_FACE_COUNTER_CLOCKWISE) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if ((desc->depth_test_enable != 0 || desc->depth_write_enable != 0) &&
+        target_sig.depth_stencil_format == LC_FORMAT_UNDEFINED) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
     if (vertex_shader->module == VK_NULL_HANDLE ||
-        fragment_shader->module == VK_NULL_HANDLE ||
+        (fragment_shader != NULL &&
+         fragment_shader->module == VK_NULL_HANDLE) ||
         device->device == VK_NULL_HANDLE ||
-        device->physical_device == VK_NULL_HANDLE ||
-        swapchain->render_pass == VK_NULL_HANDLE) {
+        device->physical_device == VK_NULL_HANDLE) {
         return LC_ERROR_PIPELINE_CREATION_FAILED;
     }
     {
@@ -144,10 +280,9 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
             return layout_res;
         }
     }
-    /* Binding layouts: live, same device, within set limits. Anchors
-     * are copied for bind-time slot matching; only Vulkan handles are
-     * consumed, so layouts may die while the pipeline lives (binds
-     * against dead anchors fail closed on pointer comparison). */
+    /* Binding layouts: live, same device, within set limits. Canonical
+     * signatures are copied for content-based bind matching, so layouts
+     * may die while the pipeline lives. */
     {
         VkPhysicalDeviceProperties props;
         uint32_t i;
@@ -171,24 +306,113 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
             }
         }
     }
+    /* Push-constant ranges: graphics visibility, alignment, limit,
+     * no overlaps. */
+    {
+        lc_result push_res = lc_vk_validate_push_ranges(
+            device->physical_device, desc->push_constant_ranges,
+            desc->push_constant_range_count);
+        if (push_res != LC_SUCCESS) {
+            return push_res;
+        }
+    }
 
+    memset(pipeline, 0, sizeof(*pipeline));
     pipeline->device = device;
-    pipeline->swapchain = swapchain;
-    pipeline->format = swapchain->format;
+    pipeline->target_color_count = target_sig.color_attachment_count;
+    {
+        uint32_t i;
+
+        for (i = 0; i < target_sig.color_attachment_count; i++) {
+            pipeline->target_color_formats[i] = target_sig.color_formats[i];
+        }
+    }
+    pipeline->target_depth_format = target_sig.depth_stencil_format;
+    pipeline->target_samples = target_sig.samples;
+    pipeline->target_hash = lc_render_target_hash(
+        target_sig.color_attachment_count, target_sig.color_formats,
+        target_sig.depth_stencil_format, target_sig.samples);
+    pipeline->cull_mode = desc->cull_mode;
+    pipeline->front_face = desc->front_face;
+    pipeline->depth_test_enable = (desc->depth_test_enable != 0) ? 1 : 0;
+    pipeline->depth_write_enable = (desc->depth_write_enable != 0) ? 1 : 0;
     pipeline->layouts = NULL;
     pipeline->layout_count = 0;
+    pipeline->slot_signatures = NULL;
+    pipeline->slot_signature_counts = NULL;
+    pipeline->push_ranges = NULL;
+    pipeline->push_range_count = 0;
     if (desc->binding_layout_count > 0) {
         uint32_t i;
 
         pipeline->layouts = (const lc_binding_layout **)malloc(
             sizeof(const lc_binding_layout *) * desc->binding_layout_count);
-        if (pipeline->layouts == NULL) {
+        pipeline->slot_signatures = (lc_binding_desc **)calloc(
+            desc->binding_layout_count, sizeof(lc_binding_desc *));
+        pipeline->slot_signature_counts = (uint32_t *)calloc(
+            desc->binding_layout_count, sizeof(uint32_t));
+        if (pipeline->layouts == NULL || pipeline->slot_signatures == NULL ||
+            pipeline->slot_signature_counts == NULL) {
+            free(pipeline->layouts);
+            free(pipeline->slot_signatures);
+            free(pipeline->slot_signature_counts);
+            pipeline->layouts = NULL;
+            pipeline->slot_signatures = NULL;
+            pipeline->slot_signature_counts = NULL;
             return LC_ERROR_OUT_OF_MEMORY;
         }
         for (i = 0; i < desc->binding_layout_count; i++) {
-            pipeline->layouts[i] = desc->binding_layouts[i];
+            const lc_binding_layout *layout = desc->binding_layouts[i];
+
+            pipeline->layouts[i] = layout;
+            pipeline->slot_signature_counts[i] = layout->binding_count;
+            if (layout->binding_count > 0) {
+                pipeline->slot_signatures[i] = (lc_binding_desc *)malloc(
+                    sizeof(lc_binding_desc) * layout->binding_count);
+                if (pipeline->slot_signatures[i] == NULL) {
+                    uint32_t k;
+                    for (k = 0; k < i; k++) {
+                        free(pipeline->slot_signatures[k]);
+                    }
+                    free(pipeline->layouts);
+                    free(pipeline->slot_signatures);
+                    free(pipeline->slot_signature_counts);
+                    pipeline->layouts = NULL;
+                    pipeline->slot_signatures = NULL;
+                    pipeline->slot_signature_counts = NULL;
+                    pipeline->layout_count = 0;
+                    return LC_ERROR_OUT_OF_MEMORY;
+                }
+                memcpy(pipeline->slot_signatures[i], layout->bindings,
+                       sizeof(lc_binding_desc) * layout->binding_count);
+            }
         }
         pipeline->layout_count = desc->binding_layout_count;
+    }
+    if (desc->push_constant_range_count > 0) {
+        pipeline->push_ranges = (lc_push_constant_range *)malloc(
+            sizeof(lc_push_constant_range) *
+            desc->push_constant_range_count);
+        if (pipeline->push_ranges == NULL) {
+            uint32_t k;
+            if (pipeline->slot_signatures != NULL) {
+                for (k = 0; k < pipeline->layout_count; k++) {
+                    free(pipeline->slot_signatures[k]);
+                }
+            }
+            free(pipeline->layouts);
+            free(pipeline->slot_signatures);
+            free(pipeline->slot_signature_counts);
+            pipeline->layouts = NULL;
+            pipeline->slot_signatures = NULL;
+            pipeline->slot_signature_counts = NULL;
+            pipeline->layout_count = 0;
+            return LC_ERROR_OUT_OF_MEMORY;
+        }
+        memcpy(pipeline->push_ranges, desc->push_constant_ranges,
+               sizeof(lc_push_constant_range) *
+                   desc->push_constant_range_count);
+        pipeline->push_range_count = desc->push_constant_range_count;
     }
 
     memset(stages, 0, sizeof(stages));
@@ -196,10 +420,13 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
     stages[0].stage = lc_vk_stage_flag(vertex_shader->stage);
     stages[0].module = vertex_shader->module;
     stages[0].pName = vertex_shader->entry_point;
-    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[1].stage = lc_vk_stage_flag(fragment_shader->stage);
-    stages[1].module = fragment_shader->module;
-    stages[1].pName = fragment_shader->entry_point;
+    if (fragment_shader != NULL) {
+        stages[1].sType =
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage = lc_vk_stage_flag(fragment_shader->stage);
+        stages[1].module = fragment_shader->module;
+        stages[1].pName = fragment_shader->entry_point;
+    }
 
     /* Vertex input from the backend-neutral layout (empty when the
      * shader generates vertices from its index). Vulkan copies these
@@ -211,6 +438,7 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
             sizeof(VkVertexInputBindingDescription) *
             desc->vertex_binding_count);
         if (vk_bindings == NULL) {
+            lc_vk_pipeline_free_copies(pipeline);
             return LC_ERROR_OUT_OF_MEMORY;
         }
         for (i = 0; i < desc->vertex_binding_count; i++) {
@@ -231,6 +459,7 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
             desc->vertex_attribute_count);
         if (vk_attributes == NULL) {
             free(vk_bindings);
+            lc_vk_pipeline_free_copies(pipeline);
             return LC_ERROR_OUT_OF_MEMORY;
         }
         for (i = 0; i < desc->vertex_attribute_count; i++) {
@@ -273,46 +502,85 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
     rasterization.depthClampEnable = VK_FALSE;
     rasterization.rasterizerDiscardEnable = VK_FALSE;
     rasterization.polygonMode = VK_POLYGON_MODE_FILL;
-    /* No culling for the first triangle: winding mistakes must not
-     * hide it. A cull-mode API can come later. */
-    rasterization.cullMode = VK_CULL_MODE_NONE;
-    rasterization.frontFace = VK_FRONT_FACE_CLOCKWISE;
+    rasterization.cullMode = lc_vk_cull_mode(desc->cull_mode);
+    rasterization.frontFace = lc_vk_front_face(desc->front_face);
     rasterization.lineWidth = 1.0f;
 
     memset(&multisample, 0, sizeof(multisample));
     multisample.sType =
         VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    multisample.rasterizationSamples =
+        lc_vulkan_translate_samples(target_sig.samples);
 
-    memset(&blend_attachment, 0, sizeof(blend_attachment));
-    blend_attachment.blendEnable = VK_FALSE;
-    blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
-                                      VK_COLOR_COMPONENT_G_BIT |
-                                      VK_COLOR_COMPONENT_B_BIT |
-                                      VK_COLOR_COMPONENT_A_BIT;
+    /* Depth-stencil state is always present; test/write are gated by
+     * the desc. Depthless targets must leave depth disabled (checked
+     * above). When the target carries depth but the pipeline disables
+     * it, the attachment still exists (cleared/stored per pass ops)
+     * and is simply unused by this pipeline. */
+    memset(&depth_stencil, 0, sizeof(depth_stencil));
+    depth_stencil.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depth_stencil.depthTestEnable =
+        (desc->depth_test_enable != 0) ? VK_TRUE : VK_FALSE;
+    depth_stencil.depthWriteEnable =
+        (desc->depth_write_enable != 0) ? VK_TRUE : VK_FALSE;
+    depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS;
+    depth_stencil.depthBoundsTestEnable = VK_FALSE;
+    depth_stencil.stencilTestEnable = VK_FALSE;
+
+    /* One blending-off write mask per color attachment (MRT-ready).
+     * Depthless pipelines still need blend state when colors exist;
+     * zero colors (depth-only) leave the count at 0. */
+    {
+        uint32_t i;
+
+        memset(blend_attachments, 0, sizeof(blend_attachments));
+        for (i = 0; i < target_sig.color_attachment_count; i++) {
+            blend_attachments[i].blendEnable = VK_FALSE;
+            blend_attachments[i].colorWriteMask =
+                VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        }
+    }
 
     memset(&blend_state, 0, sizeof(blend_state));
     blend_state.sType =
         VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    blend_state.attachmentCount = 1;
-    blend_state.pAttachments = &blend_attachment;
+    blend_state.attachmentCount = target_sig.color_attachment_count;
+    blend_state.pAttachments =
+        (target_sig.color_attachment_count > 0) ? blend_attachments : NULL;
 
-    /* Pipeline layout from the binding-layout slots (empty when the
-     * pipeline takes no resources). Vulkan copies the set layouts at
+    /* Pipeline layout from the binding-layout slots plus push-constant
+     * ranges (both empty when unused). Vulkan copies everything at
      * creation. */
     {
         VkDescriptorSetLayout *vk_layouts = NULL;
         uint32_t i;
 
+        if (pipeline->push_range_count > 0) {
+            vk_push_ranges = (VkPushConstantRange *)malloc(
+                sizeof(VkPushConstantRange) * pipeline->push_range_count);
+            if (vk_push_ranges == NULL) {
+                free(vk_bindings);
+                free(vk_attributes);
+                lc_vk_pipeline_free_copies(pipeline);
+                return LC_ERROR_OUT_OF_MEMORY;
+            }
+            for (i = 0; i < pipeline->push_range_count; i++) {
+                vk_push_ranges[i].stageFlags =
+                    lc_vk_push_stages(pipeline->push_ranges[i].visibility);
+                vk_push_ranges[i].offset = pipeline->push_ranges[i].offset;
+                vk_push_ranges[i].size = pipeline->push_ranges[i].size;
+            }
+        }
         if (pipeline->layout_count > 0) {
             vk_layouts = (VkDescriptorSetLayout *)malloc(
                 sizeof(VkDescriptorSetLayout) * pipeline->layout_count);
             if (vk_layouts == NULL) {
-                free(pipeline->layouts);
-                pipeline->layouts = NULL;
-                pipeline->layout_count = 0;
+                free(vk_push_ranges);
                 free(vk_bindings);
                 free(vk_attributes);
+                lc_vk_pipeline_free_copies(pipeline);
                 return LC_ERROR_OUT_OF_MEMORY;
             }
             for (i = 0; i < pipeline->layout_count; i++) {
@@ -323,32 +591,63 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
         layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         layout_info.setLayoutCount = pipeline->layout_count;
         layout_info.pSetLayouts = vk_layouts;
+        layout_info.pushConstantRangeCount = pipeline->push_range_count;
+        layout_info.pPushConstantRanges = vk_push_ranges;
         if (vkCreatePipelineLayout(device->device, &layout_info, NULL,
                                    &pipeline->layout) != VK_SUCCESS) {
             pipeline->layout = VK_NULL_HANDLE;
             free(vk_layouts);
-            free(pipeline->layouts);
-            pipeline->layouts = NULL;
-            pipeline->layout_count = 0;
+            free(vk_push_ranges);
             free(vk_bindings);
             free(vk_attributes);
+            lc_vk_pipeline_free_copies(pipeline);
             return LC_ERROR_PIPELINE_CREATION_FAILED;
         }
         free(vk_layouts);
+        free(vk_push_ranges);
+        vk_push_ranges = NULL;
     }
 
     memset(&pipeline_info, 0, sizeof(pipeline_info));
     pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    pipeline_info.stageCount = 2;
+    pipeline_info.stageCount = (fragment_shader != NULL) ? 2u : 1u;
     pipeline_info.pStages = stages;
     pipeline_info.pVertexInputState = &vertex_input;
     pipeline_info.pInputAssemblyState = &input_assembly;
     pipeline_info.pViewportState = &viewport_state;
     pipeline_info.pRasterizationState = &rasterization;
     pipeline_info.pMultisampleState = &multisample;
+    pipeline_info.pDepthStencilState = &depth_stencil;
     pipeline_info.pColorBlendState = &blend_state;
     {
         VkPipelineDynamicStateCreateInfo dynamic_info;
+        lc_vk_pass_key compat_key;
+        VkRenderPass compat_pass = VK_NULL_HANDLE;
+        lc_result pass_res;
+        uint32_t i;
+
+        /* Creation pass from the device cache (canonical CLEAR/STORE
+         * policy, offscreen finals): pipeline compatibility in Vulkan
+         * ignores load/store, so any policy with these formats works.
+         * The pass is cached (never owned here). */
+        memset(&compat_key, 0, sizeof(compat_key));
+        compat_key.color_count = target_sig.color_attachment_count;
+        for (i = 0; i < target_sig.color_attachment_count; i++) {
+            compat_key.color_formats[i] =
+                lc_vulkan_translate_format(target_sig.color_formats[i]);
+            compat_key.color_loads[i] = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            compat_key.color_stores[i] = VK_ATTACHMENT_STORE_OP_STORE;
+        }
+        compat_key.depth_format =
+            (target_sig.depth_stencil_format == LC_FORMAT_UNDEFINED)
+                ? VK_FORMAT_UNDEFINED
+                : lc_vulkan_translate_format(
+                      target_sig.depth_stencil_format);
+        compat_key.depth_load = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        compat_key.depth_store = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        compat_key.samples =
+            lc_vulkan_translate_samples(target_sig.samples);
+        compat_key.present = 0;
 
         memset(&dynamic_info, 0, sizeof(dynamic_info));
         dynamic_info.sType =
@@ -358,20 +657,32 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
         pipeline_info.pDynamicState = &dynamic_info;
 
         pipeline_info.layout = pipeline->layout;
-        pipeline_info.renderPass = swapchain->render_pass;
-        pipeline_info.subpass = 0;
-
-        if (vkCreateGraphicsPipelines(device->device, VK_NULL_HANDLE, 1,
-                                      &pipeline_info, NULL,
-                                      &pipeline->pipeline) != VK_SUCCESS) {
-            pipeline->pipeline = VK_NULL_HANDLE;
+        pass_res =
+            lc_vulkan_pass_cache_get(device, &compat_key, &compat_pass);
+        if (pass_res != LC_SUCCESS || compat_pass == VK_NULL_HANDLE) {
             vkDestroyPipelineLayout(device->device, pipeline->layout, NULL);
             pipeline->layout = VK_NULL_HANDLE;
-            free(pipeline->layouts);
-            pipeline->layouts = NULL;
-            pipeline->layout_count = 0;
             free(vk_bindings);
             free(vk_attributes);
+            lc_vk_pipeline_free_copies(pipeline);
+            return (pass_res != LC_SUCCESS)
+                       ? pass_res
+                       : LC_ERROR_PIPELINE_CREATION_FAILED;
+        }
+        pipeline_info.renderPass = compat_pass;
+        pipeline_info.subpass = 0;
+
+        if (vkCreateGraphicsPipelines(device->device,
+                                       device->pipeline_cache, 1,
+                                       &pipeline_info, NULL,
+                                       &pipeline->pipeline) != VK_SUCCESS) {
+            pipeline->pipeline = VK_NULL_HANDLE;
+            vkDestroyPipelineLayout(device->device, pipeline->layout,
+                                    NULL);
+            pipeline->layout = VK_NULL_HANDLE;
+            free(vk_bindings);
+            free(vk_attributes);
+            lc_vk_pipeline_free_copies(pipeline);
             return LC_ERROR_PIPELINE_CREATION_FAILED;
         }
     }
@@ -382,6 +693,7 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
 
 void lc_vulkan_pipeline_destroy(lc_pipeline *pipeline) {
     VkDevice device_handle = VK_NULL_HANDLE;
+    uint32_t i;
 
     if (pipeline == NULL) {
         return;
@@ -394,14 +706,26 @@ void lc_vulkan_pipeline_destroy(lc_pipeline *pipeline) {
     if (device_handle != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_handle);
     }
-    /* Pipeline first, then its layout, then the slot anchors. The
-     * render pass is owned by the swapchain and is only referenced
-     * here by compatibility. */
+    /* Pipeline first, then its layout, then canonical copies. The
+     * creation render pass lives in the device cache (never owned
+     * here); compatibility was structural. */
+    if (pipeline->slot_signatures != NULL) {
+        for (i = 0; i < pipeline->layout_count; i++) {
+            free(pipeline->slot_signatures[i]);
+        }
+        free(pipeline->slot_signatures);
+        pipeline->slot_signatures = NULL;
+    }
+    free(pipeline->slot_signature_counts);
+    pipeline->slot_signature_counts = NULL;
     if (pipeline->layouts != NULL) {
         free(pipeline->layouts);
         pipeline->layouts = NULL;
     }
     pipeline->layout_count = 0;
+    free(pipeline->push_ranges);
+    pipeline->push_ranges = NULL;
+    pipeline->push_range_count = 0;
     if (pipeline->pipeline != VK_NULL_HANDLE) {
         if (device_handle != VK_NULL_HANDLE) {
             vkDestroyPipeline(device_handle, pipeline->pipeline, NULL);

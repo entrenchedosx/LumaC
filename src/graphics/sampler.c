@@ -86,6 +86,7 @@ lc_result lc_sampler_create(lc_device *device, const lc_sampler_desc *desc,
         *out_sampler = NULL;
         return LC_ERROR_OUT_OF_MEMORY;
     }
+    sampler->resource_id = lc_issue_resource_id();
 
     res = lc_vulkan_sampler_create(sampler, device, desc);
     if (res != LC_SUCCESS) {

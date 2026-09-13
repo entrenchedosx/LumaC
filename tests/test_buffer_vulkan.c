@@ -91,7 +91,7 @@ static int g_failed = 0;
 
 /* 0 = ready, 1 = environmental SKIP, -1 = hard failure */
 static int make_device(lc_device **out) {
-    lc_device_desc desc;
+    lc_device_desc desc = { 0 };
 
     desc.backend = LC_BACKEND_VULKAN;
     desc.enable_validation = 1; /* exercises messenger when layers exist */
@@ -277,8 +277,14 @@ static int make_vb_pipeline(lc_device *device, lc_swapchain *swapchain,
     pdesc.vertex_binding_count = 1;
     pdesc.vertex_attributes = attrs;
     pdesc.vertex_attribute_count = 2;
-    res = lc_graphics_pipeline_create(device, swapchain, &pdesc,
-                                      out_pipeline);
+    if (lc_swapchain_get_render_target_desc(swapchain,
+                                            &pdesc.render_target) !=
+        LC_SUCCESS) {
+        lc_shader_destroy(vs);
+        lc_shader_destroy(fs);
+        return -1;
+    }
+    res = lc_graphics_pipeline_create(device, &pdesc, out_pipeline);
     lc_shader_destroy(vs);
     lc_shader_destroy(fs);
     return (res == LC_SUCCESS) ? 0 : -1;

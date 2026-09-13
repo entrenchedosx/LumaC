@@ -30,7 +30,7 @@ int main(void) {
     lc_device *a = NULL;
     lc_device *b = NULL;
     lc_device *leaked = NULL;
-    lc_device_desc desc;
+    lc_device_desc desc = { 0 };
     lc_result r;
 
     printf("Running LumaC Vulkan integration test...\n");

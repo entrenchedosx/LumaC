@@ -4,7 +4,7 @@
 
 int main(void) {
     lc_device *device = NULL;
-    lc_device_desc desc;
+    lc_device_desc desc = { 0 };
 
     if (lc_init() != LC_SUCCESS) {
         fprintf(stderr, "lc_init failed\n");

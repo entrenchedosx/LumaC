@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <string.h>
 
 #include "lumac/lumac.h"
 #include "internal/lumac_internal.h"
@@ -111,6 +112,7 @@ lc_result lc_buffer_create(lc_device *device, const lc_buffer_desc *desc,
         return LC_ERROR_OUT_OF_MEMORY;
     }
     buffer->device = device;
+    buffer->resource_id = lc_issue_resource_id();
     buffer->size = desc->size;
     buffer->usage = desc->usage;
     buffer->memory_usage = desc->memory;
@@ -143,6 +145,21 @@ uint64_t lc_buffer_get_size(const lc_buffer *buffer) {
     return buffer->size;
 }
 
+void lc_buffer_get_memory_info(const lc_buffer *buffer,
+                               lc_resource_memory_info *out_info) {
+    if (out_info == NULL) {
+        return;
+    }
+    memset(out_info, 0, sizeof(*out_info));
+    if (buffer == NULL || !lc_is_live_buffer(buffer)) {
+        return;
+    }
+    out_info->requested_size = buffer->size;
+    out_info->allocation_size = buffer->allocation_size;
+    out_info->dedicated = buffer->memory_dedicated;
+    out_info->memory_class = buffer->memory_class;
+}
+
 lc_result lc_buffer_map(lc_buffer *buffer, void **out_data) {
     if (buffer == NULL || out_data == NULL) {
         if (out_data != NULL) {
@@ -155,10 +172,15 @@ lc_result lc_buffer_map(lc_buffer *buffer, void **out_data) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
     /* Only CPU-visible placements are persistently mapped; GPU-only
-     * mapping is rejected rather than emulated. */
+     * mapping is rejected rather than emulated. Non-coherent ranges
+     * invalidate before CPU access (PART W). */
     if (buffer->mapped_ptr == NULL) {
         *out_data = NULL;
         return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (lc_vulkan_buffer_invalidate(buffer) != LC_SUCCESS) {
+        *out_data = NULL;
+        return LC_ERROR_UNKNOWN;
     }
     *out_data = buffer->mapped_ptr;
     return LC_SUCCESS;

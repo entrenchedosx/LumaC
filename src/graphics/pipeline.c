@@ -60,21 +60,6 @@ static int lc_is_live_device(const lc_device *device) {
     return 0;
 }
 
-static int lc_is_live_swapchain(const lc_swapchain *swapchain) {
-    lc_state *state = lc_get_internal_state();
-    const lc_swapchain *it;
-
-    if (state == NULL || swapchain == NULL) {
-        return 0;
-    }
-    for (it = state->swapchains; it != NULL; it = it->next) {
-        if (it == swapchain) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
 static int lc_is_live_shader(const lc_shader *shader) {
     lc_state *state = lc_get_internal_state();
     const lc_shader *it;
@@ -106,14 +91,13 @@ int lc_pipeline_is_live(const lc_pipeline *pipeline) {
 }
 
 lc_result lc_graphics_pipeline_create(
-    lc_device *device, lc_swapchain *swapchain,
-    const lc_graphics_pipeline_desc *desc, lc_pipeline **out_pipeline) {
+    lc_device *device, const lc_graphics_pipeline_desc *desc,
+    lc_pipeline **out_pipeline) {
     lc_state *state = lc_get_internal_state();
     lc_pipeline *pipeline;
     lc_result res;
 
-    if (device == NULL || swapchain == NULL || desc == NULL ||
-        out_pipeline == NULL) {
+    if (device == NULL || desc == NULL || out_pipeline == NULL) {
         if (out_pipeline != NULL) {
             *out_pipeline = NULL;
         }
@@ -123,19 +107,22 @@ lc_result lc_graphics_pipeline_create(
         *out_pipeline = NULL;
         return LC_ERROR_NOT_INITIALIZED;
     }
-    /* Liveness before any dereference of caller handles. */
-    if (!lc_is_live_device(device) || !lc_is_live_swapchain(swapchain) ||
+    /* Liveness before any dereference of caller handles. The
+     * vertex stage is mandatory; the fragment stage is optional
+     * (NULL rasterizes without fragment processing). */
+    if (!lc_is_live_device(device) ||
         !lc_is_live_shader(desc->vertex_shader) ||
-        !lc_is_live_shader(desc->fragment_shader)) {
+        (desc->fragment_shader != NULL &&
+         !lc_is_live_shader(desc->fragment_shader))) {
         *out_pipeline = NULL;
         return LC_ERROR_INVALID_ARGUMENT;
     }
     /* Everything must belong to one device; stages must match. */
-    if (swapchain->device != device ||
-        desc->vertex_shader->device != device ||
-        desc->fragment_shader->device != device ||
+    if (desc->vertex_shader->device != device ||
         desc->vertex_shader->stage != LC_SHADER_STAGE_VERTEX ||
-        desc->fragment_shader->stage != LC_SHADER_STAGE_FRAGMENT) {
+        (desc->fragment_shader != NULL &&
+         (desc->fragment_shader->device != device ||
+          desc->fragment_shader->stage != LC_SHADER_STAGE_FRAGMENT))) {
         *out_pipeline = NULL;
         return LC_ERROR_INVALID_ARGUMENT;
     }
@@ -153,14 +140,76 @@ lc_result lc_graphics_pipeline_create(
         *out_pipeline = NULL;
         return LC_ERROR_INVALID_ARGUMENT;
     }
+    /* Raster state: only the defined enum values are accepted. Zero
+     * initialization preserves legacy behavior (NONE + CLOCKWISE). */
+    if (desc->cull_mode != LC_CULL_NONE && desc->cull_mode != LC_CULL_FRONT &&
+        desc->cull_mode != LC_CULL_BACK) {
+        *out_pipeline = NULL;
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (desc->front_face != LC_FRONT_FACE_CLOCKWISE &&
+        desc->front_face != LC_FRONT_FACE_COUNTER_CLOCKWISE) {
+        *out_pipeline = NULL;
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    /* Depth flags are booleans (0 or nonzero accepted, normalized by
+     * the backend); no further check needed here. */
+    /* Push-constant ranges: array must accompany a nonzero count;
+     * deep content (alignment, overlap, device limit, visibility) is
+     * validated by the backend against physical limits. */
+    if (desc->push_constant_range_count > 0 &&
+        desc->push_constant_ranges == NULL) {
+        *out_pipeline = NULL;
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    /* Phase 13: the structural render-target signature is mandatory
+     * (deep device-limit checks live in the backend). Depth-only
+     * signatures (0 colors + depth) stay valid for future shadow work;
+     * depth test/write still require a depth format. */
+    {
+        const lc_render_target_desc *rt = &desc->render_target;
+        uint32_t i;
+
+        if (rt->color_attachment_count > LC_MAX_COLOR_ATTACHMENTS ||
+            (rt->color_attachment_count == 0 &&
+             rt->depth_stencil_format == LC_FORMAT_UNDEFINED)) {
+            *out_pipeline = NULL;
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        for (i = 0; i < rt->color_attachment_count; i++) {
+            if (rt->color_formats[i] == LC_FORMAT_UNDEFINED ||
+                !lc_format_is_color(rt->color_formats[i])) {
+                *out_pipeline = NULL;
+                return LC_ERROR_INVALID_ARGUMENT;
+            }
+        }
+        if (rt->depth_stencil_format != LC_FORMAT_UNDEFINED &&
+            !lc_format_is_depth(rt->depth_stencil_format)) {
+            *out_pipeline = NULL;
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        if (rt->samples != LC_SAMPLE_COUNT_1 &&
+            rt->samples != LC_SAMPLE_COUNT_2 &&
+            rt->samples != LC_SAMPLE_COUNT_4 &&
+            rt->samples != LC_SAMPLE_COUNT_8) {
+            *out_pipeline = NULL;
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        if ((desc->depth_test_enable != 0 || desc->depth_write_enable != 0) &&
+            rt->depth_stencil_format == LC_FORMAT_UNDEFINED) {
+            *out_pipeline = NULL;
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+    }
 
     pipeline = (lc_pipeline *)calloc(1, sizeof(lc_pipeline));
     if (pipeline == NULL) {
         *out_pipeline = NULL;
         return LC_ERROR_OUT_OF_MEMORY;
     }
+    pipeline->resource_id = lc_issue_resource_id();
 
-    res = lc_vulkan_pipeline_create(pipeline, device, swapchain, desc);
+    res = lc_vulkan_pipeline_create(pipeline, device, desc);
     if (res != LC_SUCCESS) {
         *out_pipeline = NULL;
         free(pipeline);
@@ -202,22 +251,6 @@ void lc_pipeline_destroy_for_device(const lc_device *device) {
     for (it = state->pipelines; it != NULL; it = next) {
         next = it->next;
         if (it->device == device) {
-            lc_pipeline_destroy(it);
-        }
-    }
-}
-
-void lc_pipeline_destroy_for_swapchain(const lc_swapchain *swapchain) {
-    lc_state *state = lc_get_internal_state();
-    lc_pipeline *it;
-    lc_pipeline *next;
-
-    if (state == NULL || swapchain == NULL) {
-        return;
-    }
-    for (it = state->pipelines; it != NULL; it = next) {
-        next = it->next;
-        if (it->swapchain == swapchain) {
             lc_pipeline_destroy(it);
         }
     }

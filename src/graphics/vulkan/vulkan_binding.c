@@ -455,13 +455,9 @@ static lc_result lc_vk_validate_buffer_write(
 }
 
 /* Validate one image-view write: liveness, device match, and sampled
- * readability over the view's exact range (tracked state). */
+ * readability over the view's exact range (tracked semantic state). */
 static lc_result lc_vk_validate_image_write(
     lc_device *device, const lc_image_view *view) {
-    uint32_t mip;
-    uint32_t layer;
-    const lc_image *image;
-
     if (view == NULL || !lc_binding_is_live_view(view)) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
@@ -469,19 +465,11 @@ static lc_result lc_vk_validate_image_write(
         view->image == NULL) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
-    image = view->image;
-    if (image->layouts == NULL) {
+    if (!lc_vk_sync_all_equal(view->image, view->base_mip_level,
+                              view->mip_level_count, view->base_array_layer,
+                              view->array_layer_count,
+                              LC_RESOURCE_STATE_SHADER_READ)) {
         return LC_ERROR_INVALID_ARGUMENT;
-    }
-    for (layer = view->base_array_layer;
-         layer < view->base_array_layer + view->array_layer_count; layer++) {
-        for (mip = view->base_mip_level;
-             mip < view->base_mip_level + view->mip_level_count; mip++) {
-            if (image->layouts[(size_t)layer * image->mip_levels + mip] !=
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-                return LC_ERROR_INVALID_ARGUMENT;
-            }
-        }
     }
     return LC_SUCCESS;
 }

@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <string.h>
 
 #include "lumac/lumac.h"
 #include "internal/lumac_internal.h"
@@ -179,9 +180,9 @@ void lc_swapchain_destroy(lc_swapchain *swapchain) {
     if (swapchain == NULL) {
         return;
     }
-    /* Pipelines anchored here die first; their layouts and pipelines
-     * are device children but their compatibility anchor is gone. */
-    lc_pipeline_destroy_for_swapchain(swapchain);
+    /* Phase 12: pipelines are device children with structural target
+     * signatures (never anchored here), so nothing pipeline-related
+     * dies with the swapchain. */
     lc_swapchain_list_remove(swapchain);
     /* Image teardown waits idle, so no submission is pending when the
      * pool, semaphores, and fences below are destroyed - even if the
@@ -299,4 +300,46 @@ lc_format lc_swapchain_get_format(const lc_swapchain *swapchain) {
         return LC_FORMAT_UNDEFINED;
     }
     return lc_vulkan_untranslate_format(swapchain->format);
+}
+
+lc_format lc_swapchain_get_depth_format(const lc_swapchain *swapchain) {
+    if (swapchain == NULL) {
+        return LC_FORMAT_UNDEFINED;
+    }
+    return lc_vulkan_untranslate_format(swapchain->depth_format);
+}
+
+lc_result lc_swapchain_get_render_target_desc(
+    const lc_swapchain *swapchain, lc_render_target_desc *out_desc) {
+    lc_state *state = lc_get_internal_state();
+    const lc_swapchain *it;
+    uint32_t i;
+
+    if (swapchain == NULL || out_desc == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (state == NULL || !state->initialized) {
+        return LC_ERROR_NOT_INITIALIZED;
+    }
+    for (it = state->swapchains; it != NULL; it = it->next) {
+        if (it == swapchain) {
+            break;
+        }
+    }
+    if (it == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    memset(out_desc, 0, sizeof(*out_desc));
+    out_desc->width = swapchain->extent.width;
+    out_desc->height = swapchain->extent.height;
+    out_desc->color_attachment_count = 1;
+    for (i = 0; i < LC_MAX_COLOR_ATTACHMENTS; i++) {
+        out_desc->color_formats[i] = LC_FORMAT_UNDEFINED;
+    }
+    out_desc->color_formats[0] =
+        lc_vulkan_untranslate_format(swapchain->format);
+    out_desc->depth_stencil_format =
+        lc_vulkan_untranslate_format(swapchain->depth_format);
+    out_desc->samples = LC_SAMPLE_COUNT_1;
+    return LC_SUCCESS;
 }

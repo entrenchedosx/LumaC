@@ -36,7 +36,7 @@ static int g_failed = 0;
 
 /* 0 = ready, 1 = environmental SKIP, -1 = hard failure */
 static int make_device(lc_device **out) {
-    lc_device_desc desc;
+    lc_device_desc desc = { 0 };
 
     desc.backend = LC_BACKEND_VULKAN;
     desc.enable_validation = 1; /* exercises messenger when layers exist */

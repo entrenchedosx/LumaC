@@ -27,6 +27,7 @@
 #include "platform/platform.h" /* windows.h before vulkan.h */
 #else
 #include <X11/Xlib.h> /* Display/Window before vulkan.h */
+#include <pthread.h>  /* allocator mutex (PART AL) */
 #endif
 
 #include <vulkan/vulkan.h>
@@ -34,6 +35,34 @@
 /* GPUs without any rating info still get a name buffer this large.
  * VK_MAX_PHYSICAL_DEVICE_NAME_SIZE is 256. */
 #define LC_DEVICE_NAME_SIZE 256
+
+/* Allocator memory classes (PARTs L/T: buffers and images never
+ * share blocks). */
+typedef enum lc_vk_mem_class {
+    LC_VK_MEM_DEVICE_IMAGES = 0,
+    LC_VK_MEM_DEVICE_BUFFERS = 1,
+    LC_VK_MEM_UPLOAD = 2,
+    LC_VK_MEM_READBACK = 3,
+    LC_VK_MEM_CLASS_COUNT = 4
+} lc_vk_mem_class;
+
+struct lc_vk_mem_block;
+
+/* Allocator pool header (blocks are private to vulkan_memory.c). */
+typedef struct lc_vk_mem_pool {
+    struct lc_vk_mem_block *blocks;
+} lc_vk_mem_pool;
+typedef struct lc_vk_mem_binding {
+    VkDeviceMemory memory;
+    uint64_t offset;
+    uint64_t size;
+    void *mapped;      /* block_base + offset (host classes) */
+    int coherent;
+    int dedicated;
+    struct lc_vk_mem_block *block; /* NULL when dedicated */
+    uint32_t memory_type;
+    lc_vk_mem_class memory_class;
+} lc_vk_mem_binding;
 
 /* One retrieved queue: families are enumerated once at device creation
  * (see Approach C discussion in vulkan_backend.c) so any family,
@@ -43,6 +72,32 @@ typedef struct lc_vk_queue {
     uint32_t family_index;
     VkQueue queue;
 } lc_vk_queue;
+
+/* Render-pass cache key (Phase 12): structural signature plus
+ * load/store policy and presentation final. Initial layouts derive
+ * deterministically: UNDEFINED unless a LOAD needs the previous
+ * contents (offscreen color SHADER_READ, depth ATTACHMENT). Phase 16:
+ * `depth_sampled` records whether the depth image carries SAMPLED
+ * usage — such passes finalize depth to SHADER_READ_ONLY_OPTIMAL
+ * (mirroring color STORE) so depth can be sampled after the pass;
+ * plain depth keeps ATTACHMENT_OPTIMAL. */
+typedef struct lc_vk_pass_key {
+    uint32_t color_count;
+    VkFormat color_formats[LC_MAX_COLOR_ATTACHMENTS];
+    VkFormat depth_format; /* VK_FORMAT_UNDEFINED when depthless */
+    VkSampleCountFlagBits samples;
+    VkAttachmentLoadOp color_loads[LC_MAX_COLOR_ATTACHMENTS];
+    VkAttachmentStoreOp color_stores[LC_MAX_COLOR_ATTACHMENTS];
+    VkAttachmentLoadOp depth_load;
+    VkAttachmentStoreOp depth_store;
+    int present; /* 1: color[0] ends PRESENT_SRC (swapchain) */
+    int depth_sampled; /* 1: depth ends SHADER_READ (sampled usage) */
+} lc_vk_pass_key;
+
+typedef struct lc_vk_cached_pass {
+    lc_vk_pass_key key;
+    VkRenderPass pass;
+} lc_vk_cached_pass;
 
 /* Opaque public type, completed here. Only the Vulkan backend exists, so
  * its handles live directly in this struct; a future D3D12 backend would
@@ -54,6 +109,7 @@ struct lc_device {
     uint32_t device_id;
     lc_device *next;
     lc_device *prev;
+    lc_resource_id resource_id; /* stable, never reused */
 
     /* Vulkan backend state (VK_NULL_HANDLE / 0 / NULL when not created) */
     VkInstance instance;
@@ -88,6 +144,47 @@ struct lc_device {
     VkDescriptorPool *desc_pools;
     uint32_t desc_pool_count;
     uint32_t desc_pool_capacity;
+
+    /* Render-pass cache (Phase 12, lazy): one VkRenderPass per
+     * structural+policy key shared by pipelines (creation) and passes
+     * (offscreen + swapchain generic). Never evicted; destroyed with
+     * the device after all targets/framebuffers are gone. */
+    lc_vk_cached_pass *pass_cache;
+    uint32_t pass_cache_count;
+    uint32_t pass_cache_capacity;
+
+    /* Persistent pipeline cache (Phase 18, lazy): one VkPipelineCache
+     * shared by every graphics pipeline on this device. Created empty
+     * (or seeded from pipeline_cache_path when compatible); saved
+     * atomically at destroy when a path was configured. Never fails
+     * device creation: corrupt blobs fall back to an empty cache. */
+    VkPipelineCache pipeline_cache;
+    int pipeline_cache_enabled;
+    int pipeline_cache_loaded;
+    int pipeline_cache_saved;
+    uint64_t pipeline_cache_bytes_loaded;
+    uint64_t pipeline_cache_bytes_saved;
+    char pipeline_cache_path[512]; /* copied desc path, maybe empty */
+
+    /* GPU memory allocator (Phase 19): pools per class plus an
+     * internal lock (PART AL). All other LumaC use stays
+     * single-threaded by contract. */
+    lc_vk_mem_pool mem_pools[LC_VK_MEM_CLASS_COUNT];
+#if defined(_WIN32) || defined(_WIN64)
+    CRITICAL_SECTION mem_mutex; /* via platform.h (windows.h) */
+#else
+    pthread_mutex_t mem_mutex;
+#endif
+    int mem_mutex_init;
+    int mem_limits_ready;
+    uint64_t mem_atom_size;    /* nonCoherentAtomSize (>= 1) */
+    uint64_t mem_granularity;  /* bufferImageGranularity (>= 1) */
+    uint64_t mem_max_image_dim; /* maxImageDimension2D */
+    uint64_t mem_max_alloc;     /* largest heap (early-OOM guard) */
+    uint64_t mem_dedicated_count;
+    /* Memory-budget extension (VK_EXT_memory_budget): resolved flag
+     * only; the entry point is fetched per query (old loaders). */
+    int mem_budget_supported;
 };
 
 /* Opaque public buffer type, completed here. A buffer belongs to one
@@ -97,14 +194,24 @@ struct lc_device {
  * never mapped and is written through staging. */
 struct lc_buffer {
     lc_device *device;
+    lc_resource_id resource_id; /* stable, never reused */
 
     uint64_t size;
     uint32_t usage; /* lc_buffer_usage bits, as requested */
     lc_memory_usage memory_usage;
 
     VkBuffer vk_buffer;
+    /* Allocator binding (Phase 19): suballocated block region or a
+     * dedicated allocation. vk_memory/vk_offset name the binding;
+     * mapped_ptr is block_map_base + offset for host classes. */
     VkDeviceMemory vk_memory;
+    VkDeviceSize vk_memory_offset;
     void *mapped_ptr; /* persistent mapping, or NULL when not mappable */
+    int memory_coherent;   /* valid when mapped_ptr != NULL */
+    int memory_dedicated;  /* 1: own VkDeviceMemory (no suballoc) */
+    struct lc_vk_mem_block *memory_block; /* NULL when dedicated */
+    lc_memory_class memory_class; /* allocator class used */
+    uint64_t allocation_size;     /* aligned suballocation bytes */
 
     lc_buffer *next;
     lc_buffer *prev;
@@ -128,11 +235,13 @@ struct lc_surface {
 
 /*
  * Fill an allocated (zeroed) lc_device with a live Vulkan device.
- * enable_validation != 0 requests validation layers (best-effort).
+ * The full creation desc controls validation + pipeline-cache policy
+ * (path copied by the caller into device->pipeline_cache_path).
  * On failure, tears down whatever stage was reached and returns an
  * lc_result; the caller still owns (and frees) the struct.
  */
-lc_result lc_vulkan_device_create(lc_device *device, int enable_validation);
+lc_result lc_vulkan_device_create(lc_device *device,
+                                  const lc_device_desc *desc);
 
 /* Tears down Vulkan resources in reverse creation order. Idempotent over
  * partially-created devices (VK_NULL_HANDLE stages are skipped). */
@@ -171,13 +280,71 @@ typedef struct lc_vk_flight {
     VkCommandBuffer cmd; /* reusable; reset and rerecorded each use */
 } lc_vk_flight;
 
+/* Opaque public command-encoder type, completed here. Borrowed from
+ * an open swapchain frame (inline storage, never allocated); valid
+ * only between lc_begin_frame and lc_end_frame on that swapchain.
+ * Exactly one explicit pass may be open at a time; legacy implicit
+ * swapchain passes are mutually exclusive with explicit passes. */
+struct lc_command_encoder {
+    lc_swapchain *swapchain;
+    lc_device *device;
+    int in_pass; /* explicit pass open */
+    int pass_is_swapchain; /* 1: swapchain pass, 0: offscreen target */
+    lc_render_target_desc pass_target; /* structural signature of open pass */
+    const lc_render_target *pass_target_obj; /* offscreen target (borrowed) */
+    const lc_pipeline *bound_pipeline; /* last encoder-bound, NULL at pass start */
+    const lc_buffer *bound_index_buffer;
+    uint64_t bound_index_offset;
+    lc_index_type bound_index_type;
+    int index_bound;
+    /* Pass-end bookkeeping for attachment tracking (no per-frame
+     * allocation: bounded copies filled at begin, consumed at end). */
+    lc_image_view *end_color_views[LC_MAX_COLOR_ATTACHMENTS];
+    lc_store_op end_color_stores[LC_MAX_COLOR_ATTACHMENTS];
+    uint32_t end_color_count;
+    lc_image_view *end_depth_view;
+    lc_store_op end_depth_store;
+    int end_has_depth;
+};
+
+/* Opaque public render-target type, completed here. Offscreen targets
+ * are device-owned (tracked list) and borrow their views; the
+ * borrowed swapchain target lives inline in lc_swapchain (never
+ * tracked, never destroyed directly). One VkFramebuffer is created
+ * lazily on first begin and reused for all load/store variants (same
+ * formats/count/extent stay compatible). */
+struct lc_render_target {
+    lc_device *device;
+    lc_resource_id resource_id; /* stable, never reused */
+    uint32_t width;
+    uint32_t height;
+    lc_image_view **color_views; /* borrowed, malloc'd array (maybe NULL) */
+    uint32_t color_count;
+    lc_image_view *depth_view; /* borrowed, maybe NULL */
+    lc_format color_formats[LC_MAX_COLOR_ATTACHMENTS];
+    lc_format depth_format; /* UNDEFINED when depthless */
+    lc_sample_count samples;
+    uint32_t hash; /* structural signature hash */
+    int is_swapchain_borrow; /* 1: inline in swapchain, reject destroy */
+    VkFramebuffer framebuffer; /* offscreen only, lazy (swapchain uses
+                                * its per-image legacy framebuffers) */
+    int framebuffer_valid;
+    lc_render_target *next;
+    lc_render_target *prev;
+};
 /* Opaque public swapchain type, completed here. A swapchain borrows its
  * device and surface; both must outlive it. Destruction order is
  * enforced by hooks: surface/device/window teardown and lc_shutdown()
  * destroy dependent swapchains first (see swapchain.c). Images are owned
  * by VkSwapchainKHR (never destroyed directly); views are owned here.
  * Frame state (pool, slots, per-image tracking) is swapchain-local, so
- * two swapchains run fully independent frame loops. */
+ * two swapchains run fully independent frame loops. Phase 11 adds an
+ * owned depth buffer (image + memory + view) sized to the extent and
+ * rebuilt with the swapchain; the render pass clears it alongside
+ * color. Phase 12 adds a borrowed render-target view plus an inline
+ * command encoder sharing the frame command buffer with the legacy
+ * implicit pass (mutually exclusive per frame). Pipelines are NOT
+ * anchored here anymore (structural compatibility only). */
 struct lc_swapchain {
     lc_device *device;
     lc_surface *surface;
@@ -205,10 +372,18 @@ struct lc_swapchain {
      * (VUID-vkQueueSubmit-pSignalSemaphores). Rebuilt with the images;
      * indexed by acquired image. */
     VkSemaphore *present_semaphores;
-    /* Render scope (Phase 7): one minimal render pass (clear/store,
-     * UNDEFINED-to-present) plus one framebuffer per image view,
-     * rebuilt with the swapchain. The pass begins lazily on first
-     * clear/bind/draw so the clear color is always known. */
+    /* Depth buffer owned by the swapchain (Phase 11): one image sized
+     * to the extent, rebuilt on every recreate. Format is selected
+     * once per device from supported depth formats. */
+    VkFormat depth_format;
+    VkImage depth_image;
+    VkDeviceMemory depth_memory;
+    VkImageView depth_view;
+    /* Render scope (Phase 7, extended Phase 11): one render pass with
+     * color + depth attachments (clear/store, UNDEFINED-to-present)
+     * plus one framebuffer per image view, rebuilt with the swapchain.
+     * The pass begins lazily on first clear/bind/draw so the clear
+     * colors are always known. */
     VkRenderPass render_pass;
     VkFramebuffer *framebuffers; /* one per image, owned here */
     /* Open-frame recording state. */
@@ -219,6 +394,14 @@ struct lc_swapchain {
     float clear_g;
     float clear_b;
     float clear_a;
+    int depth_clear_pending; /* lc_clear_depth stored but not consumed */
+    float depth_clear; /* clamped [0,1], defaults to 1.0 per frame */
+    /* Index-buffer binding (Phase 11): command-buffer state, reset at
+     * frame start, re-established by lc_bind_index_buffer. */
+    const lc_buffer *bound_index_buffer;
+    uint64_t bound_index_offset;
+    lc_index_type bound_index_type;
+    int index_bound; /* nonzero once bound this frame */
 
     /* Frame lifecycle (Phase 6). Pool/buffers/sync persist across
      * recreates; per-image tracking is rebuilt with the images. */
@@ -229,6 +412,13 @@ struct lc_swapchain {
     uint32_t current_image; /* acquired index, valid only mid-frame */
     int frame_active; /* exactly one open frame per swapchain max */
     int frame_suboptimal; /* acquire reported SUBOPTIMAL this frame */
+
+    /* Phase 12 generic recording: inline borrowed encoder sharing the
+     * frame command buffer with the legacy implicit pass (exactly one
+     * of legacy rp_open / encoder.in_pass may be active), plus a
+     * borrowed render-target snapshot refreshed on every rebuild. */
+    lc_command_encoder encoder;
+    lc_render_target swapchain_target;
 
     lc_swapchain *next;
     lc_swapchain *prev;
@@ -279,6 +469,29 @@ lc_result lc_vulkan_frame_bind(lc_swapchain *swapchain,
 lc_result lc_vulkan_frame_draw(lc_swapchain *swapchain, uint32_t vertex_count,
                                uint32_t first_vertex);
 
+/* Phase 11 frame recording: indexed/instanced draws, index binding,
+ * push constants, depth clears. */
+lc_result lc_vulkan_frame_draw_indexed(lc_swapchain *swapchain,
+                                       uint32_t index_count,
+                                       uint32_t instance_count,
+                                       uint32_t first_index,
+                                       int32_t vertex_offset,
+                                       uint32_t first_instance);
+lc_result lc_vulkan_frame_draw_instanced(lc_swapchain *swapchain,
+                                         uint32_t vertex_count,
+                                         uint32_t instance_count,
+                                         uint32_t first_vertex,
+                                         uint32_t first_instance);
+lc_result lc_vulkan_frame_bind_index(lc_swapchain *swapchain,
+                                     const lc_buffer *buffer,
+                                     uint64_t offset,
+                                     lc_index_type index_type);
+lc_result lc_vulkan_frame_push(lc_swapchain *swapchain,
+                               const lc_pipeline *pipeline,
+                               uint32_t visibility, uint32_t offset,
+                               uint32_t size, const void *data);
+lc_result lc_vulkan_frame_clear_depth(lc_swapchain *swapchain, float depth);
+
 /* Maximum entry-point name stored per shader (including NUL). */
 #define LC_SHADER_ENTRY_MAX 64
 
@@ -287,6 +500,7 @@ lc_result lc_vulkan_frame_draw(lc_swapchain *swapchain, uint32_t vertex_count,
  * die while their pipelines live on. */
 struct lc_shader {
     lc_device *device;
+    lc_resource_id resource_id; /* stable, never reused */
     lc_shader_stage stage;
     char entry_point[LC_SHADER_ENTRY_MAX]; /* normalized, NUL-terminated */
     VkShaderModule module;
@@ -306,44 +520,73 @@ lc_result lc_vulkan_shader_create(lc_shader *shader, lc_device *device,
  * guarantee ordering via device-teardown hooks. */
 void lc_vulkan_shader_destroy(lc_shader *shader);
 
-/* Opaque public pipeline type, completed here. A pipeline is created
- * against one swapchain's color format (same fixed render-pass recipe
- * everywhere, so format equality implies compatibility) but may be
- * bound on any same-device, same-format swapchain. It is destroyed
- * with its creation swapchain or its device, whichever goes first.
- * Binding-layout anchors (non-owning, malloc'd array) identify the
- * resource slots; bind-time checks compare anchors, never dereference
- * dead layouts. */
+/* Opaque public pipeline type, completed here. Phase 12: pipelines
+ * are device children with a structural render-target signature
+ * (color count/formats, depth format, samples) copied at creation —
+ * never a swapchain or target pointer. Any target or pass with an
+ * equal signature works; incompatible use fails predictably. Phase 11
+ * canonical binding-layout signatures plus push ranges are kept for
+ * content-based bind/push validation. */
 struct lc_pipeline {
     lc_device *device;
-    lc_swapchain *swapchain; /* creation anchor for lifetime tracking */
+    lc_resource_id resource_id; /* stable, never reused */
     VkPipelineLayout layout;
     VkPipeline pipeline;
-    VkFormat format; /* must equal the target swapchain's format */
+    /* Structural compatibility (backend-neutral, D3D12-mappable). */
+    uint32_t target_color_count;
+    lc_format target_color_formats[LC_MAX_COLOR_ATTACHMENTS];
+    lc_format target_depth_format; /* UNDEFINED when depthless */
+    lc_sample_count target_samples;
+    uint32_t target_hash; /* FNV-1a over the signature; collisions
+                           * resolve by structural compare */
     const lc_binding_layout **layouts; /* slot anchors, malloc'd (maybe NULL) */
     uint32_t layout_count;
+    /* Canonical signatures: one sorted slot copy per layout slot.
+     * slot_signatures[i] has slot_signature_counts[i] entries. */
+    lc_binding_desc **slot_signatures;
+    uint32_t *slot_signature_counts;
+    lc_cull_mode cull_mode;
+    lc_front_face front_face;
+    int depth_test_enable;
+    int depth_write_enable;
+    lc_push_constant_range *push_ranges; /* malloc'd copy (maybe NULL) */
+    uint32_t push_range_count;
     lc_pipeline *next;
     lc_pipeline *prev;
 };
 
 /*
- * Validate shaders (live, correctly staged, same device) and the vertex
- * layout, then create the pipeline layout plus graphics pipeline
- * against the swapchain's render pass. Consumes only module handles:
- * shaders may be destroyed afterwards. On failure tears down partial
- * state.
+ * Validate shaders (live, correctly staged, same device), the vertex
+ * layout, and the mandatory structural render-target signature, then
+ * create the pipeline layout plus graphics pipeline against a cached
+ * compatible render pass. Consumes only module handles: shaders may be
+ * destroyed afterwards. No swapchain is involved (Phase 13). On
+ * failure tears down partial state.
  */
 lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
-                                    lc_swapchain *swapchain,
                                     const lc_graphics_pipeline_desc *desc);
 
 /* Destroys pipeline then layout. Device must still be alive. */
 void lc_vulkan_pipeline_destroy(lc_pipeline *pipeline);
 
+/* Canonical signature comparison (Phase 11 fix for anchor
+ * discipline): sorted slot copies compare by contents (binding,
+ * type, count, visibility), never by layout pointer. Returns
+ * nonzero when equal. */
+int lc_binding_signature_equal(const lc_binding_desc *a, uint32_t a_count,
+                               const lc_binding_desc *b, uint32_t b_count);
+
+/* Issue the next stable resource ID (never 0, never reused within
+ * the process). Threading: main thread only, like all LumaC use. */
+lc_resource_id lc_issue_resource_id(void);
+
 /* Centralized backend-neutral <-> Vulkan format translation. Unknown
  * inputs map to VK_FORMAT_UNDEFINED / LC_FORMAT_UNDEFINED. */
 VkFormat lc_vulkan_translate_format(lc_format format);
 lc_format lc_vulkan_untranslate_format(VkFormat format);
+
+/* Aspect mask for a format (color/depth/stencil bits). */
+VkImageAspectFlags lc_vk_aspect_for(lc_format format);
 
 /* Byte size of one lc_format element (0 for UNDEFINED). */
 uint32_t lc_format_byte_size(lc_format format);
@@ -376,6 +619,9 @@ void lc_vulkan_buffer_destroy(lc_buffer *buffer);
 lc_result lc_vulkan_buffer_write(lc_buffer *buffer, uint64_t offset,
                                  const void *data, uint64_t size);
 
+/* Full-range invalidate for map (non-coherent correctness). */
+lc_result lc_vulkan_buffer_invalidate(lc_buffer *buffer);
+
 /*
  * Device upload context (lazy immediate-submit on the graphics queue).
  * Ensure creates pool/buffer/fence on first use; begin drains prior
@@ -398,6 +644,37 @@ lc_result lc_vulkan_storage_create(
     lc_device *device, uint64_t size, VkBufferUsageFlags usage,
     VkMemoryPropertyFlags required, VkMemoryPropertyFlags preferred,
     VkBuffer *out_buffer, VkDeviceMemory *out_memory, void **out_mapped);
+
+/* Shared memory-type search (required bits + ordered preferences). */
+int lc_vk_find_memory_type(VkPhysicalDevice physical, uint32_t type_bits,
+                           VkMemoryPropertyFlags required,
+                           VkMemoryPropertyFlags preferred,
+                           uint32_t *out_index);
+
+/* AAA allocator (vulkan_memory.c): suballocate or dedicate. */
+lc_result lc_vk_mem_alloc(lc_device *device, lc_vk_mem_class cls,
+                          uint32_t type_bits,
+                          VkMemoryPropertyFlags required,
+                          uint64_t size, uint64_t align,
+                          lc_vk_mem_binding *out);
+void lc_vk_mem_free(lc_device *device, lc_vk_mem_binding *binding);
+lc_result lc_vk_mem_flush(lc_device *device,
+                          const lc_vk_mem_binding *binding, uint64_t offset,
+                          uint64_t size);
+lc_result lc_vk_mem_invalidate(lc_device *device,
+                               const lc_vk_mem_binding *binding,
+                               uint64_t offset, uint64_t size);
+/* Transient pool staging (PART Z): VkBuffer + bound suballoc. */
+lc_result lc_vk_stage_acquire(lc_device *device, uint64_t size,
+                              int upload, VkBufferUsageFlags usage,
+                              VkBuffer *out_buffer,
+                              lc_vk_mem_binding *out_binding,
+                              void **out_mapped);
+void lc_vk_stage_release(lc_device *device, VkBuffer buffer,
+                         lc_vk_mem_binding *binding);
+void lc_vk_mem_teardown(lc_device *device);
+/* Locked statistics walk (PARTs AA/AC). */
+void lc_vk_mem_stats(const lc_device *device, lc_memory_stats *out);
 /* Exported (but not in the public header) so white-box integration
  * tests can drive the copy path directly; not part of the API. */
 LC_API lc_result lc_vulkan_copy_buffer(lc_device *device, VkBuffer dst,
@@ -420,6 +697,7 @@ lc_result lc_vulkan_frame_bind_vertex(lc_swapchain *swapchain,
  * covers all mips and layers; specialized views arrive later. */
 struct lc_image {
     lc_device *device;
+    lc_resource_id resource_id; /* stable, never reused */
 
     lc_image_type type;
     lc_format format;
@@ -433,15 +711,21 @@ struct lc_image {
     uint32_t samples;
 
     VkImage vk_image;
+    /* Allocator binding (Phase 19): same discipline as buffers. */
     VkDeviceMemory vk_memory;
+    VkDeviceSize vk_memory_offset;
+    int memory_dedicated;
+    struct lc_vk_mem_block *memory_block; /* NULL when dedicated */
+    lc_memory_class memory_class;
+    uint64_t allocation_size;
     VkImageView default_view;
 
-    /* Per-subresource layout tracking: entry [layer * mip_levels + mip]
-     * for every mip of every layer (malloc'd). Uploads, mip generation,
-     * and transitions keep each entry truthful, so mixed states (e.g.
-     * mid-mipmap-dance) are representable and the next transition
-     * always names a correct old layout. */
-    VkImageLayout *layouts;
+    /* Per-subresource SEMANTIC state tracking (Phase 19): entry
+     * [layer * mip_levels + mip] for every mip of every layer
+     * (malloc'd). Barriers derive Vulkan layouts/stages/access from
+     * these states; mixed states (e.g. mip 0 SHADER_READ while mip
+     * 1 renders) stay representable and truthful. */
+    lc_resource_state *states;
 
     lc_image *next;
     lc_image *prev;
@@ -461,26 +745,23 @@ lc_result lc_vulkan_image_create(lc_image *image, lc_device *device,
 void lc_vulkan_image_destroy(lc_image *image);
 
 /*
- * Transition the whole image to a new layout on the upload context
- * (immediate submit, one barrier per subresource). Each entry moves
- * from its tracked layout with stage/access masks suited to the
- * endpoints; `visibility` selects stages for SHADER_READ endpoints
- * (0 defaults to fragment). Unknown endpoints fail rather than emit
- * invalid barriers. Tracked state follows only on success.
+ * Transition the whole image to a semantic state on the upload
+ * context (immediate submit, one barrier per subresource). Old
+ * states come from tracking (PART F). Tracked state follows only
+ * on success.
  */
-lc_result lc_vulkan_image_transition(lc_image *image, VkImageLayout new_layout,
-                                     uint32_t visibility);
+lc_result lc_vulkan_image_transition(lc_image *image,
+                                     lc_resource_state new_state);
 
 /*
- * Transition an explicit mip/layer range from an explicit old layout
- * (one barrier, immediate submit). Used by mip generation, where
- * levels temporarily diverge. The range's tracked entries must all
- * equal old_layout; they are updated only on success.
+ * Transition an explicit mip/layer range to a semantic state (one
+ * barrier per subresource, immediate submit). Used by mip
+ * generation, where levels temporarily diverge.
  */
 lc_result lc_vulkan_image_transition_range(
     lc_image *image, uint32_t base_mip, uint32_t level_count,
-    uint32_t base_layer, uint32_t layer_count, VkImageLayout old_layout,
-    VkImageLayout new_layout, uint32_t visibility);
+    uint32_t base_layer, uint32_t layer_count,
+    lc_resource_state new_state);
 
 /* Opaque public image-view type, completed here. A view borrows its
  * image (and thereby its device); image teardown destroys dependent
@@ -488,6 +769,7 @@ lc_result lc_vulkan_image_transition_range(
 struct lc_image_view {
     lc_device *device;
     lc_image *image;
+    lc_resource_id resource_id; /* stable, never reused */
     lc_image_view_type type;
     lc_format format;
     uint32_t aspect; /* lc_image_aspect bits, as requested */
@@ -521,6 +803,15 @@ lc_result lc_vulkan_image_write(lc_image *image,
  * linear-blit support for the format. */
 lc_result lc_vulkan_image_generate_mipmaps(lc_image *image);
 
+/* Public readback backend: copy one mip/layer into CPU memory
+ * (tightly packed). Assumes the caller validated liveness, range,
+ * format, samples, and TRANSFER_SRC usage and computed `byte_size`.
+ * Drains prior device work first (synchronous convenience). */
+lc_result lc_vulkan_image_readback(lc_image *image, uint32_t mip_level,
+                                   uint32_t array_layer, uint32_t width,
+                                   uint32_t height, uint32_t depth,
+                                   void *dst, size_t byte_size);
+
 /* Copy one mip/layer region into a buffer, leaving the image
  * sampled-readable. Exported (but not in the public header) so
  * white-box integration tests can verify round-trips exactly; not
@@ -530,10 +821,46 @@ LC_API lc_result lc_vulkan_copy_image_to_buffer(
     uint32_t array_layer, uint32_t width, uint32_t height, uint32_t depth,
     VkBuffer dst, uint64_t dst_offset);
 
+/* Mark one mip/layer range at a new semantic state after an
+ * explicit render pass whose finalLayout already performed the
+ * transition (no barrier emitted). Used by the encoder for
+ * attachment stores. Returns INVALID_ARGUMENT for bad ranges. */
+lc_result lc_vulkan_image_notify_range(lc_image *image, uint32_t base_mip,
+                                       uint32_t level_count,
+                                       uint32_t base_layer,
+                                       uint32_t layer_count,
+                                       lc_resource_state new_state);
+
+/* Sync helpers (vulkan_sync.c): range validation, tracking
+ * queries, state marking. */
+int lc_vk_sync_state_valid_for_image(lc_resource_state state);
+int lc_vk_sync_validate_range(const lc_image *image, uint32_t base_mip,
+                              uint32_t level_count, uint32_t base_layer,
+                              uint32_t layer_count);
+void lc_vk_sync_mark(lc_image *image, uint32_t base_mip,
+                     uint32_t level_count, uint32_t base_layer,
+                     uint32_t layer_count, lc_resource_state state);
+int lc_vk_sync_all_equal(const lc_image *image, uint32_t base_mip,
+                         uint32_t level_count, uint32_t base_layer,
+                         uint32_t layer_count, lc_resource_state state);
+/* Recorded transition into a caller-provided command buffer. */
+lc_result lc_vulkan_encoder_transition_image(
+    VkCommandBuffer cmd, lc_image *image, uint32_t base_mip,
+    uint32_t level_count, uint32_t base_layer, uint32_t layer_count,
+    lc_resource_state new_state);
+/* Pure span barrier emission with caller-known old state (no
+ * tracking touch; the caller marks). Mip-generation dance. */
+lc_result lc_vk_sync_record_span(VkCommandBuffer cmd, lc_image *image,
+                                uint32_t base_mip, uint32_t level_count,
+                                uint32_t layer_count,
+                                lc_resource_state old_state,
+                                lc_resource_state new_state);
+
 /* Opaque public sampler type, completed here. Device-owned, fully
  * independent of images (no bindings exist yet). */
 struct lc_sampler {
     lc_device *device;
+    lc_resource_id resource_id; /* stable, never reused */
     VkSampler vk_sampler;
     lc_sampler *next;
     lc_sampler *prev;
@@ -576,6 +903,7 @@ lc_result lc_vulkan_frame_end(lc_swapchain *swapchain);
  * binding, rejected where detectable. */
 struct lc_binding_layout {
     lc_device *device;
+    lc_resource_id resource_id; /* stable, never reused */
     lc_binding_desc *bindings; /* sorted copy, malloc'd */
     uint32_t binding_count;
     VkDescriptorSetLayout vk_layout;
@@ -606,6 +934,7 @@ void lc_vulkan_desc_teardown(lc_device *device);
  * first; slot matching at bind time still uses the anchor. */
 struct lc_binding_set {
     lc_device *device;
+    lc_resource_id resource_id; /* stable, never reused */
     const lc_binding_layout *layout; /* creation anchor, non-owning */
     lc_binding_desc *slots; /* sorted snapshot copy, malloc'd (maybe NULL) */
     uint32_t slot_count;
@@ -642,5 +971,108 @@ lc_result lc_vulkan_binding_set_update(lc_binding_set *set,
 lc_result lc_vulkan_frame_bind_set(lc_swapchain *swapchain,
                                    const lc_pipeline *pipeline,
                                    uint32_t slot, const lc_binding_set *set);
+
+/* ------------------------------------------------------------------
+ * Phase 12 render-target / pass-cache / encoder backend.
+ * ------------------------------------------------------------------ */
+
+/* Structural target-signature hash (FNV-1a over count, formats,
+ * depth, samples). Collisions resolve by structural compare. */
+uint32_t lc_render_target_hash(uint32_t color_count,
+                               const lc_format *color_formats,
+                               lc_format depth_format,
+                               lc_sample_count samples);
+
+/* Structural equality of two target descs (ignores width/height).
+ * Returns nonzero when compatible for pipeline sharing. */
+int lc_render_target_desc_equal(const lc_render_target_desc *a,
+                                const lc_render_target_desc *b);
+
+/* Validate a structural target desc for pipeline creation (no views).
+ * Requires 1..8 colors and/or a depth format, color formats only,
+ * depth format with depth, known sample count, within device color
+ * limits. Width/height ignored. */
+lc_result lc_vulkan_target_desc_validate(
+    lc_device *device, const lc_render_target_desc *desc);
+
+/* Get-or-create a cached VkRenderPass for a key (lazy). Never evicted;
+ * destroyed with the device. */
+lc_result lc_vulkan_pass_cache_get(lc_device *device,
+                                   const lc_vk_pass_key *key,
+                                   VkRenderPass *out_pass);
+
+/* Destroy the whole pass cache. Requires no live targets/framebuffers
+ * (callers destroy those first via hooks). Safe on empty state. */
+void lc_vulkan_pass_cache_teardown(lc_device *device);
+
+/* Map helpers (backend-neutral -> Vulkan). Unknown inputs map to
+ * zero/UNDEFINED equivalents; callers validate first. */
+VkSampleCountFlagBits lc_vulkan_translate_samples(lc_sample_count samples);
+VkAttachmentLoadOp lc_vulkan_translate_load(lc_load_op op);
+VkAttachmentStoreOp lc_vulkan_translate_store(lc_store_op op);
+
+/* Validate + fill an allocated (zeroed) offscreen lc_render_target
+ * (views borrowed, formats inferred, lazy framebuffer). The caller
+ * owns the struct and its tracking-list membership. */
+lc_result lc_vulkan_render_target_create(lc_render_target *target,
+                                         lc_device *device,
+                                         const lc_render_target_create_desc *desc);
+
+/* Destroy an offscreen target's framebuffer (views/images untouched).
+ * Device must still be alive. Safe on partial state. */
+void lc_vulkan_render_target_destroy(lc_render_target *target);
+
+/* Refresh a swapchain's inline borrowed target snapshot from its
+ * current extent/formats (called on every rebuild + teardown reset).
+ * No Vulkan work; never fails. */
+void lc_vulkan_swapchain_target_sync(lc_swapchain *swapchain);
+
+/* Ensure an offscreen target's VkFramebuffer for `pass` exists
+ * (lazy, reused across ops variants). Creates on first use. */
+lc_result lc_vulkan_target_ensure_framebuffer(lc_render_target *target,
+                                              VkRenderPass pass);
+
+/* Encoder recording (all require an open frame; pass state validated
+ * by the caller, re-checked here defensively). */
+lc_result lc_vulkan_encoder_begin_offscreen(    lc_command_encoder *enc, lc_render_target *target,
+    const lc_render_pass_desc *desc);
+lc_result lc_vulkan_encoder_begin_swapchain(
+    lc_command_encoder *enc, lc_swapchain *swapchain,
+    const lc_render_swapchain_pass_desc *desc);
+lc_result lc_vulkan_encoder_end(lc_command_encoder *enc);
+lc_result lc_vulkan_encoder_bind(lc_command_encoder *enc,
+                                 const lc_pipeline *pipeline);
+lc_result lc_vulkan_encoder_bind_set(lc_command_encoder *enc,
+                                     const lc_pipeline *pipeline,
+                                     uint32_t slot,
+                                     const lc_binding_set *set);
+lc_result lc_vulkan_encoder_bind_vertex(lc_command_encoder *enc,
+                                        uint32_t binding,
+                                        const lc_buffer *buffer,
+                                        uint64_t offset);
+lc_result lc_vulkan_encoder_bind_index(lc_command_encoder *enc,
+                                       const lc_buffer *buffer,
+                                       uint64_t offset,
+                                       lc_index_type index_type);
+lc_result lc_vulkan_encoder_push(lc_command_encoder *enc,
+                                 const lc_pipeline *pipeline,
+                                 uint32_t visibility, uint32_t offset,
+                                 uint32_t size, const void *data);
+lc_result lc_vulkan_encoder_draw(lc_command_encoder *enc,
+                                 uint32_t vertex_count,
+                                 uint32_t first_vertex);
+lc_result lc_vulkan_encoder_draw_indexed(
+    lc_command_encoder *enc, uint32_t index_count, uint32_t instance_count,
+    uint32_t first_index, int32_t vertex_offset, uint32_t first_instance);
+lc_result lc_vulkan_encoder_draw_instanced(
+    lc_command_encoder *enc, uint32_t vertex_count, uint32_t instance_count,
+    uint32_t first_vertex, uint32_t first_instance);
+/* Explicit image transition (open frame required; passes optional).
+ * Validates frame/device, then records via the transition_image
+ * barrier helper. */
+lc_result lc_vulkan_encoder_transition(
+    lc_command_encoder *enc, lc_image *image, uint32_t base_mip,
+    uint32_t level_count, uint32_t base_layer, uint32_t layer_count,
+    lc_resource_state new_state);
 
 #endif /* LUMAC_GRAPHICS_INTERNAL_H */

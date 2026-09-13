@@ -118,3 +118,18 @@ uint32_t lc_format_component_count(lc_format format) {
     const lc_format_entry *entry = lc_format_lookup(format);
     return (entry != NULL) ? entry->components : 0;
 }
+
+VkImageAspectFlags lc_vk_aspect_for(lc_format format) {
+    VkImageAspectFlags aspect = 0;
+
+    if (lc_format_is_color(format)) {
+        aspect |= VK_IMAGE_ASPECT_COLOR_BIT;
+    }
+    if (lc_format_is_depth(format)) {
+        aspect |= VK_IMAGE_ASPECT_DEPTH_BIT;
+    }
+    if (lc_format_is_stencil(format)) {
+        aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
+    }
+    return aspect;
+}

@@ -89,7 +89,7 @@ static int g_failed = 0;
 
 /* 0 = ready, 1 = environmental SKIP, -1 = hard failure */
 static int make_device(lc_device **out) {
-    lc_device_desc desc;
+    lc_device_desc desc = { 0 };
 
     desc.backend = LC_BACKEND_VULKAN;
     desc.enable_validation = 1; /* exercises messenger when layers exist */
@@ -290,7 +290,7 @@ static int make_textured_stack(tex_ctx *ctx) {
     lc_binding_write writes[3];
     lc_vertex_binding_desc vbinding;
     lc_vertex_attribute_desc vattrs[2];
-    lc_graphics_pipeline_desc pdesc;
+    lc_graphics_pipeline_desc pdesc = { 0 };
     unsigned char texels[TEX_W * TEX_H * 4];
 
     /* Caller provides a zeroed ctx with device/window/surface/swapchain
@@ -443,7 +443,14 @@ static int make_textured_stack(tex_ctx *ctx) {
         slot_layouts[0] = ctx->layout;
         pdesc.binding_layouts = slot_layouts;
         pdesc.binding_layout_count = 1;
-        if (lc_graphics_pipeline_create(ctx->device, ctx->swapchain, &pdesc,
+        if (lc_swapchain_get_render_target_desc(ctx->swapchain,
+                                                &pdesc.render_target) !=
+            LC_SUCCESS) {
+            lc_shader_destroy(vs);
+            lc_shader_destroy(fs);
+            return -1;
+        }
+        if (lc_graphics_pipeline_create(ctx->device, &pdesc,
                                         &ctx->pipeline) != LC_SUCCESS) {
             lc_shader_destroy(vs);
             lc_shader_destroy(fs);

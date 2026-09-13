@@ -148,7 +148,7 @@ int main(void) {
     size_t vert_size = 0;
     size_t frag_size = 0;
     lc_window_desc window_desc;
-    lc_device_desc device_desc;
+    lc_device_desc device_desc = { 0 };
     lc_swapchain_desc swapchain_desc;
     lc_result res = LC_SUCCESS;
     unsigned long frame = 0;
@@ -315,7 +315,7 @@ int main(void) {
     }
     {
         lc_shader_desc shader_desc;
-        lc_graphics_pipeline_desc pipeline_desc;
+        lc_graphics_pipeline_desc pipeline_desc = { 0 };
         lc_binding_desc bindings[3];
         lc_binding_layout_desc layout_desc;
         lc_binding_write writes[3];
@@ -385,8 +385,12 @@ int main(void) {
         pipeline_desc.vertex_attribute_count = 2;
         pipeline_desc.binding_layouts = slots;
         pipeline_desc.binding_layout_count = 1;
-        res = lc_graphics_pipeline_create(device, swapchain, &pipeline_desc,
-                                          &pipeline);
+        res = lc_swapchain_get_render_target_desc(
+            swapchain, &pipeline_desc.render_target);
+        if (res != LC_SUCCESS) {
+            FAIL_CLEANUP("lc_swapchain_get_render_target_desc", res);
+        }
+        res = lc_graphics_pipeline_create(device, &pipeline_desc, &pipeline);
         if (res != LC_SUCCESS) {
             FAIL_CLEANUP("lc_graphics_pipeline_create", res);
         }

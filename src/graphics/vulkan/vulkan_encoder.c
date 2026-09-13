@@ -1,0 +1,706 @@
+/*
+ * Vulkan encoder backend (Phase 12: explicit offscreen + swapchain
+ * passes sharing the frame command buffer with the legacy implicit
+ * pass, mutually exclusive per frame).
+ *
+ * Offscreen passes use the device render-pass cache (structure +
+ * policy + sampled/present finals) plus one lazily created
+ * framebuffer per target. Swapchain passes reuse the swapchain's
+ * legacy per-image framebuffers with cache passes ending PRESENT.
+ * Attachment image tracking is updated on end (STORE) so second-pass
+ * sampling validates without extra barriers; CLEAR passes start from
+ * UNDEFINED and need no pre-transition.
+ */
+
+#include <stdlib.h>
+#include <string.h>
+
+#include "graphics/graphics_internal.h"
+
+static lc_vk_flight *lc_enc_flight(lc_swapchain *swapchain) {
+    return &swapchain->flights[swapchain->current_frame];
+}
+
+static int lc_enc_frame_ready(const lc_swapchain *swapchain) {
+    return swapchain != NULL && swapchain->device != NULL &&
+           swapchain->surface != NULL &&
+           swapchain->device->device != VK_NULL_HANDLE &&
+           swapchain->vk_swapchain != VK_NULL_HANDLE &&
+           swapchain->cmd_pool != VK_NULL_HANDLE &&
+           swapchain->current_frame < LC_MAX_FRAMES_IN_FLIGHT &&
+           swapchain->frame_active &&
+           swapchain->current_image < swapchain->image_count;
+}
+
+/* Legacy implicit-pass state must be idle before an explicit begin
+ * (no mixing paths inside one frame). */
+static int lc_enc_legacy_idle(const lc_swapchain *swapchain) {
+    return swapchain->rp_open == 0 && swapchain->clear_pending == 0 &&
+           swapchain->depth_clear_pending == 0 &&
+           swapchain->bound_pipeline == NULL;
+}
+
+static float lc_enc_clamp01(float v) {
+    if (v < 0.0f) {
+        return 0.0f;
+    }
+    if (v > 1.0f) {
+        return 1.0f;
+    }
+    return v;
+}
+
+static lc_resource_state lc_enc_tracked_at(const lc_image *image,
+                                              const lc_image_view *view) {
+    size_t idx;
+
+    if (image == NULL || image->states == NULL || view == NULL) {
+        return LC_RESOURCE_STATE_UNDEFINED;
+    }
+    idx = (size_t)view->base_array_layer * image->mip_levels +
+          view->base_mip_level;
+    return image->states[idx];
+}
+
+lc_result lc_vulkan_encoder_begin_offscreen(
+    lc_command_encoder *enc, lc_render_target *target,
+    const lc_render_pass_desc *desc) {
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+    lc_vk_pass_key key;
+    VkRenderPass pass = VK_NULL_HANDLE;
+    VkRenderPassBeginInfo begin_info;
+    VkClearValue clear_values[LC_MAX_COLOR_ATTACHMENTS + 1];
+    VkViewport viewport;
+    VkRect2D scissor;
+    uint32_t i;
+    lc_result res;
+
+    if (enc == NULL || target == NULL || desc == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    if (swapchain == NULL || !lc_enc_frame_ready(swapchain) ||
+        enc->in_pass || !lc_enc_legacy_idle(swapchain)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (target->device != swapchain->device || target->width == 0 ||
+        target->height == 0 || target->width != desc->width ||
+        target->height != desc->height) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (desc->color_attachment_count != target->color_count ||
+        desc->color_attachment_count > LC_MAX_COLOR_ATTACHMENTS) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    /* Views must be exactly the target's attachments in order (no
+     * aliasing games in Phase 12). */
+    for (i = 0; i < desc->color_attachment_count; i++) {
+        const lc_render_color_attachment *att = &desc->color_attachments[i];
+
+        if (att->view != target->color_views[i]) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        if (att->load_op != LC_LOAD_OP_LOAD &&
+            att->load_op != LC_LOAD_OP_CLEAR &&
+            att->load_op != LC_LOAD_OP_DONT_CARE) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        if (att->store_op != LC_STORE_OP_STORE &&
+            att->store_op != LC_STORE_OP_DONT_CARE) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        if (att->load_op == LC_LOAD_OP_LOAD) {
+            const lc_image_view *view = att->view;
+
+            if (view->image == NULL ||
+                lc_enc_tracked_at(view->image, view) !=
+                    LC_RESOURCE_STATE_SHADER_READ) {
+                return LC_ERROR_INVALID_ARGUMENT;
+            }
+        }
+    }
+    if (desc->depth_attachment != NULL) {
+        const lc_render_depth_attachment *datt = desc->depth_attachment;
+
+        if (target->depth_view == NULL ||
+            datt->view != target->depth_view) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        if (datt->depth_load_op != LC_LOAD_OP_LOAD &&
+            datt->depth_load_op != LC_LOAD_OP_CLEAR &&
+            datt->depth_load_op != LC_LOAD_OP_DONT_CARE) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        if (datt->depth_store_op != LC_STORE_OP_STORE &&
+            datt->depth_store_op != LC_STORE_OP_DONT_CARE) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        if (datt->stencil_load_op != LC_LOAD_OP_DONT_CARE ||
+            datt->stencil_store_op != LC_STORE_OP_DONT_CARE ||
+            datt->clear_stencil != 0) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        if (datt->depth_load_op == LC_LOAD_OP_LOAD) {
+            const lc_image_view *view = datt->view;
+
+            if (view->image == NULL ||
+                lc_enc_tracked_at(view->image, view) !=
+                    LC_RESOURCE_STATE_DEPTH_ATTACHMENT_WRITE) {
+                return LC_ERROR_INVALID_ARGUMENT;
+            }
+        }
+    } else if (target->depth_view != NULL) {
+        /* A target with depth must bind it: omitting depth while the
+         * framebuffer carries it is a signature mismatch. */
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+
+    memset(&key, 0, sizeof(key));
+    key.color_count = target->color_count;
+    for (i = 0; i < key.color_count; i++) {
+        key.color_formats[i] =
+            lc_vulkan_translate_format(target->color_formats[i]);
+        key.color_loads[i] = lc_vulkan_translate_load(
+            desc->color_attachments[i].load_op);
+        key.color_stores[i] = lc_vulkan_translate_store(
+            desc->color_attachments[i].store_op);
+    }
+    key.depth_format = (target->depth_view != NULL)
+                           ? lc_vulkan_translate_format(target->depth_format)
+                           : VK_FORMAT_UNDEFINED;
+    /* Sampled-usage depth selects the sampled-readable final layout
+     * (must agree with pass creation + end-of-pass adoption). */
+    key.depth_sampled =
+        (target->depth_view != NULL && target->depth_view->image != NULL &&
+         (target->depth_view->image->usage & LC_IMAGE_USAGE_SAMPLED) !=
+             0)
+            ? 1
+            : 0;
+    if (desc->depth_attachment != NULL) {
+        key.depth_load =
+            lc_vulkan_translate_load(desc->depth_attachment->depth_load_op);
+        key.depth_store =
+            lc_vulkan_translate_store(desc->depth_attachment->depth_store_op);
+    } else {
+        key.depth_load = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        key.depth_store = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    }
+    key.samples = lc_vulkan_translate_samples(target->samples);
+    key.present = 0;
+
+    res = lc_vulkan_pass_cache_get(swapchain->device, &key, &pass);
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+    res = lc_vulkan_target_ensure_framebuffer(target, pass);
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+
+    for (i = 0; i < desc->color_attachment_count; i++) {
+        clear_values[i].color.float32[0] =
+            lc_enc_clamp01(desc->color_attachments[i].clear_color[0]);
+        clear_values[i].color.float32[1] =
+            lc_enc_clamp01(desc->color_attachments[i].clear_color[1]);
+        clear_values[i].color.float32[2] =
+            lc_enc_clamp01(desc->color_attachments[i].clear_color[2]);
+        clear_values[i].color.float32[3] =
+            lc_enc_clamp01(desc->color_attachments[i].clear_color[3]);
+    }
+    if (desc->depth_attachment != NULL) {
+        float d = desc->depth_attachment->clear_depth;
+
+        if (d < 0.0f) {
+            d = 0.0f;
+        }
+        if (d > 1.0f) {
+            d = 1.0f;
+        }
+        clear_values[desc->color_attachment_count]
+            .depthStencil.depth = d;
+        clear_values[desc->color_attachment_count]
+            .depthStencil.stencil = 0;
+    }
+
+    flight = lc_enc_flight(swapchain);
+    memset(&begin_info, 0, sizeof(begin_info));
+    begin_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    begin_info.renderPass = pass;
+    begin_info.framebuffer = target->framebuffer;
+    begin_info.renderArea.offset.x = 0;
+    begin_info.renderArea.offset.y = 0;
+    begin_info.renderArea.extent.width = target->width;
+    begin_info.renderArea.extent.height = target->height;
+    begin_info.clearValueCount =
+        desc->color_attachment_count +
+        ((desc->depth_attachment != NULL) ? 1u : 0u);
+    begin_info.pClearValues = clear_values;
+    vkCmdBeginRenderPass(flight->cmd, &begin_info,
+                         VK_SUBPASS_CONTENTS_INLINE);
+
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = (float)target->width;
+    viewport.height = (float)target->height;
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(flight->cmd, 0, 1, &viewport);
+    memset(&scissor, 0, sizeof(scissor));
+    scissor.offset.x = 0;
+    scissor.offset.y = 0;
+    scissor.extent.width = target->width;
+    scissor.extent.height = target->height;
+    vkCmdSetScissor(flight->cmd, 0, 1, &scissor);
+
+    enc->in_pass = 1;
+    enc->pass_is_swapchain = 0;
+    enc->pass_target.width = target->width;
+    enc->pass_target.height = target->height;
+    enc->pass_target.color_attachment_count = target->color_count;
+    for (i = 0; i < target->color_count; i++) {
+        enc->pass_target.color_formats[i] = target->color_formats[i];
+        enc->end_color_views[i] =
+            (lc_image_view *)desc->color_attachments[i].view;
+        enc->end_color_stores[i] = desc->color_attachments[i].store_op;
+    }
+    enc->end_color_count = target->color_count;
+    enc->pass_target.depth_stencil_format = target->depth_format;
+    enc->pass_target.samples = target->samples;
+    enc->pass_target_obj = target;
+    if (desc->depth_attachment != NULL) {
+        enc->end_depth_view =
+            (lc_image_view *)desc->depth_attachment->view;
+        enc->end_depth_store = desc->depth_attachment->depth_store_op;
+        enc->end_has_depth = 1;
+    } else {
+        enc->end_depth_view = NULL;
+        enc->end_has_depth = 0;
+    }
+    enc->bound_pipeline = NULL;
+    enc->bound_index_buffer = NULL;
+    enc->index_bound = 0;
+    return LC_SUCCESS;
+}
+
+lc_result lc_vulkan_encoder_begin_swapchain(
+    lc_command_encoder *enc, lc_swapchain *swapchain,
+    const lc_render_swapchain_pass_desc *desc) {
+    lc_vk_flight *flight;
+    lc_vk_pass_key key;
+    VkRenderPass pass = VK_NULL_HANDLE;
+    VkRenderPassBeginInfo begin_info;
+    VkClearValue clear_values[2];
+    VkViewport viewport;
+    VkRect2D scissor;
+    lc_result res;
+
+    if (enc == NULL || swapchain == NULL || desc == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (enc->swapchain != swapchain || !lc_enc_frame_ready(swapchain) ||
+        enc->in_pass || !lc_enc_legacy_idle(swapchain)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (desc->color_load_op != LC_LOAD_OP_CLEAR) {
+        /* Swap images start UNDEFINED every frame: only CLEAR is
+         * meaningful for color. */
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (desc->color_store_op != LC_STORE_OP_STORE &&
+        desc->color_store_op != LC_STORE_OP_DONT_CARE) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (desc->depth_load_op != LC_LOAD_OP_CLEAR &&
+        desc->depth_load_op != LC_LOAD_OP_DONT_CARE) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (desc->depth_store_op != LC_STORE_OP_STORE &&
+        desc->depth_store_op != LC_STORE_OP_DONT_CARE) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (swapchain->render_pass == VK_NULL_HANDLE ||
+        swapchain->framebuffers == NULL ||
+        swapchain->current_image >= swapchain->image_count) {
+        return LC_ERROR_UNKNOWN;
+    }
+
+    memset(&key, 0, sizeof(key));
+    key.color_count = 1;
+    key.color_formats[0] = swapchain->format;
+    key.color_loads[0] = lc_vulkan_translate_load(desc->color_load_op);
+    key.color_stores[0] = lc_vulkan_translate_store(desc->color_store_op);
+    key.depth_format = swapchain->depth_format;
+    key.depth_load = lc_vulkan_translate_load(desc->depth_load_op);
+    key.depth_store = lc_vulkan_translate_store(desc->depth_store_op);
+    key.samples = VK_SAMPLE_COUNT_1_BIT;
+    key.present = 1;
+
+    res = lc_vulkan_pass_cache_get(swapchain->device, &key, &pass);
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+
+    clear_values[0].color.float32[0] = lc_enc_clamp01(desc->clear_color[0]);
+    clear_values[0].color.float32[1] = lc_enc_clamp01(desc->clear_color[1]);
+    clear_values[0].color.float32[2] = lc_enc_clamp01(desc->clear_color[2]);
+    clear_values[0].color.float32[3] = lc_enc_clamp01(desc->clear_color[3]);
+    {
+        float d = desc->clear_depth;
+
+        if (d < 0.0f) {
+            d = 0.0f;
+        }
+        if (d > 1.0f) {
+            d = 1.0f;
+        }
+        clear_values[1].depthStencil.depth = d;
+        clear_values[1].depthStencil.stencil = 0;
+    }
+
+    flight = lc_enc_flight(swapchain);
+    memset(&begin_info, 0, sizeof(begin_info));
+    begin_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    /* Generic swapchain passes reuse the legacy per-image framebuffers:
+     * same attachment recipe (color + depth), so compatible. */
+    begin_info.renderPass = pass;
+    begin_info.framebuffer =
+        swapchain->framebuffers[swapchain->current_image];
+    begin_info.renderArea.offset.x = 0;
+    begin_info.renderArea.offset.y = 0;
+    begin_info.renderArea.extent = swapchain->extent;
+    begin_info.clearValueCount = 2;
+    begin_info.pClearValues = clear_values;
+    vkCmdBeginRenderPass(flight->cmd, &begin_info,
+                         VK_SUBPASS_CONTENTS_INLINE);
+
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = (float)swapchain->extent.width;
+    viewport.height = (float)swapchain->extent.height;
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(flight->cmd, 0, 1, &viewport);
+    memset(&scissor, 0, sizeof(scissor));
+    scissor.extent = swapchain->extent;
+    vkCmdSetScissor(flight->cmd, 0, 1, &scissor);
+
+    enc->in_pass = 1;
+    enc->pass_is_swapchain = 1;
+    enc->pass_target.width = swapchain->extent.width;
+    enc->pass_target.height = swapchain->extent.height;
+    enc->pass_target.color_attachment_count = 1;
+    enc->pass_target.color_formats[0] =
+        lc_vulkan_untranslate_format(swapchain->format);
+    enc->pass_target.depth_stencil_format =
+        lc_vulkan_untranslate_format(swapchain->depth_format);
+    enc->pass_target.samples = LC_SAMPLE_COUNT_1;
+    enc->pass_target_obj = NULL;
+    enc->end_color_count = 0;
+    enc->end_has_depth = 0;
+    enc->bound_pipeline = NULL;
+    enc->bound_index_buffer = NULL;
+    enc->index_bound = 0;
+    return LC_SUCCESS;
+}
+
+lc_result lc_vulkan_encoder_end(lc_command_encoder *enc) {
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+
+    if (enc == NULL || enc->swapchain == NULL || !enc->in_pass) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    if (!lc_enc_frame_ready(swapchain)) {
+        return LC_ERROR_UNKNOWN;
+    }
+    flight = lc_enc_flight(swapchain);
+    vkCmdEndRenderPass(flight->cmd);
+
+    /* Attachment finals already transitioned the images: adopt the
+     * tracked state so second-pass sampling validates. Swapchain
+     * images carry no tracking (UNDEFINED -> PRESENT, self-contained).
+     * STORE color ends sampled-readable; DONT_CARE decays to UNDEFINED
+     * (a later LOAD is then correctly rejected). Depth STORE stays an
+     * attachment unless the image carries SAMPLED usage (shadow maps),
+     * in which case it ends sampled-readable like color.
+     */
+    if (!enc->pass_is_swapchain) {
+        uint32_t i;
+
+        for (i = 0; i < enc->end_color_count; i++) {
+            lc_image_view *view = enc->end_color_views[i];
+
+            if (view != NULL && view->image != NULL) {
+                lc_resource_state final =
+                    (enc->end_color_stores[i] == LC_STORE_OP_STORE)
+                        ? LC_RESOURCE_STATE_SHADER_READ
+                        : LC_RESOURCE_STATE_UNDEFINED;
+                lc_vulkan_image_notify_range(
+                    view->image, view->base_mip_level,
+                    view->mip_level_count, view->base_array_layer,
+                    view->array_layer_count, final);
+            }
+        }
+        if (enc->end_has_depth && enc->end_depth_view != NULL &&
+            enc->end_depth_view->image != NULL) {
+            lc_image_view *view = enc->end_depth_view;
+            lc_resource_state final =
+                (enc->end_depth_store == LC_STORE_OP_STORE)
+                    ? (((view->image->usage & LC_IMAGE_USAGE_SAMPLED) !=
+                        0)
+                           ? LC_RESOURCE_STATE_SHADER_READ
+                           : LC_RESOURCE_STATE_DEPTH_ATTACHMENT_WRITE)
+                    : LC_RESOURCE_STATE_UNDEFINED;
+            lc_vulkan_image_notify_range(
+                view->image, view->base_mip_level,
+                view->mip_level_count, view->base_array_layer,
+                view->array_layer_count, final);
+        }
+    }
+    enc->in_pass = 0;
+    enc->pass_is_swapchain = 0;
+    enc->bound_pipeline = NULL;
+    enc->bound_index_buffer = NULL;
+    enc->index_bound = 0;
+    enc->end_color_count = 0;
+    enc->end_has_depth = 0;
+    return LC_SUCCESS;
+}
+
+lc_result lc_vulkan_encoder_bind(lc_command_encoder *enc,
+                                 const lc_pipeline *pipeline) {
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+
+    if (enc == NULL || pipeline == NULL || enc->swapchain == NULL ||
+        !enc->in_pass) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    if (!lc_enc_frame_ready(swapchain) ||
+        pipeline->layout == VK_NULL_HANDLE ||
+        pipeline->pipeline == VK_NULL_HANDLE) {
+        return LC_ERROR_UNKNOWN;
+    }
+    flight = lc_enc_flight(swapchain);
+    vkCmdBindPipeline(flight->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                      pipeline->pipeline);
+    enc->bound_pipeline = pipeline;
+    return LC_SUCCESS;
+}
+
+lc_result lc_vulkan_encoder_bind_set(lc_command_encoder *enc,
+                                     const lc_pipeline *pipeline,
+                                     uint32_t slot,
+                                     const lc_binding_set *set) {
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+
+    if (enc == NULL || pipeline == NULL || set == NULL ||
+        enc->swapchain == NULL || !enc->in_pass) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    if (!lc_enc_frame_ready(swapchain) ||
+        slot >= pipeline->layout_count || set->vk_set == VK_NULL_HANDLE ||
+        pipeline->layout == VK_NULL_HANDLE) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    flight = lc_enc_flight(swapchain);
+    vkCmdBindDescriptorSets(flight->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            pipeline->layout, slot, 1, &set->vk_set, 0,
+                            NULL);
+    return LC_SUCCESS;
+}
+
+lc_result lc_vulkan_encoder_bind_vertex(lc_command_encoder *enc,
+                                        uint32_t binding,
+                                        const lc_buffer *buffer,
+                                        uint64_t offset) {
+    VkPhysicalDeviceProperties props;
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+    VkDeviceSize vk_offset;
+
+    if (enc == NULL || buffer == NULL || enc->swapchain == NULL ||
+        !enc->in_pass) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    if (!lc_enc_frame_ready(swapchain) ||
+        buffer->vk_buffer == VK_NULL_HANDLE) {
+        return LC_ERROR_UNKNOWN;
+    }
+    memset(&props, 0, sizeof(props));
+    vkGetPhysicalDeviceProperties(swapchain->device->physical_device, &props);
+    if (binding >= props.limits.maxVertexInputBindings) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    flight = lc_enc_flight(swapchain);
+    vk_offset = (VkDeviceSize)offset;
+    vkCmdBindVertexBuffers(flight->cmd, binding, 1, &buffer->vk_buffer,
+                           &vk_offset);
+    return LC_SUCCESS;
+}
+
+lc_result lc_vulkan_encoder_bind_index(lc_command_encoder *enc,
+                                       const lc_buffer *buffer,
+                                       uint64_t offset,
+                                       lc_index_type index_type) {
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+    VkIndexType vk_type;
+
+    if (enc == NULL || buffer == NULL || enc->swapchain == NULL ||
+        !enc->in_pass) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    if (!lc_enc_frame_ready(swapchain) ||
+        buffer->vk_buffer == VK_NULL_HANDLE) {
+        return LC_ERROR_UNKNOWN;
+    }
+    if (index_type != LC_INDEX_UINT16 && index_type != LC_INDEX_UINT32) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    vk_type = (index_type == LC_INDEX_UINT16) ? VK_INDEX_TYPE_UINT16
+                                              : VK_INDEX_TYPE_UINT32;
+    flight = lc_enc_flight(swapchain);
+    vkCmdBindIndexBuffer(flight->cmd, buffer->vk_buffer,
+                         (VkDeviceSize)offset, vk_type);
+    enc->bound_index_buffer = buffer;
+    enc->bound_index_offset = offset;
+    enc->bound_index_type = index_type;
+    enc->index_bound = 1;
+    return LC_SUCCESS;
+}
+
+static VkShaderStageFlags lc_enc_push_stages(uint32_t visibility) {
+    VkShaderStageFlags stages = 0;
+
+    if ((visibility & LC_SHADER_VISIBILITY_VERTEX) != 0) {
+        stages |= VK_SHADER_STAGE_VERTEX_BIT;
+    }
+    if ((visibility & LC_SHADER_VISIBILITY_FRAGMENT) != 0) {
+        stages |= VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
+    return stages;
+}
+
+lc_result lc_vulkan_encoder_push(lc_command_encoder *enc,
+                                 const lc_pipeline *pipeline,
+                                 uint32_t visibility, uint32_t offset,
+                                 uint32_t size, const void *data) {
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+    VkShaderStageFlags stages;
+
+    if (enc == NULL || pipeline == NULL || data == NULL ||
+        enc->swapchain == NULL || !enc->in_pass) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    if (!lc_enc_frame_ready(swapchain) ||
+        pipeline->layout == VK_NULL_HANDLE) {
+        return LC_ERROR_UNKNOWN;
+    }
+    if (enc->bound_pipeline != pipeline) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    stages = lc_enc_push_stages(visibility);
+    if (stages == 0) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    flight = lc_enc_flight(swapchain);
+    vkCmdPushConstants(flight->cmd, pipeline->layout, stages, offset, size,
+                       data);
+    return LC_SUCCESS;
+}
+
+lc_result lc_vulkan_encoder_draw(lc_command_encoder *enc,
+                                 uint32_t vertex_count,
+                                 uint32_t first_vertex) {
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+
+    if (enc == NULL || enc->swapchain == NULL || !enc->in_pass) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    if (!lc_enc_frame_ready(swapchain) || enc->bound_pipeline == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    flight = lc_enc_flight(swapchain);
+    vkCmdDraw(flight->cmd, vertex_count, 1, first_vertex, 0);
+    return LC_SUCCESS;
+}
+
+lc_result lc_vulkan_encoder_draw_indexed(
+    lc_command_encoder *enc, uint32_t index_count, uint32_t instance_count,
+    uint32_t first_index, int32_t vertex_offset, uint32_t first_instance) {
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+
+    if (enc == NULL || enc->swapchain == NULL || !enc->in_pass) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    if (!lc_enc_frame_ready(swapchain) || enc->bound_pipeline == NULL ||
+        !enc->index_bound || enc->bound_index_buffer == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    flight = lc_enc_flight(swapchain);
+    vkCmdDrawIndexed(flight->cmd, index_count, instance_count, first_index,
+                     vertex_offset, first_instance);
+    return LC_SUCCESS;
+}
+
+lc_result lc_vulkan_encoder_draw_instanced(
+    lc_command_encoder *enc, uint32_t vertex_count, uint32_t instance_count,
+    uint32_t first_vertex, uint32_t first_instance) {
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+
+    if (enc == NULL || enc->swapchain == NULL || !enc->in_pass) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    if (!lc_enc_frame_ready(swapchain) || enc->bound_pipeline == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    flight = lc_enc_flight(swapchain);
+    vkCmdDraw(flight->cmd, vertex_count, instance_count, first_vertex,
+              first_instance);
+    return LC_SUCCESS;
+}
+
+/* Explicit image transition into the frame command buffer. Allowed
+ * between passes (the primary use: end A, transition, begin B) as
+ * well as inside passes; never outside an open frame. */
+lc_result lc_vulkan_encoder_transition(lc_command_encoder *enc,
+                                       lc_image *image,
+                                       uint32_t base_mip,
+                                       uint32_t level_count,
+                                       uint32_t base_layer,
+                                       uint32_t layer_count,
+                                       lc_resource_state new_state) {
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+
+    if (enc == NULL || image == NULL || enc->swapchain == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    if (!lc_enc_frame_ready(swapchain)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (image->device != swapchain->device) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    flight = lc_enc_flight(swapchain);
+    return lc_vulkan_encoder_transition_image(
+        flight->cmd, image, base_mip, level_count, base_layer,
+        layer_count, new_state);
+}

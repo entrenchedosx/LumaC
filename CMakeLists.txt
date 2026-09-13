@@ -14,6 +14,14 @@ set(CMAKE_C_EXTENSIONS OFF)
 option(LUMAC_BUILD_SHARED "Build LumaC as shared library" OFF)
 option(LUMAC_BUILD_EXAMPLES "Build LumaC examples" ON)
 option(LUMAC_BUILD_TESTS "Build LumaC tests" ON)
+option(LUMA_BUILD_RENDERER "Build the Luma Renderer library (lr_*)" ON)
+option(LUMA_BUILD_ASSETS "Build the Luma Assets library (la_*)" ON)
+
+# Assets layer on the renderer layer; disabling the renderer while
+# asking for assets is a configuration error, not a silent skip.
+if(LUMA_BUILD_ASSETS AND NOT LUMA_BUILD_RENDERER)
+    message(FATAL_ERROR "LUMA_BUILD_ASSETS requires LUMA_BUILD_RENDERER")
+endif()
 
 # Vulkan graphics backend (device, surface, swapchain, frame presentation).
 # The SDK is located normally (VULKAN_SDK env / standard install paths);
@@ -23,6 +31,7 @@ find_package(Vulkan REQUIRED)
 # Library sources (platform-neutral + graphics + one Vulkan backend).
 set(LUMAC_SOURCES
     src/lumac.c
+    src/clock.c
     src/window.c
     src/graphics/graphics.c
     src/graphics/surface.c
@@ -46,6 +55,14 @@ set(LUMAC_SOURCES
     src/graphics/image_view.c
     src/graphics/binding.c
     src/graphics/vulkan/vulkan_binding.c
+    src/graphics/render_target.c
+    src/graphics/readback.c
+    src/graphics/resource_id.c
+    src/graphics/vulkan/vulkan_sync.c
+    src/graphics/vulkan/vulkan_memory.c
+    src/graphics/encoder.c
+    src/graphics/vulkan/vulkan_render_target.c
+    src/graphics/vulkan/vulkan_encoder.c
 )
 
 # Platform backend selection (only the current OS backend is compiled)
@@ -98,6 +115,10 @@ if(UNIX AND NOT APPLE)
         target_include_directories(lumac PRIVATE ${X11_INCLUDE_DIR})
         target_link_libraries(lumac PRIVATE ${X11_LIBRARIES})
     endif()
+    # Allocator mutex (PART AL); pthreads live in libc on modern
+    # systems, Threads::Threads covers the rest.
+    find_package(Threads REQUIRED)
+    target_link_libraries(lumac PRIVATE Threads::Threads)
 endif()
 
 # Compiler warnings (not fatal globally)
@@ -125,6 +146,14 @@ file(COPY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples/vertex_triangle/shaders/vb_triangle.vert.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/examples/textured_quad/shaders/tex_quad.vert.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/examples/textured_quad/shaders/tex_quad.frag.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/cube_3d/shaders/cube.vert.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/cube_3d/shaders/cube.frag.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/render_to_texture/shaders/quad.vert.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/render_to_texture/shaders/quad.frag.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/render_to_texture/shaders/checker.frag.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples/render_to_texture/shaders/mrt.frag.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/chain_copy.vert.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/chain_copy.frag.spv"
     DESTINATION "${LC_SPV_DIR}")
 find_program(LC_GLSLC glslc HINTS "$ENV{VULKAN_SDK}/Bin")
 if(LC_GLSLC)
@@ -132,15 +161,29 @@ if(LC_GLSLC)
         OUTPUT
             "${LC_SPV_DIR}/triangle.vert.spv"
             "${LC_SPV_DIR}/triangle.frag.spv"
+            "${LC_SPV_DIR}/chain_copy.vert.spv"
+            "${LC_SPV_DIR}/chain_copy.frag.spv"
             "${LC_SPV_DIR}/vb_triangle.vert.spv"
             "${LC_SPV_DIR}/tex_quad.vert.spv"
             "${LC_SPV_DIR}/tex_quad.frag.spv"
+            "${LC_SPV_DIR}/cube.vert.spv"
+            "${LC_SPV_DIR}/cube.frag.spv"
+            "${LC_SPV_DIR}/quad.vert.spv"
+            "${LC_SPV_DIR}/quad.frag.spv"
+            "${LC_SPV_DIR}/checker.frag.spv"
+            "${LC_SPV_DIR}/mrt.frag.spv"
         COMMAND "${LC_GLSLC}" -fshader-stage=vert
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/triangle/shaders/triangle.vert"
             -o "${LC_SPV_DIR}/triangle.vert.spv"
         COMMAND "${LC_GLSLC}" -fshader-stage=frag
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/triangle/shaders/triangle.frag"
             -o "${LC_SPV_DIR}/triangle.frag.spv"
+        COMMAND "${LC_GLSLC}" -fshader-stage=vert
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/chain_copy.vert"
+            -o "${LC_SPV_DIR}/chain_copy.vert.spv"
+        COMMAND "${LC_GLSLC}" -fshader-stage=frag
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/chain_copy.frag"
+            -o "${LC_SPV_DIR}/chain_copy.frag.spv"
         COMMAND "${LC_GLSLC}" -fshader-stage=vert
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/vertex_triangle/shaders/vb_triangle.vert"
             -o "${LC_SPV_DIR}/vb_triangle.vert.spv"
@@ -150,19 +193,53 @@ if(LC_GLSLC)
         COMMAND "${LC_GLSLC}" -fshader-stage=frag
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/textured_quad/shaders/tex_quad.frag"
             -o "${LC_SPV_DIR}/tex_quad.frag.spv"
+        COMMAND "${LC_GLSLC}" -fshader-stage=vert
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/cube_3d/shaders/cube.vert"
+            -o "${LC_SPV_DIR}/cube.vert.spv"
+        COMMAND "${LC_GLSLC}" -fshader-stage=frag
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/cube_3d/shaders/cube.frag"
+            -o "${LC_SPV_DIR}/cube.frag.spv"
+        COMMAND "${LC_GLSLC}" -fshader-stage=vert
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/render_to_texture/shaders/quad.vert"
+            -o "${LC_SPV_DIR}/quad.vert.spv"
+        COMMAND "${LC_GLSLC}" -fshader-stage=frag
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/render_to_texture/shaders/quad.frag"
+            -o "${LC_SPV_DIR}/quad.frag.spv"
+        COMMAND "${LC_GLSLC}" -fshader-stage=frag
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/render_to_texture/shaders/checker.frag"
+            -o "${LC_SPV_DIR}/checker.frag.spv"
+        COMMAND "${LC_GLSLC}" -fshader-stage=frag
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/render_to_texture/shaders/mrt.frag"
+            -o "${LC_SPV_DIR}/mrt.frag.spv"
         DEPENDS
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/triangle/shaders/triangle.vert"
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/triangle/shaders/triangle.frag"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/chain_copy.vert"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/chain_copy.frag"
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/vertex_triangle/shaders/vb_triangle.vert"
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/textured_quad/shaders/tex_quad.vert"
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/textured_quad/shaders/tex_quad.frag"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/cube_3d/shaders/cube.vert"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/cube_3d/shaders/cube.frag"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/render_to_texture/shaders/quad.vert"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/render_to_texture/shaders/quad.frag"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/render_to_texture/shaders/checker.frag"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/render_to_texture/shaders/mrt.frag"
         COMMENT "Compiling LumaC example shaders")
     add_custom_target(lumac_triangle_shaders DEPENDS
         "${LC_SPV_DIR}/triangle.vert.spv"
         "${LC_SPV_DIR}/triangle.frag.spv"
+        "${LC_SPV_DIR}/chain_copy.vert.spv"
+        "${LC_SPV_DIR}/chain_copy.frag.spv"
         "${LC_SPV_DIR}/vb_triangle.vert.spv"
         "${LC_SPV_DIR}/tex_quad.vert.spv"
-        "${LC_SPV_DIR}/tex_quad.frag.spv")
+        "${LC_SPV_DIR}/tex_quad.frag.spv"
+        "${LC_SPV_DIR}/cube.vert.spv"
+        "${LC_SPV_DIR}/cube.frag.spv"
+        "${LC_SPV_DIR}/quad.vert.spv"
+        "${LC_SPV_DIR}/quad.frag.spv"
+        "${LC_SPV_DIR}/checker.frag.spv"
+        "${LC_SPV_DIR}/mrt.frag.spv")
 endif()
 
 # Examples
@@ -177,6 +254,27 @@ if(LUMAC_BUILD_EXAMPLES)
     add_subdirectory(examples/vertex_triangle)
     add_subdirectory(examples/textured_quad)
     add_subdirectory(examples/texture_upload)
+    add_subdirectory(examples/cube_3d)
+    add_subdirectory(examples/render_to_texture)
+    if(LUMA_BUILD_RENDERER)
+        add_subdirectory(examples/renderer_scene)
+        add_subdirectory(examples/shadow_scene)
+        add_subdirectory(examples/ibl_scene)
+    endif()
+    if(LUMA_BUILD_ASSETS)
+        add_subdirectory(examples/model_viewer)
+        add_subdirectory(examples/pbr_scene)
+    endif()
+endif()
+
+# Luma Renderer (separate library on public LumaC only).
+if(LUMA_BUILD_RENDERER)
+    add_subdirectory(renderer)
+endif()
+
+# Luma Assets (separate library on public Luma Renderer + LumaC).
+if(LUMA_BUILD_ASSETS)
+    add_subdirectory(assets)
 endif()
 
 # Tests
@@ -264,6 +362,19 @@ if(LUMAC_BUILD_TESTS)
     target_include_directories(test_pipeline PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     add_test(NAME test_pipeline COMMAND test_pipeline)
 
+    # Integration: persistent pipeline cache (two-generation
+    # load/save/reuse, corrupt/truncated/junk blobs, unwritable
+    # path, disabled mode); device-only (no display needed), skips
+    # otherwise. Timings reported, never asserted.
+    add_executable(test_pipeline_cache tests/test_pipeline_cache.c)
+    target_link_libraries(test_pipeline_cache PRIVATE lumac)
+    target_include_directories(test_pipeline_cache PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_definitions(test_pipeline_cache PRIVATE LC_CACHE_SPV_DIR="${LC_SPV_DIR}")
+    if(TARGET lumac_triangle_shaders)
+        add_dependencies(test_pipeline_cache lumac_triangle_shaders)
+    endif()
+    add_test(NAME test_pipeline_cache COMMAND test_pipeline_cache)
+
     # Integration: real SPIR-V modules, pipeline creation, triangle
     # rendering (120 frames, resize, minimize, two windows); needs
     # display + Vulkan + GPU, skips otherwise.
@@ -317,6 +428,37 @@ if(LUMAC_BUILD_TESTS)
     target_include_directories(test_image_vulkan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME test_image_vulkan COMMAND test_image_vulkan)
 
+    # Integration: PUBLIC image readback only (no white-box copy),
+    # pattern/float/mip/layer/depth reads, error matrix, ABA
+    # identity stress; device-only (no display needed), skips
+    # otherwise.
+    add_executable(test_readback_vulkan tests/test_readback_vulkan.c)
+    target_link_libraries(test_readback_vulkan PRIVATE lumac)
+    target_include_directories(test_readback_vulkan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    add_test(NAME test_readback_vulkan COMMAND test_readback_vulkan)
+
+    # Integration: semantic states, explicit transitions, chained
+    # write->read visibility (~1000 transitions), depth, upload/
+    # copy paths, mixed mip states; windowed (display needed),
+    # skips otherwise.
+    add_executable(test_sync_vulkan tests/test_sync_vulkan.c)
+    target_link_libraries(test_sync_vulkan PRIVATE lumac)
+    target_include_directories(test_sync_vulkan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_definitions(test_sync_vulkan PRIVATE LC_SYNC_SPV_DIR="${LC_SPV_DIR}")
+    if(TARGET lumac_triangle_shaders)
+        add_dependencies(test_sync_vulkan lumac_triangle_shaders)
+    endif()
+    add_test(NAME test_sync_vulkan COMMAND test_sync_vulkan)
+
+    # Integration: GPU memory allocator stress (10k buffers, images,
+    # fragmentation, dedicated, reclamation, alignment, mapping,
+    # OOM rollback, benchmarks, scale workload); device-only (no
+    # display needed), skips otherwise.
+    add_executable(test_memory tests/test_memory.c)
+    target_link_libraries(test_memory PRIVATE lumac)
+    target_include_directories(test_memory PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    add_test(NAME test_memory COMMAND test_memory)
+
     # Headless-safe: validates image-view argument handling, never
     # touches Vulkan or the window system
     add_executable(test_image_view tests/test_image_view.c)
@@ -343,4 +485,50 @@ if(LUMAC_BUILD_TESTS)
         add_dependencies(test_textured_vulkan lumac_triangle_shaders)
     endif()
     add_test(NAME test_textured_vulkan COMMAND test_textured_vulkan)
+
+    # Headless-safe: validates Phase 11 index/instancing/push/depth
+    # argument handling, never touches Vulkan or the window system
+    add_executable(test_3d tests/test_3d.c)
+    target_link_libraries(test_3d PRIVATE lumac)
+    target_include_directories(test_3d PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    add_test(NAME test_3d COMMAND test_3d)
+
+    # Headless-safe: validates Phase 12 render-target/encoder/pass
+    # argument handling, never touches Vulkan or the window system
+    add_executable(test_render_target tests/test_render_target.c)
+    target_link_libraries(test_render_target PRIVATE lumac)
+    target_include_directories(test_render_target PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    add_test(NAME test_render_target COMMAND test_render_target)
+
+    # Integration: real indexed/instanced cube rendering with depth,
+    # push constants, raster state, and canonical signatures (validation
+    # checks, signature-compatible binds, 60 frames, resize stress);
+    # needs display + Vulkan + GPU, skips otherwise.
+    add_executable(test_cube_vulkan tests/test_cube_vulkan.c)
+    target_link_libraries(test_cube_vulkan PRIVATE lumac Vulkan::Vulkan)
+    target_include_directories(test_cube_vulkan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(test_cube_vulkan PRIVATE LC_TRIANGLE_SPV_DIR="${LC_SPV_DIR}")
+    if(TARGET lumac_triangle_shaders)
+        add_dependencies(test_cube_vulkan lumac_triangle_shaders)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(test_cube_vulkan PRIVATE m)
+    endif()
+    add_test(NAME test_cube_vulkan COMMAND test_cube_vulkan)
+
+    # Integration: real offscreen targets, MRT pixels, two-pass
+    # render-to-texture sampling, sharing/incompatibility, resize
+    # independence, multi-window, 120-frame cube run; needs display +
+    # Vulkan + GPU, skips otherwise. White-box for readback.
+    add_executable(test_rendertarget_vulkan tests/test_rendertarget_vulkan.c)
+    target_link_libraries(test_rendertarget_vulkan PRIVATE lumac Vulkan::Vulkan)
+    target_include_directories(test_rendertarget_vulkan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(test_rendertarget_vulkan PRIVATE LC_TRIANGLE_SPV_DIR="${LC_SPV_DIR}")
+    if(TARGET lumac_triangle_shaders)
+        add_dependencies(test_rendertarget_vulkan lumac_triangle_shaders)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(test_rendertarget_vulkan PRIVATE m)
+    endif()
+    add_test(NAME test_rendertarget_vulkan COMMAND test_rendertarget_vulkan)
 endif()

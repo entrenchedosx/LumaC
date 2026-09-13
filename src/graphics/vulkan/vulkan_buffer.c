@@ -14,40 +14,8 @@
 
 #include "graphics/graphics_internal.h"
 
-/* Centralized memory-type search: required bits must all match;
- * preferred bits are tried first, then required alone. */
-static int lc_vk_find_memory_type(VkPhysicalDevice physical,
-                                  uint32_t type_bits,
-                                  VkMemoryPropertyFlags required,
-                                  VkMemoryPropertyFlags preferred,
-                                  uint32_t *out_index) {
-    VkPhysicalDeviceMemoryProperties props;
-    uint32_t i;
-
-    vkGetPhysicalDeviceMemoryProperties(physical, &props);
-    for (i = 0; i < props.memoryTypeCount; i++) {
-        if ((type_bits & (1u << i)) == 0) {
-            continue;
-        }
-        if ((props.memoryTypes[i].propertyFlags &
-             (required | preferred)) == (required | preferred)) {
-            *out_index = i;
-            return 1;
-        }
-    }
-    if (preferred != 0) {
-        for (i = 0; i < props.memoryTypeCount; i++) {
-            if ((type_bits & (1u << i)) == 0) {
-                continue;
-            }
-            if ((props.memoryTypes[i].propertyFlags & required) == required) {
-                *out_index = i;
-                return 1;
-            }
-        }
-    }
-    return 0;
-}
+/* Centralized memory-type search lives in vulkan_memory.c
+ * (lc_vk_find_memory_type, shared with staging scratch). */
 
 static VkBufferUsageFlags lc_vk_translate_usage(uint32_t usage) {
     VkBufferUsageFlags flags = 0;
@@ -73,27 +41,26 @@ static VkBufferUsageFlags lc_vk_translate_usage(uint32_t usage) {
     return flags;
 }
 
-/* Memory policy per placement model. Coherent host memory is required
- * for CPU-visible allocations (no flush API in this phase); failure
- * surfaces as OUT_OF_MEMORY ("no suitable device memory"). */
+/* Memory policy per placement model (Phase 19: coherent is
+ * preferred, never required). Non-coherent host types work through
+ * flush/invalidate; failure surfaces as OUT_OF_MEMORY ("no suitable
+ * device memory"). */
 static void lc_vk_memory_policy(lc_memory_usage memory,
-                                VkMemoryPropertyFlags *required,
-                                VkMemoryPropertyFlags *preferred) {
+                                lc_vk_mem_class *cls,
+                                VkMemoryPropertyFlags *required) {
     switch (memory) {
     case LC_MEMORY_GPU_ONLY:
+        *cls = LC_VK_MEM_DEVICE_BUFFERS;
         *required = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-        *preferred = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
         break;
     case LC_MEMORY_CPU_TO_GPU:
-        *required = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        *preferred = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        *cls = LC_VK_MEM_UPLOAD;
+        *required = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
         break;
     case LC_MEMORY_GPU_TO_CPU:
     default:
-        *required = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        *preferred = VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+        *cls = LC_VK_MEM_READBACK;
+        *required = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
         break;
     }
 }
@@ -168,8 +135,10 @@ lc_result lc_vulkan_buffer_create(lc_buffer *buffer) {
     lc_device *device;
     VkBufferUsageFlags usage;
     VkMemoryPropertyFlags required = 0;
-    VkMemoryPropertyFlags preferred = 0;
-    void *mapped = NULL;
+    lc_vk_mem_class cls = LC_VK_MEM_DEVICE_BUFFERS;
+    VkMemoryRequirements reqs;
+    VkBufferCreateInfo buffer_info;
+    lc_vk_mem_binding binding;
     lc_result res;
 
     if (buffer == NULL || buffer->device == NULL) {
@@ -187,56 +156,83 @@ lc_result lc_vulkan_buffer_create(lc_buffer *buffer) {
     if (buffer->memory_usage == LC_MEMORY_GPU_ONLY) {
         usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     }
-    lc_vk_memory_policy(buffer->memory_usage, &required, &preferred);
+    lc_vk_memory_policy(buffer->memory_usage, &cls, &required);
 
-    if (buffer->memory_usage == LC_MEMORY_GPU_ONLY) {
-        res = lc_vulkan_storage_create(device, buffer->size, usage, required,
-                                   preferred, &buffer->vk_buffer,
-                                   &buffer->vk_memory, NULL);
-    } else {
-        res = lc_vulkan_storage_create(device, buffer->size, usage, required,
-                                   preferred, &buffer->vk_buffer,
-                                   &buffer->vk_memory, &mapped);
-    }
-    if (res != LC_SUCCESS) {
+    memset(&buffer_info, 0, sizeof(buffer_info));
+    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = (VkDeviceSize)buffer->size;
+    buffer_info.usage = usage;
+    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(device->device, &buffer_info, NULL,
+                       &buffer->vk_buffer) != VK_SUCCESS) {
         buffer->vk_buffer = VK_NULL_HANDLE;
-        buffer->vk_memory = VK_NULL_HANDLE;
-        buffer->mapped_ptr = NULL;
+        return LC_ERROR_OUT_OF_MEMORY;
+    }
+    vkGetBufferMemoryRequirements(device->device, buffer->vk_buffer,
+                                  &reqs);
+    memset(&binding, 0, sizeof(binding));
+    res = lc_vk_mem_alloc(device, cls, reqs.memoryTypeBits, required,
+                          reqs.size, reqs.alignment, &binding);
+    if (res != LC_SUCCESS) {
+        vkDestroyBuffer(device->device, buffer->vk_buffer, NULL);
+        buffer->vk_buffer = VK_NULL_HANDLE;
         return res;
     }
-    buffer->mapped_ptr = mapped;
+    if (vkBindBufferMemory(device->device, buffer->vk_buffer,
+                           binding.memory,
+                           (VkDeviceSize)binding.offset) != VK_SUCCESS) {
+        lc_vk_mem_free(device, &binding);
+        vkDestroyBuffer(device->device, buffer->vk_buffer, NULL);
+        buffer->vk_buffer = VK_NULL_HANDLE;
+        return LC_ERROR_UNKNOWN;
+    }
+    buffer->vk_memory = binding.memory;
+    buffer->vk_memory_offset = binding.offset;
+    buffer->mapped_ptr = binding.mapped;
+    buffer->memory_coherent = binding.coherent;
+    buffer->memory_dedicated = binding.dedicated;
+    buffer->memory_block = binding.block;
+    buffer->memory_class =
+        (cls == LC_VK_MEM_DEVICE_BUFFERS)
+            ? LC_MEMORY_CLASS_DEVICE_LOCAL
+            : ((cls == LC_VK_MEM_UPLOAD) ? LC_MEMORY_CLASS_UPLOAD
+                                         : LC_MEMORY_CLASS_READBACK);
+    buffer->allocation_size = binding.size;
     return LC_SUCCESS;
 }
 
 void lc_vulkan_buffer_destroy(lc_buffer *buffer) {
-    VkDevice device_handle = VK_NULL_HANDLE;
+    lc_vk_mem_binding binding;
 
     if (buffer == NULL) {
         return;
     }
-    if (buffer->device != NULL) {
-        device_handle = buffer->device->device;
+    if (buffer->device != NULL &&
+        buffer->device->device != VK_NULL_HANDLE) {
+        if (buffer->vk_buffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(buffer->device->device, buffer->vk_buffer,
+                            NULL);
+        }
+        /* Persistent block mappings stay mapped (shared by other
+         * suballocations); only dedicated memory unmaps, inside
+         * free — so the mapped pointer travels with the binding. */
+        memset(&binding, 0, sizeof(binding));
+        binding.memory = buffer->vk_memory;
+        binding.offset = buffer->vk_memory_offset;
+        binding.size = buffer->allocation_size;
+        binding.mapped = buffer->mapped_ptr;
+        binding.coherent = buffer->memory_coherent;
+        binding.dedicated = buffer->memory_dedicated;
+        binding.block = buffer->memory_block;
+        lc_vk_mem_free(buffer->device, &binding);
     }
-    if (device_handle == VK_NULL_HANDLE) {
-        buffer->vk_buffer = VK_NULL_HANDLE;
-        buffer->vk_memory = VK_NULL_HANDLE;
-        buffer->mapped_ptr = NULL;
-        return;
-    }
-    /* Persistent mapping ends here (unmap exactly once); then buffer,
-     * then memory. */
-    if (buffer->mapped_ptr != NULL) {
-        vkUnmapMemory(device_handle, buffer->vk_memory);
-        buffer->mapped_ptr = NULL;
-    }
-    if (buffer->vk_buffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device_handle, buffer->vk_buffer, NULL);
-        buffer->vk_buffer = VK_NULL_HANDLE;
-    }
-    if (buffer->vk_memory != VK_NULL_HANDLE) {
-        vkFreeMemory(device_handle, buffer->vk_memory, NULL);
-        buffer->vk_memory = VK_NULL_HANDLE;
-    }
+    /* Dead device (teardown): blocks already freed by the allocator
+     * teardown; just detach. */
+    buffer->vk_buffer = VK_NULL_HANDLE;
+    buffer->vk_memory = VK_NULL_HANDLE;
+    buffer->vk_memory_offset = 0;
+    buffer->mapped_ptr = NULL;
+    buffer->memory_block = NULL;
 }
 
 lc_result lc_vulkan_upload_ensure(lc_device *device) {
@@ -415,10 +411,8 @@ lc_result lc_vulkan_buffer_write(lc_buffer *buffer, uint64_t offset,
                                  const void *data, uint64_t size) {
     lc_device *device;
     VkBuffer staging = VK_NULL_HANDLE;
-    VkDeviceMemory staging_mem = VK_NULL_HANDLE;
+    lc_vk_mem_binding stage;
     void *staging_ptr = NULL;
-    VkMemoryPropertyFlags required;
-    VkMemoryPropertyFlags preferred;
     lc_result res;
 
     if (buffer == NULL || buffer->device == NULL) {
@@ -432,28 +426,58 @@ lc_result lc_vulkan_buffer_write(lc_buffer *buffer, uint64_t offset,
         return LC_ERROR_BACKEND_UNAVAILABLE;
     }
 
-    /* Coherent persistent mapping: plain memcpy, no flush needed. */
+    /* Persistently mapped: memcpy + flush for non-coherent. */
     if (buffer->mapped_ptr != NULL) {
-        memcpy((char *)buffer->mapped_ptr + offset, data, (size_t)size);
-        return LC_SUCCESS;
+        lc_vk_mem_binding self;
+
+        memcpy((char *)buffer->mapped_ptr + offset, data,
+               (size_t)size);
+        memset(&self, 0, sizeof(self));
+        self.memory = buffer->vk_memory;
+        self.offset = buffer->vk_memory_offset;
+        self.size = buffer->allocation_size;
+        self.mapped = buffer->mapped_ptr;
+        self.coherent = buffer->memory_coherent;
+        return lc_vk_mem_flush(device, &self, offset, size);
     }
 
-    /* GPU-only path: temporary CPU-visible staging buffer, then an
-     * immediate-submit copy. Staging is untracked host-side scratch:
-     * created and destroyed inside this call. */
-    lc_vk_memory_policy(LC_MEMORY_CPU_TO_GPU, &required, &preferred);
-    res = lc_vulkan_storage_create(device, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                               required, preferred, &staging, &staging_mem,
-                               &staging_ptr);
+    /* GPU-only path: pool staging buffer (no dedicated VkDeviceMemory
+     * churn per write, PART Z), then an immediate-submit copy. */
+    memset(&stage, 0, sizeof(stage));
+    res = lc_vk_stage_acquire(device, size, 1,
+                              VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &staging,
+                              &stage, &staging_ptr);
     if (res != LC_SUCCESS) {
         return res;
     }
     memcpy(staging_ptr, data, (size_t)size);
-    vkUnmapMemory(device->device, staging_mem);
-
-    res = lc_vulkan_copy_buffer(device, buffer->vk_buffer, offset, staging,
-                                0, size);
-    vkDestroyBuffer(device->device, staging, NULL);
-    vkFreeMemory(device->device, staging_mem, NULL);
+    res = lc_vk_mem_flush(device, &stage, 0, size);
+    if (res != LC_SUCCESS) {
+        lc_vk_stage_release(device, staging, &stage);
+        return res;
+    }
+    res = lc_vulkan_copy_buffer(device, buffer->vk_buffer, offset,
+                                staging, 0, size);
+    lc_vk_stage_release(device, staging, &stage);
     return res;
+}
+
+/* Full-range invalidate for map (non-coherent correctness). */
+lc_result lc_vulkan_buffer_invalidate(lc_buffer *buffer) {
+    lc_vk_mem_binding self;
+
+    if (buffer == NULL || buffer->device == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (buffer->mapped_ptr == NULL) {
+        return LC_SUCCESS;
+    }
+    memset(&self, 0, sizeof(self));
+    self.memory = buffer->vk_memory;
+    self.offset = buffer->vk_memory_offset;
+    self.size = buffer->allocation_size;
+    self.mapped = buffer->mapped_ptr;
+    self.coherent = buffer->memory_coherent;
+    return lc_vk_mem_invalidate(buffer->device, &self, 0,
+                                buffer->allocation_size);
 }
