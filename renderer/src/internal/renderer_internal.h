@@ -188,6 +188,36 @@ struct lr_environment {
     lr_environment *prev;
 };
 
+/* GPU-driven submission (Phase 21): groups of (mesh, material,
+ * shadow-flag) share one instance buffer and one indirect command;
+ * per-flight visible/counter/indirect buffers plus descriptor sets
+ * rotate with the frame slot (no cross-frame races, no per-object
+ * allocation). */
+#define LR_GPU_MAX_FLIGHTS 8
+#define LR_GPU_MAX_GROUPS 256
+
+typedef struct lr_gpu_flight_res {
+    lc_buffer *visible;
+    lc_buffer *counter;
+    lc_buffer *indirect;
+    lc_binding_set *cull_set;
+    lc_binding_set *finalize_set;
+    lc_binding_set *inst_set;
+    int initialized;
+} lr_gpu_flight_res;
+
+typedef struct lr_gpu_group {
+    lr_mesh *mesh;
+    lr_material *material;
+    int receives_shadow;
+    uint32_t capacity;
+    uint32_t count;
+    lr_gpu_instance *cpu; /* malloc'd staging copy, capacity */
+    lc_buffer *instances; /* shared across flights */
+    uint32_t flights_owned;
+    lr_gpu_flight_res flights[LR_GPU_MAX_FLIGHTS];
+} lr_gpu_group;
+
 struct lr_renderer {
     lc_device *device; /* borrowed; must outlive the renderer */
     lc_render_target_desc primary; /* validated primary signature */
@@ -336,6 +366,28 @@ struct lr_renderer {
     uint32_t queued;
     float frustum_planes[6][4]; /* normalized, inward-facing */
     lr_render_stats stats;
+    /* Phase 21 GPU-driven submission. Groups persist across frames
+     * (capacity high-water); per-flight resources rotate with the
+     * frame slot. gpu_prepared_frame stamps the profile frame
+     * number prepared (0 = none this frame). */
+    lr_render_mode render_mode;
+    lr_gpu_group *groups;
+    uint32_t group_count;
+    uint32_t group_capacity;
+    uint32_t gpu_prepared_frame;
+    uint32_t gpu_last_flight; /* slot prepared this frame */
+    lr_gpu_driven_stats gpu_stats;
+    int gpu_ready; /* shared pipelines/layouts/shaders created */
+    lc_shader *cull_shader;
+    lc_shader *finalize_shader;
+    lc_shader *instanced_vertex_shader;
+    lc_compute_pipeline *cull_pipeline;
+    lc_compute_pipeline *finalize_pipeline;
+    lc_binding_layout *cull_layout;
+    lc_binding_layout *finalize_layout;
+    lc_binding_layout *instanced_layout;
+    lr_cached_pipeline instanced_pipelines[4];
+    uint32_t instanced_pipeline_count;
     /* Phase 18: CPU recording profile + post chain. Timers use a
      * monotonic high-resolution clock (platform-local); all fields
      * reset every begin. */
@@ -406,7 +458,6 @@ struct lr_material {
 
 /* Result mapping (lc_result -> lr_result). */
 lr_result lr_map_result(lc_result res);
-
 /* Renderer-local math (column-major, Y-up RH world, Vulkan NDC). */
 void lr_mat4_identity(float *m);
 void lr_mat4_multiply(float *out, const float *a, const float *b);
@@ -530,5 +581,36 @@ lr_result lr_post_record(lr_renderer *renderer, lc_command_encoder *enc,
                          uint32_t slot);
 void lr_post_destroy(lr_renderer *renderer);
 void lr_post_invalidate(lr_renderer *renderer);
+
+/* GPU-driven submission (Phase 21, gpu_driven.c). Shared
+ * resources, grouping, prepare/draw entry points (structs moved
+ * above lr_renderer). */
+
+/* Shared GPU-driven resources (created lazily, destroyed with the
+ * renderer). Pipelines/layouts/shaders are renderer-global; groups
+ * are per (mesh, material, shadow-flag). */
+lr_result lr_gpu_ensure_shared(lr_renderer *renderer);
+void lr_gpu_destroy_shared(lr_renderer *renderer);
+/* Group queued PBR items, upload instances, run cull + finalize
+ * dispatches (outside any pass). Idempotent per frame. */
+lr_result lr_gpu_prepare(lr_renderer *renderer,
+                         lc_command_encoder *encoder);
+/* Draw prepared groups with indirect draws (inside an open pass).
+ * PBR items NOT covered (unprepared/unlit) fall back to CPU draws
+ * via the existing loop — callers skip PBR items themselves. */
+lr_result lr_gpu_record_draws(lr_renderer *renderer,
+                              lc_command_encoder *encoder,
+                              lc_render_target *target,
+                              const lc_render_target_desc *signature);
+/* Drop groups whose mesh/material died. */
+void lr_gpu_prune_dead_groups(lr_renderer *renderer);
+/* Destroy every group and its GPU resources. */
+void lr_gpu_destroy_groups(lr_renderer *renderer);
+/* Instanced-PBR pipeline variant (own mini-cache, same signature
+ * rules plus the instance slot). */
+lr_result lr_renderer_instanced_pipeline_for(
+    lr_renderer *renderer, const lc_render_target_desc *signature,
+    lr_material_type material_type, lc_cull_mode cull_mode,
+    lc_pipeline **out_pipeline);
 
 #endif /* LUMA_RENDERER_INTERNAL_H */

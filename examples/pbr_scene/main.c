@@ -113,7 +113,7 @@ int main(int argc, char **argv) {
     lr_camera camera;
     lc_window_desc window_desc;
     lc_device_desc device_desc = { 0 };
-    lc_swapchain_desc swapchain_desc;
+    lc_swapchain_desc swapchain_desc = { 0 };
     la_asset_manager_desc asset_desc;
     unsigned long frame = 0;
     unsigned r;

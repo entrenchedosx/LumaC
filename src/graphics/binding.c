@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <string.h>
 #include "lumac/lumac.h"
 #include "internal/lumac_internal.h"
 #include "graphics/graphics_internal.h"
@@ -163,10 +164,26 @@ lc_result lc_binding_layout_create(lc_device *device,
 }
 
 void lc_binding_layout_destroy(lc_binding_layout *layout) {
+    lc_device *device;
+    lc_retire_entry entry;
+
     if (layout == NULL) {
         return;
     }
+    device = layout->device;
+    if (device != NULL) {
+        lc_vk_cmdlist_poison_for(device, layout);
+    }
     lc_binding_layout_list_remove(layout);
+    /* Pipelines built from this layout may still be submitted;
+     * retire the VkDescriptorSetLayout. */
+    memset(&entry, 0, sizeof(entry));
+    entry.kind = LC_RETIRE_LAYOUT;
+    entry.desc_layout = layout->vk_layout;
+    layout->vk_layout = VK_NULL_HANDLE;
+    if (device != NULL) {
+        lc_vk_retire(device, &entry);
+    }
     lc_vulkan_binding_layout_destroy(layout);
     free(layout);
 }
@@ -238,10 +255,29 @@ lc_result lc_binding_set_create(lc_binding_layout *layout,
 }
 
 void lc_binding_set_destroy(lc_binding_set *set) {
+    lc_device *device;
+    lc_retire_entry entry;
+
     if (set == NULL) {
         return;
     }
+    device = set->device;
+    if (device != NULL) {
+        lc_vk_cmdlist_poison_for(device, set);
+    }
     lc_binding_set_list_remove(set);
+    /* The descriptor allocation retires (its pool outlives it: pools
+     * die at device teardown, after the retirement flush); the slot
+     * snapshot frees via the backend destroy. */
+    memset(&entry, 0, sizeof(entry));
+    entry.kind = LC_RETIRE_SET;
+    entry.set = set->vk_set;
+    entry.set_pool = set->vk_pool;
+    set->vk_set = VK_NULL_HANDLE;
+    set->vk_pool = VK_NULL_HANDLE;
+    if (device != NULL) {
+        lc_vk_retire(device, &entry);
+    }
     lc_vulkan_binding_set_destroy(set);
     free(set);
 }

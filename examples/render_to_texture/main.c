@@ -267,7 +267,7 @@ int main(void) {
     size_t code_size = 0;
     lc_window_desc window_desc;
     lc_device_desc device_desc = { 0 };
-    lc_swapchain_desc swapchain_desc;
+    lc_swapchain_desc swapchain_desc = { 0 };
     lc_result res = LC_SUCCESS;
     unsigned long frame = 0;
     int exit_code = 1;

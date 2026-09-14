@@ -38,6 +38,9 @@ static VkBufferUsageFlags lc_vk_translate_usage(uint32_t usage) {
     if ((usage & LC_BUFFER_USAGE_TRANSFER_DST) != 0) {
         flags |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     }
+    if ((usage & LC_BUFFER_USAGE_INDIRECT) != 0) {
+        flags |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+    }
     return flags;
 }
 
@@ -151,10 +154,12 @@ lc_result lc_vulkan_buffer_create(lc_buffer *buffer) {
     }
 
     usage = lc_vk_translate_usage(buffer->usage);
-    /* GPU-only buffers always gain transfer-destination so
-     * lc_buffer_write() staging works regardless of requested bits. */
+    /* GPU-only buffers always gain transfer source+sink so staging
+     * copies work regardless of requested bits (writes sink,
+     * test/debug downloads source). */
     if (buffer->memory_usage == LC_MEMORY_GPU_ONLY) {
         usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     }
     lc_vk_memory_policy(buffer->memory_usage, &cls, &required);
 
@@ -162,9 +167,20 @@ lc_result lc_vulkan_buffer_create(lc_buffer *buffer) {
     buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     buffer_info.size = (VkDeviceSize)buffer->size;
     buffer_info.usage = usage;
-    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    if (vkCreateBuffer(device->device, &buffer_info, NULL,
-                       &buffer->vk_buffer) != VK_SUCCESS) {
+    if (device->has_dedicated_transfer) {
+        const uint32_t families[2] = {device->graphics_queue_family,
+                                      device->transfer_queue_family};
+
+        buffer_info.sharingMode = VK_SHARING_MODE_CONCURRENT;
+        buffer_info.queueFamilyIndexCount = 2;
+        buffer_info.pQueueFamilyIndices = families;
+        if (vkCreateBuffer(device->device, &buffer_info, NULL,
+                           &buffer->vk_buffer) != VK_SUCCESS) {
+            buffer->vk_buffer = VK_NULL_HANDLE;
+            return LC_ERROR_OUT_OF_MEMORY;
+        }
+    } else if (vkCreateBuffer(device->device, &buffer_info, NULL,
+                              &buffer->vk_buffer) != VK_SUCCESS) {
         buffer->vk_buffer = VK_NULL_HANDLE;
         return LC_ERROR_OUT_OF_MEMORY;
     }
@@ -191,13 +207,15 @@ lc_result lc_vulkan_buffer_create(lc_buffer *buffer) {
     buffer->mapped_ptr = binding.mapped;
     buffer->memory_coherent = binding.coherent;
     buffer->memory_dedicated = binding.dedicated;
-    buffer->memory_block = binding.block;
-    buffer->memory_class =
+    buffer->memory_block = binding.block;    buffer->memory_class =
         (cls == LC_VK_MEM_DEVICE_BUFFERS)
             ? LC_MEMORY_CLASS_DEVICE_LOCAL
             : ((cls == LC_VK_MEM_UPLOAD) ? LC_MEMORY_CLASS_UPLOAD
                                          : LC_MEMORY_CLASS_READBACK);
     buffer->allocation_size = binding.size;
+    buffer->owner_family = device->has_dedicated_transfer
+                               ? VK_QUEUE_FAMILY_IGNORED
+                               : device->graphics_queue_family;
     return LC_SUCCESS;
 }
 
@@ -459,11 +477,92 @@ lc_result lc_vulkan_buffer_write(lc_buffer *buffer, uint64_t offset,
     res = lc_vulkan_copy_buffer(device, buffer->vk_buffer, offset,
                                 staging, 0, size);
     lc_vk_stage_release(device, staging, &stage);
+    if (res == LC_SUCCESS) {
+        /* Phase 21: the staging copy wrote the buffer (transfer
+         * shard owns buffer_state; the sync path is externally
+         * serialized like the async scheduler). */
+        lc_device_lock_transfer(device);
+        lc_vk_sync_mark_buffer(buffer, LC_RESOURCE_STATE_TRANSFER_DST);
+        lc_device_unlock_transfer(device);
+    }
     return res;
 }
 
 /* Full-range invalidate for map (non-coherent correctness). */
-lc_result lc_vulkan_buffer_invalidate(lc_buffer *buffer) {
+
+/* Synchronous buffer download (Phase 21, test/debug path): drain
+ * prior device work first, then copy through a host-visible
+ * staging buffer. Mirrors the write path; never used in steady
+ * production frames. */
+lc_result lc_vulkan_buffer_read(lc_buffer *buffer, uint64_t offset,
+                                void *dst, uint64_t size) {
+    lc_device *device;
+    VkBuffer staging = VK_NULL_HANDLE;
+    lc_vk_mem_binding stage;
+    void *staging_ptr = NULL;
+    lc_result res;
+
+    if (buffer == NULL || buffer->device == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (size == 0) {
+        return LC_SUCCESS;
+    }
+    if (dst == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    device = buffer->device;
+    if (device->device == VK_NULL_HANDLE) {
+        return LC_ERROR_BACKEND_UNAVAILABLE;
+    }
+
+    /* Persistently mapped: invalidate for non-coherent, then
+     * memcpy (never a GPU copy). */
+    if (buffer->mapped_ptr != NULL) {
+        lc_vk_mem_binding self;
+
+        memset(&self, 0, sizeof(self));
+        self.memory = buffer->vk_memory;
+        self.offset = buffer->vk_memory_offset;
+        self.size = buffer->allocation_size;
+        self.mapped = buffer->mapped_ptr;
+        self.coherent = buffer->memory_coherent;
+        res = lc_vk_mem_invalidate(device, &self, offset, size);
+        if (res != LC_SUCCESS) {
+            return res;
+        }
+        memcpy(dst, (const char *)buffer->mapped_ptr + offset,
+               (size_t)size);
+        return LC_SUCCESS;
+    }
+
+    /* GPU-only path: drain, immediate-submit copy into staging,
+     * invalidate, memcpy out. */
+    if (device->device != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(device->device);
+    }
+    memset(&stage, 0, sizeof(stage));
+    res = lc_vk_stage_acquire(device, size, 0,
+                              VK_BUFFER_USAGE_TRANSFER_DST_BIT, &staging,
+                              &stage, &staging_ptr);
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+    res = lc_vulkan_copy_buffer(device, staging, 0, buffer->vk_buffer,
+                                offset, size);
+    if (res != LC_SUCCESS) {
+        lc_vk_stage_release(device, staging, &stage);
+        return res;
+    }
+    res = lc_vk_mem_invalidate(device, &stage, 0, size);
+    if (res != LC_SUCCESS) {
+        lc_vk_stage_release(device, staging, &stage);
+        return res;
+    }
+    memcpy(dst, staging_ptr, (size_t)size);
+    lc_vk_stage_release(device, staging, &stage);
+    return LC_SUCCESS;
+}lc_result lc_vulkan_buffer_invalidate(lc_buffer *buffer) {
     lc_vk_mem_binding self;
 
     if (buffer == NULL || buffer->device == NULL) {

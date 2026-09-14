@@ -1,0 +1,49 @@
+/* Phase 21 indirect-command finalize (one group per dispatch).
+ *
+ * Single-invocation pass: reads the visible counter written by the
+ * culling dispatch (ordered by an execution barrier on the same
+ * queue) and emits exactly one indirect draw command. The visible
+ * count is clamped to capacity (overflow draws what fits; the raw
+ * counter stays observable for the loud Debug report). Zero visible
+ * produces instanceCount 0: a valid no-op draw, never stale data.
+ */
+#version 450
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Counter {
+    uint count;
+    uint capacity;
+} counter;
+
+layout(set = 0, binding = 1) buffer Indirect {
+    uint words[];
+} indirect;
+
+layout(push_constant) uniform Params {
+    uint vertexCount;
+    uint firstVertex;
+    uint indexCount;
+    uint firstIndex;
+    int vertexOffset;
+    uint indexed;
+} params;
+
+void main() {
+    uint vis = counter.count;
+    if (vis > counter.capacity) {
+        vis = counter.capacity;
+    }
+    if (params.indexed != 0u) {
+        indirect.words[0] = params.indexCount;
+        indirect.words[1] = vis;
+        indirect.words[2] = params.firstIndex;
+        indirect.words[3] = uint(params.vertexOffset);
+        indirect.words[4] = 0u;
+    } else {
+        indirect.words[0] = params.vertexCount;
+        indirect.words[1] = vis;
+        indirect.words[2] = params.firstVertex;
+        indirect.words[3] = 0u;
+    }
+}

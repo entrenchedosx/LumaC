@@ -5,6 +5,7 @@
  * delegates to the Vulkan backend staging copy.
  */
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "lumac/lumac.h"
@@ -116,6 +117,7 @@ lc_result lc_image_readback(lc_image *image,
     uint32_t elem = 0;
     lc_result res;
     size_t need = 0;
+    lc_readback_request *request = NULL;
 
     res = lc_readback_layout(image, desc, &w, &h, &d, &elem);
     if (res != LC_SUCCESS) {
@@ -132,6 +134,121 @@ lc_result lc_image_readback(lc_image *image,
     if (dst_size < need) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
-    return lc_vulkan_image_readback(image, desc->mip_level,
-                                    desc->array_layer, w, h, d, dst, need);
+    /* Phase 20: the synchronous API is one policy wrapper over the
+     * reusable async implementation, not a second copy path with a
+     * device-wide idle. */
+    res = lc_image_readback_async(image->device, image, desc, &request);
+    if (res == LC_SUCCESS) {
+        res = lc_readback_request_wait(request, LC_TIMEOUT_INFINITE);
+    }
+    if (res == LC_SUCCESS) {
+        res = lc_readback_request_map(request, dst, dst_size,
+                                      out_required_size);
+    }
+    lc_readback_request_destroy(request);
+    return res;
+}
+
+/* ------------------------------------------------------------------ */
+/* Async readbacks (Phase 20): schedule validated by the transfer      */
+/* engine; the request holds staged bytes until destroy.               */
+/* ------------------------------------------------------------------ */
+
+static int lc_async_ready(void) {
+    lc_state *state = lc_get_internal_state();
+
+    return (state != NULL && state->initialized) ? 1 : 0;
+}
+
+lc_result lc_image_readback_async(lc_device *device, lc_image *image,
+                                  const lc_image_readback_desc *desc,
+                                  lc_readback_request **out_request) {
+    lc_result res;
+
+    if (out_request != NULL) {
+        *out_request = NULL;
+    }
+    if (device == NULL || image == NULL || desc == NULL ||
+        out_request == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!lc_async_ready()) {
+        return LC_ERROR_NOT_INITIALIZED;
+    }
+    res = lc_vk_transfer_readback_image(device, image, desc->mip_level,
+                                        desc->array_layer, out_request);
+    if (res == LC_SUCCESS) {
+        lc_vk_reclaim_completed(device);
+    }
+    return res;
+}
+
+int lc_readback_request_is_ready(lc_readback_request *request) {
+    if (request == NULL || request->device == NULL) {
+        return 0;
+    }
+    return lc_vk_signal_ready(request->device, request->ready_value);
+}
+
+lc_result lc_readback_request_wait(lc_readback_request *request,
+                                   uint64_t timeout_ns) {
+    lc_result res;
+
+    if (request == NULL || request->device == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    res = lc_vk_signal_wait(request->device, request->ready_value,
+                            timeout_ns);
+    if (res == LC_SUCCESS) {
+        lc_vk_reclaim_completed(request->device);
+    }
+    return res;
+}
+
+lc_result lc_readback_request_map(lc_readback_request *request, void *dst,
+                                  size_t dst_size,
+                                  size_t *out_required_size) {
+    lc_transfer_entry *entry = NULL;
+    size_t need = 0;
+
+    if (request == NULL || request->device == NULL ||
+        request->entry == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    need = request->info.size;
+    if (out_required_size != NULL) {
+        *out_required_size = need;
+    }
+    if (dst == NULL || dst_size == 0) {
+        return LC_SUCCESS;
+    }
+    if (dst_size < need || need == 0) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    /* Mapping requires completion; waiting is the caller's job. */
+    if (!lc_vk_signal_ready(request->device, request->ready_value)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    entry = request->entry;
+    if (entry->stage_mem.mapped == NULL) {
+        return LC_ERROR_UNKNOWN;
+    }
+    if (lc_vk_mem_invalidate(request->device, &entry->stage_mem, 0,
+                             entry->stage_bytes) != LC_SUCCESS) {
+        return LC_ERROR_UNKNOWN;
+    }
+    memcpy(dst, entry->stage_mem.mapped, need);
+    request->mapped = 1;
+    return LC_SUCCESS;
+}
+
+void lc_readback_request_destroy(lc_readback_request *request) {
+    if (request == NULL) {
+        return;
+    }
+    if (request->device == NULL) {
+        free(request);
+        return;
+    }
+    lc_vk_request_discard(request->device, request);
 }

@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <string.h>
 
 #include "lumac/lumac.h"
 #include "internal/lumac_internal.h"
@@ -102,14 +103,33 @@ lc_result lc_image_view_create(lc_image *image,
 }
 
 void lc_image_view_destroy(lc_image_view *view) {
+    lc_device *device;
+    lc_retire_entry entry;
+
     if (view == NULL) {
         return;
+    }
+    device = view->device;
+    if (device != NULL) {
+        lc_vk_cmdlist_poison_for(device, view);
     }
     /* Render targets borrow views: dependents die first so no stale
      * attachment pointer survives. */
     lc_render_target_destroy_for_view(view);
     lc_image_view_list_remove(view);
-    lc_vulkan_image_view_destroy(view);
+    /* Unexecuted worker lists referencing this view fail loudly. */
+    if (device != NULL) {
+        lc_vk_cmdlist_poison_for(device, view);
+    }
+    /* In-flight frames may still reference the view (attachments,
+     * descriptor binds); the VkImageView retires instead. */
+    memset(&entry, 0, sizeof(entry));
+    entry.kind = LC_RETIRE_VIEW;
+    entry.image_view = view->vk_view;
+    view->vk_view = VK_NULL_HANDLE;
+    if (device != NULL) {
+        lc_vk_retire(device, &entry);
+    }
     free(view);
 }
 

@@ -272,6 +272,12 @@ lc_result lc_encoder_bind_pipeline(lc_command_encoder *enc,
     if (state == NULL || !state->initialized) {
         return LC_ERROR_NOT_INITIALIZED;
     }
+    if (lc_vk_worker_live(enc)) {
+        if (!lc_vk_worker_live(enc) || enc->worker_list == NULL) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        return lc_vulkan_encoder_bind(enc, pipeline);
+    }
     swapchain = lc_enc_lookup(enc);
     if (swapchain == NULL || !swapchain->frame_active) {
         return LC_ERROR_INVALID_ARGUMENT;
@@ -299,6 +305,12 @@ lc_result lc_encoder_bind_binding_set(lc_command_encoder *enc,
     }
     if (state == NULL || !state->initialized) {
         return LC_ERROR_NOT_INITIALIZED;
+    }
+    if (lc_vk_worker_live(enc)) {
+        if (!lc_vk_worker_live(enc) || enc->worker_list == NULL) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        return lc_vulkan_encoder_bind_set(enc, pipeline, slot, set);
     }
     swapchain = lc_enc_lookup(enc);
     if (swapchain == NULL || !swapchain->frame_active) {
@@ -338,6 +350,12 @@ lc_result lc_encoder_bind_vertex_buffer(lc_command_encoder *enc,
     if (state == NULL || !state->initialized) {
         return LC_ERROR_NOT_INITIALIZED;
     }
+    if (lc_vk_worker_live(enc)) {
+        if (!lc_vk_worker_live(enc) || enc->worker_list == NULL) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        return lc_vulkan_encoder_bind_vertex(enc, binding, buffer, offset);
+    }
     swapchain = lc_enc_lookup(enc);
     if (swapchain == NULL || !swapchain->frame_active) {
         return LC_ERROR_INVALID_ARGUMENT;
@@ -365,6 +383,12 @@ lc_result lc_encoder_bind_index_buffer(lc_command_encoder *enc,
     }
     if (state == NULL || !state->initialized) {
         return LC_ERROR_NOT_INITIALIZED;
+    }
+    if (lc_vk_worker_live(enc)) {
+        if (!lc_vk_worker_live(enc) || enc->worker_list == NULL) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        return lc_vulkan_encoder_bind_index(enc, buffer, offset, index_type);
     }
     swapchain = lc_enc_lookup(enc);
     if (swapchain == NULL || !swapchain->frame_active) {
@@ -402,6 +426,12 @@ lc_result lc_encoder_push_constants(lc_command_encoder *enc,
     }
     if (state == NULL || !state->initialized) {
         return LC_ERROR_NOT_INITIALIZED;
+    }
+    if (lc_vk_worker_live(enc)) {
+        if (!lc_vk_worker_live(enc) || enc->worker_list == NULL) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        return lc_vulkan_encoder_push(enc, pipeline, visibility, offset, size, data);
     }
     swapchain = lc_enc_lookup(enc);
     if (swapchain == NULL || !swapchain->frame_active) {
@@ -459,6 +489,12 @@ lc_result lc_encoder_draw(lc_command_encoder *enc, uint32_t vertex_count,
     if (state == NULL || !state->initialized) {
         return LC_ERROR_NOT_INITIALIZED;
     }
+    if (lc_vk_worker_live(enc)) {
+        if (!lc_vk_worker_live(enc) || enc->worker_list == NULL) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        return lc_vulkan_encoder_draw(enc, vertex_count, first_vertex);
+    }
     swapchain = lc_enc_lookup(enc);
     if (swapchain == NULL || !swapchain->frame_active) {
         return LC_ERROR_INVALID_ARGUMENT;
@@ -485,6 +521,12 @@ lc_result lc_encoder_draw_indexed(
     }
     if (state == NULL || !state->initialized) {
         return LC_ERROR_NOT_INITIALIZED;
+    }
+    if (lc_vk_worker_live(enc)) {
+        if (!lc_vk_worker_live(enc) || enc->worker_list == NULL) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        return lc_vulkan_encoder_draw_indexed(enc, index_count, instance_count, first_index, vertex_offset, first_instance);
     }
     swapchain = lc_enc_lookup(enc);
     if (swapchain == NULL || !swapchain->frame_active) {
@@ -534,6 +576,12 @@ lc_result lc_encoder_draw_instanced(lc_command_encoder *enc,
     if (state == NULL || !state->initialized) {
         return LC_ERROR_NOT_INITIALIZED;
     }
+    if (lc_vk_worker_live(enc)) {
+        if (!lc_vk_worker_live(enc) || enc->worker_list == NULL) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        return lc_vulkan_encoder_draw_instanced(enc, vertex_count, instance_count, first_vertex, first_instance);
+    }
     swapchain = lc_enc_lookup(enc);
     if (swapchain == NULL || !swapchain->frame_active) {
         return LC_ERROR_INVALID_ARGUMENT;
@@ -576,6 +624,14 @@ lc_result lc_encoder_transition_image(
     if (state == NULL || !state->initialized) {
         return LC_ERROR_NOT_INITIALIZED;
     }
+    if (lc_vk_worker_live(enc)) {
+        if (!lc_vk_worker_live(enc) || enc->worker_list == NULL) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        return lc_vulkan_encoder_transition(
+            enc, image, range->base_mip_level, range->level_count,
+            range->base_array_layer, range->layer_count, new_state);
+    }
     swapchain = lc_enc_lookup(enc);
     if (swapchain == NULL || !swapchain->frame_active) {
         return LC_ERROR_INVALID_ARGUMENT;
@@ -600,4 +656,474 @@ lc_result lc_encoder_transition_image(
     return lc_vulkan_encoder_transition(
         enc, image, range->base_mip_level, range->level_count,
         range->base_array_layer, range->layer_count, new_state);
+}
+
+lc_result lc_command_encoder_create(
+    lc_device *device,
+    const lc_command_encoder_desc *desc,
+    lc_command_encoder **out_encoder) {
+    lc_state *state = lc_get_internal_state();
+
+    if (device == NULL || desc == NULL || out_encoder == NULL) {
+        if (out_encoder != NULL) {
+            *out_encoder = NULL;
+        }
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (state == NULL || !state->initialized) {
+        *out_encoder = NULL;
+        return LC_ERROR_NOT_INITIALIZED;
+    }
+    {
+        lc_device *it;
+        int live = 0;
+
+        for (it = state->devices; it != NULL; it = it->next) {
+            if (it == device) {
+                live = 1;
+                break;
+            }
+        }
+        if (!live) {
+            *out_encoder = NULL;
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+    }
+    return lc_vulkan_worker_create(device, desc->queue, out_encoder);
+}
+
+void lc_command_encoder_destroy(lc_command_encoder *encoder) {
+    if (!lc_vk_worker_live(encoder)) {
+        return;
+    }
+    lc_vulkan_worker_destroy(encoder);
+}
+
+lc_result lc_command_list_begin(lc_command_encoder *encoder,
+                                lc_render_target *target,
+                                const lc_render_pass_desc *desc) {
+    if (encoder == NULL || target == NULL || desc == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!lc_vk_worker_live(encoder)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    return lc_vulkan_worker_begin(encoder, target, desc);
+}
+
+lc_result lc_command_encoder_finish(lc_command_encoder *encoder,
+                                    lc_command_list **out_list) {
+    if (encoder == NULL || out_list == NULL) {
+        if (out_list != NULL) {
+            *out_list = NULL;
+        }
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!lc_vk_worker_live(encoder)) {
+        if (out_list != NULL) {
+            *out_list = NULL;
+        }
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    return lc_vulkan_worker_finish(encoder, out_list);
+}
+
+void lc_command_list_destroy(lc_command_list *list) {
+    if (list == NULL) {
+        return;
+    }
+    lc_vulkan_worker_list_destroy(list);
+}
+
+lc_result lc_encoder_execute_lists(lc_command_encoder *primary,
+                                   lc_command_list *const *lists,
+                                   uint32_t list_count) {
+    lc_state *state = lc_get_internal_state();
+    lc_swapchain *swapchain;
+
+    if (primary == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (state == NULL || !state->initialized) {
+        return LC_ERROR_NOT_INITIALIZED;
+    }
+    if (primary->worker_mode) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = lc_enc_lookup(primary);
+    if (swapchain == NULL || !swapchain->frame_active) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!primary->in_pass) {
+        /* Compute-only batches execute outside any pass (dispatch
+         * is illegal inside a render-pass instance); graphics
+         * batches keep the open-pass requirement. Mixed batches
+         * are rejected by the backend. */
+        uint32_t i;
+        int all_compute = (list_count > 0) ? 1 : 0;
+
+        for (i = 0; i < list_count; i++) {
+            if (lists != NULL && lists[i] != NULL &&
+                lists[i]->is_compute) {
+                continue;
+            }
+            all_compute = 0;
+            break;
+        }
+        if (!all_compute) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+    }
+    if (list_count > 0 && lists == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    {
+        lc_vk_flight *flight = NULL;
+
+        if (swapchain->current_frame >= swapchain->max_flights) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        flight = &swapchain->flights[swapchain->current_frame];
+        return lc_vulkan_worker_execute(primary, lists, list_count,
+                                        flight->cmd);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Compute + indirect public recording (Phase 21).                     */
+/* ------------------------------------------------------------------ */
+
+static int lc_is_live_compute_pipeline(const lc_compute_pipeline *pipeline) {
+    return lc_compute_pipeline_is_live(pipeline);
+}
+
+lc_result lc_encoder_bind_compute_pipeline(lc_command_encoder *enc,
+                                           lc_compute_pipeline *pipeline) {
+    lc_state *state = lc_get_internal_state();
+    lc_swapchain *swapchain;
+
+    if (enc == NULL || pipeline == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (state == NULL || !state->initialized) {
+        return LC_ERROR_NOT_INITIALIZED;
+    }
+    if (enc->worker_mode) {
+        if (!lc_vk_worker_live(enc) || enc->worker_list == NULL) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        if (!lc_is_live_compute_pipeline(pipeline)) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        return lc_vulkan_encoder_bind_compute_pipeline(enc, pipeline);
+    }
+    swapchain = lc_enc_lookup(enc);
+    if (swapchain == NULL || !swapchain->frame_active) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!lc_is_live_compute_pipeline(pipeline)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (pipeline->device != swapchain->device) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    return lc_vulkan_encoder_bind_compute_pipeline(enc, pipeline);
+}
+
+lc_result lc_encoder_dispatch(lc_command_encoder *enc, uint32_t x,
+                              uint32_t y, uint32_t z) {
+    lc_state *state = lc_get_internal_state();
+
+    if (enc == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (state == NULL || !state->initialized) {
+        return LC_ERROR_NOT_INITIALIZED;
+    }
+    if (enc->worker_mode) {
+        if (!lc_vk_worker_live(enc) || enc->worker_list == NULL) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        return lc_vulkan_encoder_dispatch(enc, x, y, z);
+    }
+    {
+        lc_swapchain *swapchain = lc_enc_lookup(enc);
+
+        if (swapchain == NULL || !swapchain->frame_active) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        return lc_vulkan_encoder_dispatch(enc, x, y, z);
+    }
+}
+
+lc_result lc_encoder_bind_compute_set(lc_command_encoder *enc,
+                                      lc_compute_pipeline *pipeline,
+                                      uint32_t slot, lc_binding_set *set) {
+    lc_state *state = lc_get_internal_state();
+    lc_swapchain *swapchain;
+
+    if (enc == NULL || pipeline == NULL || set == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (state == NULL || !state->initialized) {
+        return LC_ERROR_NOT_INITIALIZED;
+    }
+    if (enc->worker_mode) {
+        if (!lc_vk_worker_live(enc) || enc->worker_list == NULL) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        if (!lc_is_live_compute_pipeline(pipeline)) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        return lc_vulkan_encoder_bind_compute_set(enc, pipeline, slot,
+                                                  set);
+    }
+    swapchain = lc_enc_lookup(enc);
+    if (swapchain == NULL || !swapchain->frame_active) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!lc_is_live_compute_pipeline(pipeline) ||
+        !lc_is_live_set(set)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (pipeline->device != swapchain->device ||
+        set->device != swapchain->device) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (slot >= pipeline->layout_count ||
+        pipeline->slot_signatures == NULL ||
+        pipeline->slot_signature_counts == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!lc_binding_signature_equal(
+            set->slots, set->slot_count,
+            pipeline->slot_signatures[slot],
+            pipeline->slot_signature_counts[slot])) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    return lc_vulkan_encoder_bind_compute_set(enc, pipeline, slot, set);
+}
+
+lc_result lc_encoder_push_compute_constants(
+    lc_command_encoder *enc, lc_compute_pipeline *pipeline,
+    uint32_t visibility, uint32_t offset, uint32_t size,
+    const void *data) {
+    lc_state *state = lc_get_internal_state();
+    lc_swapchain *swapchain;
+    const uint32_t known =
+        (uint32_t)LC_SHADER_VISIBILITY_VERTEX |
+        (uint32_t)LC_SHADER_VISIBILITY_FRAGMENT |
+        (uint32_t)LC_SHADER_VISIBILITY_COMPUTE;
+    uint32_t i;
+    int fits = 0;
+
+    if (enc == NULL || pipeline == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (state == NULL || !state->initialized) {
+        return LC_ERROR_NOT_INITIALIZED;
+    }
+    if (enc->worker_mode) {
+        if (!lc_vk_worker_live(enc) || enc->worker_list == NULL) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        if (!lc_is_live_compute_pipeline(pipeline)) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        return lc_vulkan_encoder_push_compute(enc, pipeline, visibility,
+                                              offset, size, data);
+    }
+    swapchain = lc_enc_lookup(enc);
+    if (swapchain == NULL || !swapchain->frame_active) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!lc_is_live_compute_pipeline(pipeline)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (enc->bound_compute_pipeline != pipeline) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (pipeline->device != swapchain->device) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (visibility == 0 || (visibility & ~known) != 0) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (size == 0 || data == NULL || (offset % 4u) != 0u ||
+        (size % 4u) != 0u || offset + size < offset) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (pipeline->push_ranges == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    for (i = 0; i < pipeline->push_range_count; i++) {
+        uint32_t r_off = pipeline->push_ranges[i].offset;
+        uint32_t r_size = pipeline->push_ranges[i].size;
+        uint32_t r_vis = pipeline->push_ranges[i].visibility;
+
+        if ((visibility & ~r_vis) != 0) {
+            continue;
+        }
+        if (offset >= r_off && offset + size <= r_off + r_size) {
+            fits = 1;
+            break;
+        }
+    }
+    if (!fits) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    return lc_vulkan_encoder_push_compute(enc, pipeline, visibility,
+                                          offset, size, data);
+}
+
+lc_result lc_encoder_draw_indirect(lc_command_encoder *enc,
+                                   lc_buffer *buffer, uint64_t offset,
+                                   uint32_t draw_count, uint32_t stride) {
+    lc_state *state = lc_get_internal_state();
+    lc_swapchain *swapchain;
+
+    if (enc == NULL || buffer == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (state == NULL || !state->initialized) {
+        return LC_ERROR_NOT_INITIALIZED;
+    }
+    if (enc->worker_mode) {
+        if (!lc_vk_worker_live(enc) || enc->worker_list == NULL) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        if (!lc_is_live_buffer(buffer)) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        return lc_vulkan_encoder_draw_indirect(enc, buffer, offset,
+                                               draw_count, stride);
+    }
+    swapchain = lc_enc_lookup(enc);
+    if (swapchain == NULL || !swapchain->frame_active) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!enc->in_pass || !lc_is_live_buffer(buffer)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (buffer->device != swapchain->device) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    return lc_vulkan_encoder_draw_indirect(enc, buffer, offset,
+                                           draw_count, stride);
+}
+
+lc_result lc_encoder_draw_indexed_indirect(lc_command_encoder *enc,
+                                           lc_buffer *buffer,
+                                           uint64_t offset,
+                                           uint32_t draw_count,
+                                           uint32_t stride) {
+    lc_state *state = lc_get_internal_state();
+    lc_swapchain *swapchain;
+
+    if (enc == NULL || buffer == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (state == NULL || !state->initialized) {
+        return LC_ERROR_NOT_INITIALIZED;
+    }
+    if (enc->worker_mode) {
+        if (!lc_vk_worker_live(enc) || enc->worker_list == NULL) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        if (!lc_is_live_buffer(buffer)) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        return lc_vulkan_encoder_draw_indexed_indirect(
+            enc, buffer, offset, draw_count, stride);
+    }
+    swapchain = lc_enc_lookup(enc);
+    if (swapchain == NULL || !swapchain->frame_active) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!enc->in_pass || !lc_is_live_buffer(buffer)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (buffer->device != swapchain->device) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    return lc_vulkan_encoder_draw_indexed_indirect(enc, buffer, offset,
+                                                   draw_count, stride);
+}
+
+lc_result lc_encoder_transition_buffer(lc_command_encoder *enc,
+                                       lc_buffer *buffer,
+                                       lc_resource_state new_state) {
+    lc_state *state = lc_get_internal_state();
+    lc_swapchain *swapchain;
+
+    if (enc == NULL || buffer == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (state == NULL || !state->initialized) {
+        return LC_ERROR_NOT_INITIALIZED;
+    }
+    if (enc->worker_mode) {
+        if (!lc_vk_worker_live(enc) || enc->worker_list == NULL) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        if (!lc_is_live_buffer(buffer)) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        return lc_vulkan_encoder_transition_buffer(enc, buffer,
+                                                   new_state);
+    }
+    swapchain = lc_enc_lookup(enc);
+    if (swapchain == NULL || !swapchain->frame_active) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!lc_is_live_buffer(buffer)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (buffer->device != swapchain->device) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    return lc_vulkan_encoder_transition_buffer(enc, buffer, new_state);
+}
+
+lc_result lc_command_list_begin_compute(lc_command_encoder *encoder) {
+    lc_state *state = lc_get_internal_state();
+
+    if (encoder == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (state == NULL || !state->initialized) {
+        return LC_ERROR_NOT_INITIALIZED;
+    }
+    if (!encoder->worker_mode || !lc_vk_worker_live(encoder)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    return lc_vulkan_worker_begin_compute(encoder);
+}
+
+lc_result lc_encoder_get_flight_slot(lc_command_encoder *encoder,
+                                     uint32_t *out_index,
+                                     uint32_t *out_count) {
+    lc_state *state = lc_get_internal_state();
+    lc_swapchain *swapchain;
+
+    if (encoder == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (state == NULL || !state->initialized) {
+        return LC_ERROR_NOT_INITIALIZED;
+    }
+    if (encoder->worker_mode) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = lc_enc_lookup(encoder);
+    if (swapchain == NULL || !swapchain->frame_active) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (out_index != NULL) {
+        *out_index = swapchain->current_frame;
+    }
+    if (out_count != NULL) {
+        *out_count = swapchain->max_flights;
+    }
+    return LC_SUCCESS;
 }

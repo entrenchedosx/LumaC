@@ -100,7 +100,7 @@ static int make_surface(lc_device *device, lc_window *window,
 
 static int make_swapchain(lc_device *device, lc_surface *surface,
                           lc_swapchain **out) {
-    lc_swapchain_desc desc;
+    lc_swapchain_desc desc = { 0 };
 
     desc.width = 800;
     desc.height = 600;

@@ -4,8 +4,12 @@ build_shared/
 build-rel/
 build-shared/
 build-release/
+build-linux/
 build_verify/
 build_wsl/
+build_release/
+build_wsl_release/
+build_wsl_tsan/
 build-wsl/
 out/
 

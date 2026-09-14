@@ -16,26 +16,33 @@
  */
 
 /* All currently defined lc_buffer_usage bits. */
-#define LC_BUFFER_USAGE_KNOWN_MASK 0x3Fu
+#define LC_BUFFER_USAGE_KNOWN_MASK 0x7Fu
 
 static void lc_buffer_list_add(lc_buffer *buffer) {
     lc_state *state = lc_get_internal_state();
+    lc_device *guard;
     if (state == NULL || buffer == NULL) {
         return;
     }
+    guard = state->devices;
+    lc_device_lock_transfer(guard);
     buffer->next = state->buffers;
     buffer->prev = NULL;
     if (state->buffers != NULL) {
         state->buffers->prev = buffer;
     }
     state->buffers = buffer;
+    lc_device_unlock_transfer(guard);
 }
 
 static void lc_buffer_list_remove(lc_buffer *buffer) {
     lc_state *state = lc_get_internal_state();
+    lc_device *guard;
     if (state == NULL || buffer == NULL) {
         return;
     }
+    guard = state->devices;
+    lc_device_lock_transfer(guard);
     if (buffer->prev != NULL) {
         buffer->prev->next = buffer->next;
     } else if (state->buffers == buffer) {
@@ -46,6 +53,7 @@ static void lc_buffer_list_remove(lc_buffer *buffer) {
     }
     buffer->next = NULL;
     buffer->prev = NULL;
+    lc_device_unlock_transfer(guard);
 }
 
 static int lc_is_live_device(const lc_device *device) {
@@ -66,16 +74,22 @@ static int lc_is_live_device(const lc_device *device) {
 static int lc_is_live_buffer(const lc_buffer *buffer) {
     lc_state *state = lc_get_internal_state();
     const lc_buffer *it;
+    lc_device *guard;
+    int found = 0;
 
     if (state == NULL || buffer == NULL) {
         return 0;
     }
+    guard = state->devices;
+    lc_device_lock_transfer(guard);
     for (it = state->buffers; it != NULL; it = it->next) {
         if (it == buffer) {
-            return 1;
+            found = 1;
+            break;
         }
     }
-    return 0;
+    lc_device_unlock_transfer(guard);
+    return found;
 }
 
 lc_result lc_buffer_create(lc_device *device, const lc_buffer_desc *desc,
@@ -130,11 +144,43 @@ lc_result lc_buffer_create(lc_device *device, const lc_buffer_desc *desc,
 }
 
 void lc_buffer_destroy(lc_buffer *buffer) {
+    lc_device *device;
+    lc_retire_entry entry;
+
     if (buffer == NULL) {
         return;
     }
+    device = buffer->device;
+    if (device != NULL) {
+        lc_vk_cmdlist_poison_for(device, buffer);
+    }
     lc_buffer_list_remove(buffer);
-    lc_vulkan_buffer_destroy(buffer);
+    /* In-flight async work drains first (bounded); the VkBuffer and
+     * its binding then retire until GPU completion (no global
+     * idle). The binding travels with the entry (persistent block
+     * mappings stay mapped; dedicated memory unmaps inside free). */
+    if (device != NULL) {
+        lc_vk_transfer_wait_for(device, NULL, buffer);
+    }
+    memset(&entry, 0, sizeof(entry));
+    entry.kind = LC_RETIRE_BUFFER;
+    entry.buffer = buffer->vk_buffer;
+    entry.binding.memory = buffer->vk_memory;
+    entry.binding.offset = buffer->vk_memory_offset;
+    entry.binding.size = buffer->allocation_size;
+    entry.binding.mapped = buffer->mapped_ptr;
+    entry.binding.coherent = buffer->memory_coherent;
+    entry.binding.dedicated = buffer->memory_dedicated;
+    entry.binding.block = buffer->memory_block;
+    entry.bytes = buffer->allocation_size;
+    buffer->vk_buffer = VK_NULL_HANDLE;
+    buffer->vk_memory = VK_NULL_HANDLE;
+    buffer->vk_memory_offset = 0;
+    buffer->mapped_ptr = NULL;
+    buffer->memory_block = NULL;
+    if (device != NULL) {
+        lc_vk_retire(device, &entry);
+    }
     free(buffer);
 }
 
@@ -212,6 +258,27 @@ lc_result lc_buffer_write(lc_buffer *buffer, uint64_t offset, const void *data,
         return LC_ERROR_INVALID_ARGUMENT;
     }
     return lc_vulkan_buffer_write(buffer, offset, data, size);
+}
+
+lc_result lc_buffer_read(lc_buffer *buffer, uint64_t offset, void *dst,
+                         uint64_t size) {
+    if (buffer == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!lc_is_live_buffer(buffer)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (size == 0) {
+        return LC_SUCCESS;
+    }
+    if (dst == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    /* Overflow-safe bounds check: offset first, then the remainder. */
+    if (offset > buffer->size || size > buffer->size - offset) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    return lc_vulkan_buffer_read(buffer, offset, dst, size);
 }
 
 void lc_buffer_destroy_all(void) {

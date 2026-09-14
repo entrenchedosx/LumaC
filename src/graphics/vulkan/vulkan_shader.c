@@ -31,7 +31,8 @@ lc_result lc_vulkan_shader_create(lc_shader *shader, lc_device *device,
         return LC_ERROR_INVALID_ARGUMENT;
     }
     if (desc->stage != LC_SHADER_STAGE_VERTEX &&
-        desc->stage != LC_SHADER_STAGE_FRAGMENT) {
+        desc->stage != LC_SHADER_STAGE_FRAGMENT &&
+        desc->stage != LC_SHADER_STAGE_COMPUTE) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
     memcpy(&magic, desc->code, sizeof(magic));
@@ -70,12 +71,10 @@ void lc_vulkan_shader_destroy(lc_shader *shader) {
     if (shader == NULL || shader->module == VK_NULL_HANDLE) {
         return;
     }
-    /* Device must still be alive; device teardown destroys its shaders
-     * before tearing down the VkDevice. Wait out any submission that
-     * may still reference the module (coarse but correct). */
+    /* Shader modules are consumed during pipeline creation; submitted
+     * command buffers reference VkPipeline, not VkShaderModule. */
     if (shader->device != NULL &&
         shader->device->device != VK_NULL_HANDLE) {
-        vkDeviceWaitIdle(shader->device->device);
         vkDestroyShaderModule(shader->device->device, shader->module, NULL);
     }
     shader->module = VK_NULL_HANDLE;

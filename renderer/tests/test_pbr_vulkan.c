@@ -711,7 +711,7 @@ int main(void) {
     {
         lc_surface *surface = NULL;
         lc_swapchain *swapchain = NULL;
-        lc_swapchain_desc sdesc;
+        lc_swapchain_desc sdesc = { 0 };
 
         if (lc_surface_create(env.device, env.window, &surface) !=
             LC_SUCCESS) {

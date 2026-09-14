@@ -61,7 +61,8 @@ static int lc_vk_state_map(lc_resource_state state,
         *layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         *stage = (VkPipelineStageFlags)(
             VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
         *access = VK_ACCESS_SHADER_READ_BIT;
         return 1;
     case LC_RESOURCE_STATE_SHADER_READ_WRITE:
@@ -104,6 +105,182 @@ int lc_vk_sync_state_valid_for_image(lc_resource_state state) {
         return 0;
     }
     return lc_vk_state_map(state, &layout, &stage, &access);
+}
+
+/* ------------------------------------------------------------------ */
+/* Buffer states (Phase 21, PART J). Whole-resource tracking for      */
+/* compute/indirect ordering. UNDEFINED is source-only (first use).   */
+/* ------------------------------------------------------------------ */
+
+int lc_vk_sync_state_valid_for_buffer(lc_resource_state state) {
+    switch (state) {
+    case LC_RESOURCE_STATE_TRANSFER_SRC:
+    case LC_RESOURCE_STATE_TRANSFER_DST:
+    case LC_RESOURCE_STATE_VERTEX_READ:
+    case LC_RESOURCE_STATE_INDEX_READ:
+    case LC_RESOURCE_STATE_UNIFORM_READ:
+    case LC_RESOURCE_STATE_STORAGE_READ:
+    case LC_RESOURCE_STATE_STORAGE_WRITE:
+    case LC_RESOURCE_STATE_INDIRECT_READ:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+int lc_vk_sync_buffer_barrier_params(lc_resource_state state,
+                                     VkPipelineStageFlags *out_stage,
+                                     VkAccessFlags *out_access) {
+    VkPipelineStageFlags shader_read;
+
+    if (out_stage == NULL || out_access == NULL) {
+        return 0;
+    }
+    shader_read = (VkPipelineStageFlags)(
+        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    switch (state) {
+    case LC_RESOURCE_STATE_UNDEFINED:
+        *out_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        *out_access = 0;
+        return 1;
+    case LC_RESOURCE_STATE_TRANSFER_SRC:
+        *out_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        *out_access = VK_ACCESS_TRANSFER_READ_BIT;
+        return 1;
+    case LC_RESOURCE_STATE_TRANSFER_DST:
+        *out_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        *out_access = VK_ACCESS_TRANSFER_WRITE_BIT;
+        return 1;
+    case LC_RESOURCE_STATE_VERTEX_READ:
+        *out_stage = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+        *out_access = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+        return 1;
+    case LC_RESOURCE_STATE_INDEX_READ:
+        *out_stage = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+        *out_access = VK_ACCESS_INDEX_READ_BIT;
+        return 1;
+    case LC_RESOURCE_STATE_UNIFORM_READ:
+        *out_stage = shader_read;
+        *out_access = VK_ACCESS_UNIFORM_READ_BIT;
+        return 1;
+    case LC_RESOURCE_STATE_STORAGE_READ:
+        *out_stage = shader_read;
+        *out_access = VK_ACCESS_SHADER_READ_BIT;
+        return 1;
+    case LC_RESOURCE_STATE_STORAGE_WRITE:
+        *out_stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        *out_access = VK_ACCESS_SHADER_WRITE_BIT;
+        return 1;
+    case LC_RESOURCE_STATE_INDIRECT_READ:
+        *out_stage = VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+        *out_access = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+void lc_vk_sync_record_buffer(VkCommandBuffer cmd, const lc_buffer *buffer,
+                              uint64_t offset, uint64_t size,
+                              VkPipelineStageFlags src_stage,
+                              VkAccessFlags src_access,
+                              VkPipelineStageFlags dst_stage,
+                              VkAccessFlags dst_access,
+                              uint32_t src_family, uint32_t dst_family) {
+    VkBufferMemoryBarrier barrier;
+
+    if (cmd == VK_NULL_HANDLE || buffer == NULL ||
+        buffer->vk_buffer == VK_NULL_HANDLE) {
+        return;
+    }
+    memset(&barrier, 0, sizeof(barrier));
+    barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    barrier.srcAccessMask = src_access;
+    barrier.dstAccessMask = dst_access;
+    barrier.srcQueueFamilyIndex = src_family;
+    barrier.dstQueueFamilyIndex = dst_family;
+    barrier.buffer = buffer->vk_buffer;
+    barrier.offset = (VkDeviceSize)offset;
+    barrier.size = (VkDeviceSize)size;
+    vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, NULL, 1,
+                         &barrier, 0, NULL);
+}
+
+void lc_vk_sync_mark_buffer(lc_buffer *buffer, lc_resource_state state) {
+    if (buffer == NULL) {
+        return;
+    }
+    buffer->buffer_state = state;
+}
+
+/* Barrier from tracked state into cmd, then mark. UNDEFINED source
+ * uses TOP_OF_PIPE/0 (first use, like images). */
+lc_result lc_vulkan_buffer_transition(VkCommandBuffer cmd, lc_buffer *buffer,
+                                      lc_resource_state new_state) {
+    VkPipelineStageFlags src_stage = 0;
+    VkPipelineStageFlags dst_stage = 0;
+    VkAccessFlags src_access = 0;
+    VkAccessFlags dst_access = 0;
+    lc_resource_state old_state;
+
+    if (cmd == VK_NULL_HANDLE || buffer == NULL ||
+        buffer->vk_buffer == VK_NULL_HANDLE) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!lc_vk_sync_state_valid_for_buffer(new_state)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    old_state = buffer->buffer_state;
+    if (old_state != LC_RESOURCE_STATE_UNDEFINED &&
+        !lc_vk_sync_state_valid_for_buffer(old_state)) {
+        old_state = LC_RESOURCE_STATE_UNDEFINED;
+    }
+    if (!lc_vk_sync_buffer_barrier_params(old_state, &src_stage,
+                                          &src_access) ||
+        !lc_vk_sync_buffer_barrier_params(new_state, &dst_stage,
+                                          &dst_access)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (old_state == new_state) {
+        return LC_SUCCESS;
+    }
+    lc_vk_sync_record_buffer(cmd, buffer, 0, buffer->size, src_stage,
+                             src_access, dst_stage, dst_access,
+                             VK_QUEUE_FAMILY_IGNORED,
+                             VK_QUEUE_FAMILY_IGNORED);
+    buffer->buffer_state = new_state;
+    return LC_SUCCESS;
+}
+
+/* Barrier parameters for one semantic state (transfer engine).
+ * UNDEFINED/PRESENT have no barrier meaning here: rejected. */
+int lc_vk_sync_barrier_params(lc_resource_state state,
+                              VkImageLayout *out_layout,
+                              VkPipelineStageFlags *out_stage,
+                              VkAccessFlags *out_access) {
+    VkImageLayout layout;
+    VkPipelineStageFlags stage = 0;
+    VkAccessFlags access = 0;
+
+    if (out_layout == NULL || out_stage == NULL || out_access == NULL) {
+        return 0;
+    }
+    if (state == LC_RESOURCE_STATE_UNDEFINED ||
+        state == LC_RESOURCE_STATE_PRESENT) {
+        return 0;
+    }
+    if (!lc_vk_state_map(state, &layout, &stage, &access)) {
+        return 0;
+    }
+    if (layout == VK_IMAGE_LAYOUT_UNDEFINED) {
+        return 0;
+    }
+    *out_layout = layout;
+    *out_stage = stage;
+    *out_access = access;
+    return 1;
 }
 
 int lc_vk_sync_validate_range(const lc_image *image, uint32_t base_mip,
@@ -159,17 +336,33 @@ void lc_vk_sync_mark(lc_image *image, uint32_t base_mip,
                      uint32_t layer_count, lc_resource_state state) {
     uint32_t layer;
     uint32_t mip;
+    uint64_t seq = 0;
 
     if (!lc_vk_sync_validate_range(image, base_mip, level_count,
                                    base_layer, layer_count)) {
         return;
     }
+    if (image->device == NULL) {
+        return;
+    }
+    /* Locked: marks nest inside reconciled executes (recursive
+     * state shard). Stamps the submission sequence (PART L). */
+    lc_device_lock_state(image->device);
+    image->device->submission_seq++;
+    seq = image->device->submission_seq;
     for (layer = base_layer; layer < base_layer + layer_count;
          layer++) {
         for (mip = base_mip; mip < base_mip + level_count; mip++) {
-            image->states[lc_vk_state_index(image, mip, layer)] = state;
+            size_t idx =
+                (size_t)layer * image->mip_levels + mip;
+
+            image->states[idx] = state;
+            if (image->epochs != NULL) {
+                image->epochs[idx] = seq;
+            }
         }
     }
+    lc_device_unlock_state(image->device);
 }
 
 int lc_vk_sync_all_equal(const lc_image *image, uint32_t base_mip,
@@ -177,21 +370,29 @@ int lc_vk_sync_all_equal(const lc_image *image, uint32_t base_mip,
                          uint32_t layer_count, lc_resource_state state) {
     uint32_t layer;
     uint32_t mip;
+    int equal = 0;
 
     if (!lc_vk_sync_validate_range(image, base_mip, level_count,
                                    base_layer, layer_count)) {
         return 0;
     }
+    lc_device_lock_state((lc_device *)image->device);
+    equal = 1;
     for (layer = base_layer; layer < base_layer + layer_count;
          layer++) {
         for (mip = base_mip; mip < base_mip + level_count; mip++) {
-            if (image->states[lc_vk_state_index(image, mip, layer)] !=
-                state) {
-                return 0;
+            if (image->states[(size_t)layer * image->mip_levels +
+                              mip] != state) {
+                equal = 0;
+                break;
             }
         }
+        if (!equal) {
+            break;
+        }
     }
-    return 1;
+    lc_device_unlock_state((lc_device *)image->device);
+    return equal;
 }
 
 /* Immediate transition of a range (upload context, submit + wait).
@@ -312,7 +513,7 @@ lc_result lc_vulkan_image_notify_range(lc_image *image, uint32_t base_mip,
  * dance, which sequences several barriers per level. */
 lc_result lc_vk_sync_record_span(VkCommandBuffer cmd, lc_image *image,
                                 uint32_t base_mip, uint32_t level_count,
-                                uint32_t layer_count,
+                                uint32_t base_layer, uint32_t layer_count,
                                 lc_resource_state old_state,
                                 lc_resource_state new_state) {
     VkImageLayout old_layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -326,8 +527,8 @@ lc_result lc_vk_sync_record_span(VkCommandBuffer cmd, lc_image *image,
         image->vk_image == VK_NULL_HANDLE) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
-    if (!lc_vk_sync_validate_range(image, base_mip, level_count, 0,
-                                   layer_count)) {
+    if (!lc_vk_sync_validate_range(image, base_mip, level_count,
+                                   base_layer, layer_count)) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
     if (!lc_vk_state_map(old_state, &old_layout, &src_stage,
@@ -341,8 +542,9 @@ lc_result lc_vk_sync_record_span(VkCommandBuffer cmd, lc_image *image,
     }
     lc_vk_sync_record(cmd, image->vk_image,
                       lc_vk_aspect_for(image->format), base_mip,
-                      level_count, 0, layer_count, src_stage, src_access,
-                      dst_stage, dst_access, old_layout, new_layout);
+                      level_count, base_layer, layer_count, src_stage,
+                      src_access, dst_stage, dst_access, old_layout,
+                      new_layout);
     return LC_SUCCESS;
 }
 

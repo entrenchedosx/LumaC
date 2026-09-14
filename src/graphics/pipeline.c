@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <string.h>
 
 #include "lumac/lumac.h"
 #include "internal/lumac_internal.h"
@@ -222,10 +223,29 @@ lc_result lc_graphics_pipeline_create(
 }
 
 void lc_pipeline_destroy(lc_pipeline *pipeline) {
+    lc_device *device;
+    lc_retire_entry entry;
+
     if (pipeline == NULL) {
         return;
     }
+    device = pipeline->device;
+    if (device != NULL) {
+        lc_vk_cmdlist_poison_for(device, pipeline);
+    }
     lc_pipeline_list_remove(pipeline);
+    /* The VkPipeline/VkPipelineLayout retire (no global idle);
+     * canonical CPU copies free via the backend destroy, whose Vk
+     * handles are already stolen below. */
+    memset(&entry, 0, sizeof(entry));
+    entry.kind = LC_RETIRE_PIPELINE;
+    entry.pipeline = pipeline->pipeline;
+    entry.pipeline_layout = pipeline->layout;
+    pipeline->pipeline = VK_NULL_HANDLE;
+    pipeline->layout = VK_NULL_HANDLE;
+    if (device != NULL) {
+        lc_vk_retire(device, &entry);
+    }
     lc_vulkan_pipeline_destroy(pipeline);
     free(pipeline);
 }

@@ -136,7 +136,7 @@ static int make_surface(lc_device *device, lc_window *window,
 /* 0 = ready, 1 = environmental SKIP, -1 = hard failure */
 static int make_swapchain(lc_device *device, lc_surface *surface,
                           int vsync, lc_swapchain **out) {
-    lc_swapchain_desc desc;
+    lc_swapchain_desc desc = { 0 };
 
     desc.width = 800;
     desc.height = 600;

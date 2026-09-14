@@ -1,7 +1,8 @@
 /*
  * Vulkan frame backend (acquire, clear/draw, submit, present).
  *
- * Swapchain-local frame lifecycle with LC_MAX_FRAMES_IN_FLIGHT slots.
+ * Swapchain-local frame lifecycle with configurable flight slots
+ * (max_flights, default LC_MAX_FRAMES_IN_FLIGHT).
  * Each slot owns its semaphores, fence, and reusable command buffer;
  * per-image fences track which submission still owns an image.
  *
@@ -16,6 +17,7 @@
  * documented as fatal for the swapchain (device-loss territory).
  */
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "graphics/graphics_internal.h"
@@ -90,17 +92,23 @@ static void lc_vk_open_render_pass(lc_swapchain *swapchain) {
 static void lc_vk_frame_unwind(lc_swapchain *swapchain, VkDevice device) {
     uint32_t i;
 
-    for (i = 0; i < LC_MAX_FRAMES_IN_FLIGHT; i++) {
-        lc_vk_flight *flight = &swapchain->flights[i];
-        if (flight->image_available != VK_NULL_HANDLE) {
-            vkDestroySemaphore(device, flight->image_available, NULL);
-            flight->image_available = VK_NULL_HANDLE;
+    if (swapchain->flights != NULL) {
+        for (i = 0; i < swapchain->max_flights; i++) {
+            lc_vk_flight *flight = &swapchain->flights[i];
+
+            if (flight->image_available != VK_NULL_HANDLE) {
+                vkDestroySemaphore(device, flight->image_available,
+                                   NULL);
+                flight->image_available = VK_NULL_HANDLE;
+            }
+            if (flight->fence != VK_NULL_HANDLE) {
+                vkDestroyFence(device, flight->fence, NULL);
+                flight->fence = VK_NULL_HANDLE;
+            }
+            flight->cmd = VK_NULL_HANDLE;
         }
-        if (flight->fence != VK_NULL_HANDLE) {
-            vkDestroyFence(device, flight->fence, NULL);
-            flight->fence = VK_NULL_HANDLE;
-        }
-        flight->cmd = VK_NULL_HANDLE;
+        free(swapchain->flights);
+        swapchain->flights = NULL;
     }
     if (swapchain->cmd_pool != VK_NULL_HANDLE) {
         vkDestroyCommandPool(device, swapchain->cmd_pool, NULL);
@@ -112,7 +120,7 @@ lc_result lc_vulkan_frame_init(lc_swapchain *swapchain) {
     VkDevice device;
     VkCommandPoolCreateInfo pool_info;
     VkCommandBufferAllocateInfo alloc_info;
-    VkCommandBuffer cmds[LC_MAX_FRAMES_IN_FLIGHT];
+    VkCommandBuffer *cmds = NULL;
     uint32_t i;
 
     if (swapchain == NULL || swapchain->device == NULL) {
@@ -121,6 +129,14 @@ lc_result lc_vulkan_frame_init(lc_swapchain *swapchain) {
     device = swapchain->device->device;
     if (device == VK_NULL_HANDLE) {
         return LC_ERROR_SWAPCHAIN_CREATION_FAILED;
+    }
+    if (swapchain->max_flights == 0) {
+        swapchain->max_flights = LC_MAX_FRAMES_IN_FLIGHT;
+    }
+    swapchain->flights = (lc_vk_flight *)calloc(
+        swapchain->max_flights, sizeof(lc_vk_flight));
+    if (swapchain->flights == NULL) {
+        return LC_ERROR_OUT_OF_MEMORY;
     }
 
     memset(&pool_info, 0, sizeof(pool_info));
@@ -136,7 +152,7 @@ lc_result lc_vulkan_frame_init(lc_swapchain *swapchain) {
         return LC_ERROR_SWAPCHAIN_CREATION_FAILED;
     }
 
-    for (i = 0; i < LC_MAX_FRAMES_IN_FLIGHT; i++) {
+    for (i = 0; i < swapchain->max_flights; i++) {
         lc_vk_flight *flight = &swapchain->flights[i];
         VkSemaphoreCreateInfo sem_info;
         VkFenceCreateInfo fence_info;
@@ -159,18 +175,26 @@ lc_result lc_vulkan_frame_init(lc_swapchain *swapchain) {
     }
 
     /* One primary buffer per slot, allocated once and reused. */
+    cmds = (VkCommandBuffer *)malloc(sizeof(VkCommandBuffer) *
+                                     swapchain->max_flights);
+    if (cmds == NULL) {
+        lc_vk_frame_unwind(swapchain, device);
+        return LC_ERROR_OUT_OF_MEMORY;
+    }
     memset(&alloc_info, 0, sizeof(alloc_info));
     alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     alloc_info.commandPool = swapchain->cmd_pool;
     alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    alloc_info.commandBufferCount = LC_MAX_FRAMES_IN_FLIGHT;
+    alloc_info.commandBufferCount = swapchain->max_flights;
     if (vkAllocateCommandBuffers(device, &alloc_info, cmds) != VK_SUCCESS) {
+        free(cmds);
         lc_vk_frame_unwind(swapchain, device);
         return LC_ERROR_SWAPCHAIN_CREATION_FAILED;
     }
-    for (i = 0; i < LC_MAX_FRAMES_IN_FLIGHT; i++) {
+    for (i = 0; i < swapchain->max_flights; i++) {
         swapchain->flights[i].cmd = cmds[i];
     }
+    free(cmds);
     return LC_SUCCESS;
 }
 
@@ -187,20 +211,45 @@ void lc_vulkan_frame_teardown(lc_swapchain *swapchain) {
     if (swapchain->device != NULL) {
         device = swapchain->device->device;
     }
-    for (i = 0; i < LC_MAX_FRAMES_IN_FLIGHT; i++) {
-        lc_vk_flight *flight = &swapchain->flights[i];
-        if (device != VK_NULL_HANDLE) {
-            if (flight->image_available != VK_NULL_HANDLE) {
-                vkDestroySemaphore(device, flight->image_available, NULL);
+    if (swapchain->flights != NULL) {
+        /* Phase 22, PART F: resolve worker lists bound to these
+         * flight fences BEFORE destroying them (teardown contract
+         * guarantees no in-flight submissions, so every bound list
+         * is complete). Bounded to 8 flights (max_flights cap). */
+        if (swapchain->device != NULL) {
+            VkFence dying[8];
+            uint32_t k;
+            uint32_t n = 0;
+
+            for (k = 0; k < swapchain->max_flights && n < 8; k++) {
+                if (swapchain->flights[k].fence != VK_NULL_HANDLE) {
+                    dying[n++] = swapchain->flights[k].fence;
+                }
             }
-            if (flight->fence != VK_NULL_HANDLE) {
-                vkDestroyFence(device, flight->fence, NULL);
+            if (n > 0) {
+                lc_vk_cmdlist_release_flight(swapchain->device, dying,
+                                             n);
             }
         }
-        flight->image_available = VK_NULL_HANDLE;
-        flight->fence = VK_NULL_HANDLE;
-        flight->cmd = VK_NULL_HANDLE;
+        for (i = 0; i < swapchain->max_flights; i++) {
+            lc_vk_flight *flight = &swapchain->flights[i];
+
+            if (device != VK_NULL_HANDLE) {
+                if (flight->image_available != VK_NULL_HANDLE) {
+                    vkDestroySemaphore(device, flight->image_available,
+                                       NULL);
+                }
+                if (flight->fence != VK_NULL_HANDLE) {
+                    vkDestroyFence(device, flight->fence, NULL);
+                }
+            }
+            flight->image_available = VK_NULL_HANDLE;
+            flight->fence = VK_NULL_HANDLE;
+            flight->cmd = VK_NULL_HANDLE;
+        }
     }
+    free(swapchain->flights);
+    swapchain->flights = NULL;
     if (swapchain->cmd_pool != VK_NULL_HANDLE) {
         if (device != VK_NULL_HANDLE) {
             vkDestroyCommandPool(device, swapchain->cmd_pool, NULL);
@@ -224,7 +273,7 @@ static int lc_vk_frame_ready(const lc_swapchain *swapchain) {
            swapchain->device->device != VK_NULL_HANDLE &&
            swapchain->vk_swapchain != VK_NULL_HANDLE &&
            swapchain->cmd_pool != VK_NULL_HANDLE &&
-           swapchain->current_frame < LC_MAX_FRAMES_IN_FLIGHT;
+           swapchain->current_frame < swapchain->max_flights;
 }
 
 lc_result lc_vulkan_frame_begin(lc_swapchain *swapchain) {
@@ -540,7 +589,7 @@ lc_result lc_vulkan_frame_bind_index(lc_swapchain *swapchain,
         return LC_ERROR_INVALID_ARGUMENT;
     }
     LC_ENC_GUARD(swapchain);
-    if (swapchain->current_frame >= LC_MAX_FRAMES_IN_FLIGHT ||
+    if (swapchain->current_frame >= swapchain->max_flights ||
         buffer->vk_buffer == VK_NULL_HANDLE) {
         return LC_ERROR_UNKNOWN;
     }
@@ -654,6 +703,15 @@ lc_result lc_vulkan_frame_end(lc_swapchain *swapchain) {
     VkResult present_res;
     VkSemaphore present_sem = VK_NULL_HANDLE;
     int reported_suboptimal;
+    /* Phase 20 waits: acquire slot plus in-flight transfer copies
+     * (one uniform path; timeline mode adds a max-value wait and a
+     * per-frame signal below). 256 transfer waits bound the submit;
+     * beyond that frame_end fails loudly (documented limit). */
+    VkSemaphore wait_sems[258];
+    VkPipelineStageFlags wait_masks[258];
+    uint32_t wait_count = 0;
+    uint64_t frame_value = 0;
+    uint64_t xfer_max = 0;
 
     if (swapchain == NULL || !swapchain->frame_active) {
         return LC_ERROR_INVALID_ARGUMENT;
@@ -695,37 +753,171 @@ lc_result lc_vulkan_frame_end(lc_swapchain *swapchain) {
         swapchain->rp_open = 0;
     }
 
+    /* Phase 20 ownership: acquire every in-flight dedicated transfer
+     * into this frame (barrier + semaphore wait), so graphics use
+     * below observes transfer results. Claimed entries skip
+     * themselves on retry, so this stays idempotent.
+     * Phase 22 lifetime: the whole emit->submit window runs under
+     * the submit shard, so reclaim (which destroys completion
+     * semaphores under submit only after releasing transfer) can
+     * never free a semaphore this submit is still referencing.
+     * Emit nests transfer inside submit: the one legal nesting
+     * direction (see graphics.c lock order). */
+    wait_sems[0] = flight->image_available;
+    wait_masks[0] = wait_stage;
+    wait_count = 1;
+    lc_device_lock_submit(device);
+    /* Emit retries (Phase 22, PART H): preflight makes
+     * OUT_OF_MEMORY atomic (nothing mutated), so a bounded
+     * drain-and-retry is safe. Each retry waits the in-flight
+     * max (GPU always progresses) and reclaims, outside the
+     * submit hold. */
+    {
+        int emit_attempts = 0;
+
+        for (;;) {
+            lc_result emit_res = lc_vk_emit_pending_acquires(
+                device, flight->cmd, wait_sems, wait_masks,
+                &wait_count, 257);
+
+            if (emit_res == LC_SUCCESS) {
+                break;
+            }
+            if (emit_res != LC_ERROR_OUT_OF_MEMORY ||
+                emit_attempts >= 4) {
+                lc_device_unlock_submit(device);
+                return LC_ERROR_UNKNOWN;
+            }
+            emit_attempts++;
+            lc_device_unlock_submit(device);
+            {
+                uint64_t drain = lc_vk_transfer_max_inflight(device);
+
+                if (drain != 0) {
+                    lc_vk_signal_wait(device, drain,
+                                      LC_TIMEOUT_INFINITE);
+                }
+                lc_vk_reclaim_completed(device);
+            }
+            lc_device_lock_transfer(device);
+            device->stat_emit_retries++;
+            lc_device_unlock_transfer(device);
+            lc_device_lock_submit(device);
+            wait_count = 1;
+        }
+    }
+
     if (vkEndCommandBuffer(flight->cmd) != VK_SUCCESS) {
         /* Recording failed: drop the frame without submitting. The
          * buffer is reset clean on the next begin. */
+        lc_device_unlock_submit(device);
         swapchain->frame_active = 0;
         return LC_ERROR_UNKNOWN;
     }
 
     memset(&submit_info, 0, sizeof(submit_info));
     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit_info.waitSemaphoreCount = 1;
-    submit_info.pWaitSemaphores = &flight->image_available;
-    /* Rendering waits at color output plus early-fragment tests: the
-     * acquire semaphore guarantees both the color image and the depth
-     * buffer are free before the pass writes them. */
-    submit_info.pWaitDstStageMask = &wait_stage;
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers = &flight->cmd;
-    submit_info.signalSemaphoreCount = 1;
-    submit_info.pSignalSemaphores = &present_sem;
+    if (device->timeline_ok) {
+        /* Phase 20 sequencing: GPU-side wait on the in-flight
+         * transfer max plus a per-frame timeline signal (the
+         * retirement horizon covers this frame once signaled).
+         * The value is reserved after the max is read, so the
+         * signal always sorts after it. */
+        VkTimelineSemaphoreSubmitInfo tinfo;
+        VkSemaphore sig_sems[2];
+        uint64_t sig_vals[2];
+        uint64_t wait_vals[258];
+        uint32_t i = 0;
+        VkResult submit_res;
 
-    if (vkQueueSubmit(device->graphics_queue, 1, &submit_info,
-                      flight->fence) != VK_SUCCESS) {
-        /* Fatal for this swapchain (device-loss territory): the fence
-         * will never signal, so the frame is dropped and the caller
-         * must destroy/recreate rather than continue. */
-        swapchain->frame_active = 0;
-        memset(&swapchain->encoder, 0, sizeof(swapchain->encoder));
-        swapchain->encoder.swapchain = swapchain;
-        swapchain->encoder.device = swapchain->device;
-        return LC_ERROR_UNKNOWN;
+        xfer_max = lc_vk_transfer_max_inflight(device);
+        frame_value = lc_vk_signal_reserve(device);
+        lc_vk_retire_bind_active_frame(device, frame_value);
+        lc_vk_cmdlist_bind_active_frame(device, frame_value);
+        if (xfer_max != 0 && wait_count < 258) {
+            wait_sems[wait_count] = device->timeline;
+            wait_masks[wait_count] =
+                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            wait_count++;
+        }
+        for (i = 0; i < wait_count; i++) {
+            wait_vals[i] = 0;
+        }
+        if (xfer_max != 0) {
+            wait_vals[wait_count - 1] = xfer_max;
+        }
+        sig_sems[0] = present_sem;
+        sig_vals[0] = 0;
+        sig_sems[1] = device->timeline;
+        sig_vals[1] = frame_value;
+        memset(&tinfo, 0, sizeof(tinfo));
+        tinfo.sType =
+            VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        tinfo.waitSemaphoreValueCount = wait_count;
+        tinfo.pWaitSemaphoreValues = wait_vals;
+        tinfo.signalSemaphoreValueCount = 2;
+        tinfo.pSignalSemaphoreValues = sig_vals;
+        submit_info.pNext = &tinfo;
+        submit_info.waitSemaphoreCount = wait_count;
+        submit_info.pWaitSemaphores = wait_sems;
+        submit_info.pWaitDstStageMask = wait_masks;
+        submit_info.signalSemaphoreCount = 2;
+        submit_info.pSignalSemaphores = sig_sems;
+        /* Submit shard already held from emit above (single window
+         * covering emit->submit). */
+        submit_res = vkQueueSubmit(device->graphics_queue, 1,
+                                   &submit_info, flight->fence);
+        if (submit_res != VK_SUCCESS) {
+            lc_device_unlock_submit(device);
+            /* Fatal for this swapchain (device-loss territory):
+             * the fence will never signal, so the frame is dropped
+             * and the caller must destroy/recreate rather than
+             * continue. */
+            swapchain->frame_active = 0;
+            flight->signal_value = 0;
+            memset(&swapchain->encoder, 0, sizeof(swapchain->encoder));
+            swapchain->encoder.swapchain = swapchain;
+            swapchain->encoder.device = swapchain->device;
+            return LC_ERROR_UNKNOWN;
+        }
+        lc_device_unlock_submit(device);
+        flight->signal_value = frame_value;
+    } else {
+        submit_info.waitSemaphoreCount = wait_count;
+        submit_info.pWaitSemaphores = wait_sems;
+        submit_info.pWaitDstStageMask = wait_masks;
+        submit_info.signalSemaphoreCount = 1;
+        submit_info.pSignalSemaphores = &present_sem;
+
+        if (vkQueueSubmit(device->graphics_queue, 1, &submit_info,
+                          flight->fence) != VK_SUCCESS) {
+            lc_device_unlock_submit(device);
+            /* Fatal for this swapchain (device-loss territory): the
+             * fence will never signal, so the frame is dropped and
+             * the caller must destroy/recreate rather than
+             * continue. */
+            swapchain->frame_active = 0;
+            flight->signal_value = 0;
+            memset(&swapchain->encoder, 0, sizeof(swapchain->encoder));
+            swapchain->encoder.swapchain = swapchain;
+            swapchain->encoder.device = swapchain->device;
+            return LC_ERROR_UNKNOWN;
+        }
+        /* Binary-fallback completion binding (Phase 22, PART F):
+         * executed lists track this flight's fence (transfer lock
+         * nests legally inside the submit hold). */
+        lc_vk_cmdlist_bind_fallback_fence(device, flight->fence);
+        lc_device_unlock_submit(device);
+        flight->signal_value = 0;
     }
+    lc_device_lock_transfer(device);
+    if (frame_value > device->last_frame_value) {
+        device->last_frame_value = frame_value;
+    }
+    device->stat_graphics_submissions++;
+    lc_device_unlock_transfer(device);
 
     memset(&present_info, 0, sizeof(present_info));
     present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -743,7 +935,7 @@ lc_result lc_vulkan_frame_end(lc_swapchain *swapchain) {
      * how presentation went. Layout history needs no tracking: every
      * frame starts its pass from UNDEFINED. */
     swapchain->current_frame =
-        (swapchain->current_frame + 1u) % LC_MAX_FRAMES_IN_FLIGHT;
+        (swapchain->current_frame + 1u) % swapchain->max_flights;
     swapchain->current_image = UINT32_MAX;
     swapchain->frame_active = 0;
     swapchain->bound_pipeline = NULL;
@@ -782,7 +974,7 @@ lc_result lc_vulkan_frame_bind_vertex(lc_swapchain *swapchain,
         return LC_ERROR_INVALID_ARGUMENT;
     }
     LC_ENC_GUARD(swapchain);
-    if (swapchain->current_frame >= LC_MAX_FRAMES_IN_FLIGHT ||
+    if (swapchain->current_frame >= swapchain->max_flights ||
         buffer->vk_buffer == VK_NULL_HANDLE) {
         return LC_ERROR_UNKNOWN;
     }

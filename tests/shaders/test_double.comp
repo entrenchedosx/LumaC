@@ -1,0 +1,20 @@
+/* Phase 21 compute fundamentals fixture: elementwise doubling.
+ * Push carries the element count (bounds guard, PART AZ40). */
+#version 450
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) readonly buffer In {
+    uint data[];
+} src;
+layout(set = 0, binding = 1) buffer Out {
+    uint data[];
+} dst;
+layout(push_constant) uniform Params {
+    uint count;
+} params;
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= params.count) {
+        return;
+    }
+    dst.data[id] = src.data[id] * 2u;
+}

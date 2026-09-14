@@ -18,8 +18,13 @@
 #include "graphics/graphics_internal.h"
 
 static VkShaderStageFlagBits lc_vk_stage_flag(lc_shader_stage stage) {
-    return (stage == LC_SHADER_STAGE_VERTEX) ? VK_SHADER_STAGE_VERTEX_BIT
-                                             : VK_SHADER_STAGE_FRAGMENT_BIT;
+    if (stage == LC_SHADER_STAGE_VERTEX) {
+        return VK_SHADER_STAGE_VERTEX_BIT;
+    }
+    if (stage == LC_SHADER_STAGE_COMPUTE) {
+        return VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    return VK_SHADER_STAGE_FRAGMENT_BIT;
 }
 
 static VkCullModeFlags lc_vk_cull_mode(lc_cull_mode mode) {
@@ -49,19 +54,22 @@ static VkShaderStageFlags lc_vk_push_stages(uint32_t visibility) {
     if ((visibility & LC_SHADER_VISIBILITY_FRAGMENT) != 0) {
         stages |= VK_SHADER_STAGE_FRAGMENT_BIT;
     }
+    if ((visibility & LC_SHADER_VISIBILITY_COMPUTE) != 0) {
+        stages |= VK_SHADER_STAGE_COMPUTE_BIT;
+    }
     return stages;
 }
 
-/* Validate push-constant ranges: known graphics visibility, 4-byte
- * alignment, nonzero size, inside the device limit, no overlaps. */
+/* Validate push-constant ranges: caller-provided visibility mask,
+ * 4-byte alignment, nonzero size, inside the device limit, no
+ * overlaps. Graphics passes VERTEX|FRAGMENT; compute also admits
+ * COMPUTE. */
 static lc_result lc_vk_validate_push_ranges(
     VkPhysicalDevice physical, const lc_push_constant_range *ranges,
-    uint32_t range_count) {
+    uint32_t range_count, uint32_t known) {
     VkPhysicalDeviceProperties props;
     uint32_t i;
     uint32_t j;
-    const uint32_t known =
-        (uint32_t)LC_SHADER_VISIBILITY_VERTEX | (uint32_t)LC_SHADER_VISIBILITY_FRAGMENT;
 
     if (range_count == 0) {
         return LC_SUCCESS;
@@ -309,9 +317,12 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
     /* Push-constant ranges: graphics visibility, alignment, limit,
      * no overlaps. */
     {
+        const uint32_t known =
+            (uint32_t)LC_SHADER_VISIBILITY_VERTEX |
+            (uint32_t)LC_SHADER_VISIBILITY_FRAGMENT;
         lc_result push_res = lc_vk_validate_push_ranges(
             device->physical_device, desc->push_constant_ranges,
-            desc->push_constant_range_count);
+            desc->push_constant_range_count, known);
         if (push_res != LC_SUCCESS) {
             return push_res;
         }
@@ -672,10 +683,16 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
         pipeline_info.renderPass = compat_pass;
         pipeline_info.subpass = 0;
 
+        /* Shared pipeline cache across threads (PART 22): the
+         * VkPipelineCache object requires external synchronization.
+         * The cache shard also covers the pass-cache lookup above
+         * conceptually... pass lookup has its own shard inside. */
+        lc_device_lock_cache(device);
         if (vkCreateGraphicsPipelines(device->device,
                                        device->pipeline_cache, 1,
                                        &pipeline_info, NULL,
                                        &pipeline->pipeline) != VK_SUCCESS) {
+            lc_device_unlock_cache(device);
             pipeline->pipeline = VK_NULL_HANDLE;
             vkDestroyPipelineLayout(device->device, pipeline->layout,
                                     NULL);
@@ -685,6 +702,7 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
             lc_vk_pipeline_free_copies(pipeline);
             return LC_ERROR_PIPELINE_CREATION_FAILED;
         }
+        lc_device_unlock_cache(device);
     }
     free(vk_bindings);
     free(vk_attributes);
@@ -702,10 +720,9 @@ void lc_vulkan_pipeline_destroy(lc_pipeline *pipeline) {
         device_handle = pipeline->device->device;
     }
     /* Submitted command buffers may still reference the pipeline;
-     * wait them out first (coarse but correct; destroys are rare). */
-    if (device_handle != VK_NULL_HANDLE) {
-        vkDeviceWaitIdle(device_handle);
-    }
+     * lifetime is ordered by retirement (the destroy wrapper defers
+     * the VkPipeline/VkPipelineLayout until GPU completion), so no
+     * global idle is needed here. */
     /* Pipeline first, then its layout, then canonical copies. The
      * creation render pass lives in the device cache (never owned
      * here); compatibility was structural. */
@@ -738,4 +755,256 @@ void lc_vulkan_pipeline_destroy(lc_pipeline *pipeline) {
         }
         pipeline->layout = VK_NULL_HANDLE;
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* Compute pipelines (Phase 21).                                       */
+/*                                                                     */
+/* Same cache, same canonical layout/signature discipline as graphics */
+/* pipelines, minus render-pass/raster state. Validation mirrors the  */
+/* graphics path: live compute shader, live layouts, push ranges.     */
+/* ------------------------------------------------------------------ */
+
+static int lc_compute_shader_live(const lc_shader *shader) {
+    lc_state *state = lc_get_internal_state();
+    const lc_shader *it;
+
+    if (state == NULL || shader == NULL) {
+        return 0;
+    }
+    for (it = state->shaders; it != NULL; it = it->next) {
+        if (it == shader) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void lc_vk_compute_free_copies(lc_compute_pipeline *pipeline) {
+    uint32_t i;
+
+    if (pipeline->slot_signatures != NULL) {
+        for (i = 0; i < pipeline->layout_count; i++) {
+            free(pipeline->slot_signatures[i]);
+        }
+        free(pipeline->slot_signatures);
+        pipeline->slot_signatures = NULL;
+    }
+    free(pipeline->slot_signature_counts);
+    pipeline->slot_signature_counts = NULL;
+    free(pipeline->layouts);
+    pipeline->layouts = NULL;
+    pipeline->layout_count = 0;
+    free(pipeline->push_ranges);
+    pipeline->push_ranges = NULL;
+    pipeline->push_range_count = 0;
+}
+
+lc_result lc_vulkan_compute_pipeline_create(
+    lc_compute_pipeline *pipeline, lc_device *device,
+    const lc_compute_pipeline_desc *desc) {
+    VkComputePipelineCreateInfo pipeline_info;
+    VkPipelineShaderStageCreateInfo stage_info;
+    VkPipelineLayoutCreateInfo layout_info;
+    VkPushConstantRange *vk_push_ranges = NULL;
+    VkDescriptorSetLayout *vk_layouts = NULL;
+    const lc_shader *shader = NULL;
+    const uint32_t known =
+        (uint32_t)LC_SHADER_VISIBILITY_VERTEX |
+        (uint32_t)LC_SHADER_VISIBILITY_FRAGMENT |
+        (uint32_t)LC_SHADER_VISIBILITY_COMPUTE;
+    uint32_t i;
+
+    if (pipeline == NULL || device == NULL || desc == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (device->device == VK_NULL_HANDLE) {
+        return LC_ERROR_BACKEND_UNAVAILABLE;
+    }
+    if (!device->compute_supported) {
+        return LC_ERROR_UNSUPPORTED;
+    }
+    shader = desc->compute_shader;
+    if (shader == NULL || !lc_compute_shader_live(shader) ||
+        shader->device != device ||
+        shader->stage != LC_SHADER_STAGE_COMPUTE ||
+        shader->module == VK_NULL_HANDLE) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    /* Binding layouts: live, same device, within set limits. */
+    {
+        VkPhysicalDeviceProperties props;
+
+        if (desc->binding_layout_count > 0 &&
+            desc->binding_layouts == NULL) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        memset(&props, 0, sizeof(props));
+        vkGetPhysicalDeviceProperties(device->physical_device, &props);
+        if (desc->binding_layout_count >
+            props.limits.maxBoundDescriptorSets) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        for (i = 0; i < desc->binding_layout_count; i++) {
+            if (desc->binding_layouts[i] == NULL ||
+                !lc_pipeline_binding_layout_live(desc->binding_layouts[i]) ||
+                desc->binding_layouts[i]->device != device ||
+                desc->binding_layouts[i]->vk_layout == VK_NULL_HANDLE) {
+                return LC_ERROR_INVALID_ARGUMENT;
+            }
+        }
+    }
+    /* Push-constant ranges: compute visibility admitted. */
+    {
+        lc_result push_res = lc_vk_validate_push_ranges(
+            device->physical_device, desc->push_constant_ranges,
+            desc->push_constant_range_count, known);
+        if (push_res != LC_SUCCESS) {
+            return push_res;
+        }
+    }
+
+    memset(pipeline, 0, sizeof(*pipeline));
+    pipeline->device = device;
+    pipeline->compute_shader = (lc_shader *)shader;
+    if (desc->binding_layout_count > 0) {
+        pipeline->layouts = (const lc_binding_layout **)malloc(
+            sizeof(const lc_binding_layout *) * desc->binding_layout_count);
+        pipeline->slot_signatures = (lc_binding_desc **)calloc(
+            desc->binding_layout_count, sizeof(lc_binding_desc *));
+        pipeline->slot_signature_counts = (uint32_t *)calloc(
+            desc->binding_layout_count, sizeof(uint32_t));
+        if (pipeline->layouts == NULL || pipeline->slot_signatures == NULL ||
+            pipeline->slot_signature_counts == NULL) {
+            lc_vk_compute_free_copies(pipeline);
+            return LC_ERROR_OUT_OF_MEMORY;
+        }
+        for (i = 0; i < desc->binding_layout_count; i++) {
+            const lc_binding_layout *layout = desc->binding_layouts[i];
+
+            pipeline->layouts[i] = layout;
+            pipeline->slot_signature_counts[i] = layout->binding_count;
+            if (layout->binding_count > 0) {
+                pipeline->slot_signatures[i] = (lc_binding_desc *)malloc(
+                    sizeof(lc_binding_desc) * layout->binding_count);
+                if (pipeline->slot_signatures[i] == NULL) {
+                    lc_vk_compute_free_copies(pipeline);
+                    return LC_ERROR_OUT_OF_MEMORY;
+                }
+                memcpy(pipeline->slot_signatures[i], layout->bindings,
+                       sizeof(lc_binding_desc) * layout->binding_count);
+            }
+        }
+        pipeline->layout_count = desc->binding_layout_count;
+    }
+    if (desc->push_constant_range_count > 0) {
+        pipeline->push_ranges = (lc_push_constant_range *)malloc(
+            sizeof(lc_push_constant_range) *
+            desc->push_constant_range_count);
+        if (pipeline->push_ranges == NULL) {
+            lc_vk_compute_free_copies(pipeline);
+            return LC_ERROR_OUT_OF_MEMORY;
+        }
+        memcpy(pipeline->push_ranges, desc->push_constant_ranges,
+               sizeof(lc_push_constant_range) *
+                   desc->push_constant_range_count);
+        pipeline->push_range_count = desc->push_constant_range_count;
+    }
+
+    /* Pipeline layout from canonical copies (layouts may die). */
+    if (pipeline->push_range_count > 0) {
+        vk_push_ranges = (VkPushConstantRange *)malloc(
+            sizeof(VkPushConstantRange) * pipeline->push_range_count);
+        if (vk_push_ranges == NULL) {
+            lc_vk_compute_free_copies(pipeline);
+            return LC_ERROR_OUT_OF_MEMORY;
+        }
+        for (i = 0; i < pipeline->push_range_count; i++) {
+            vk_push_ranges[i].stageFlags =
+                lc_vk_push_stages(pipeline->push_ranges[i].visibility);
+            vk_push_ranges[i].offset = pipeline->push_ranges[i].offset;
+            vk_push_ranges[i].size = pipeline->push_ranges[i].size;
+        }
+    }
+    if (pipeline->layout_count > 0) {
+        vk_layouts = (VkDescriptorSetLayout *)malloc(
+            sizeof(VkDescriptorSetLayout) * pipeline->layout_count);
+        if (vk_layouts == NULL) {
+            free(vk_push_ranges);
+            lc_vk_compute_free_copies(pipeline);
+            return LC_ERROR_OUT_OF_MEMORY;
+        }
+        for (i = 0; i < pipeline->layout_count; i++) {
+            vk_layouts[i] = pipeline->layouts[i]->vk_layout;
+        }
+    }
+    memset(&layout_info, 0, sizeof(layout_info));
+    layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layout_info.setLayoutCount = pipeline->layout_count;
+    layout_info.pSetLayouts = vk_layouts;
+    layout_info.pushConstantRangeCount = pipeline->push_range_count;
+    layout_info.pPushConstantRanges = vk_push_ranges;
+    if (vkCreatePipelineLayout(device->device, &layout_info, NULL,
+                               &pipeline->layout) != VK_SUCCESS) {
+        pipeline->layout = VK_NULL_HANDLE;
+        free(vk_layouts);
+        free(vk_push_ranges);
+        lc_vk_compute_free_copies(pipeline);
+        return LC_ERROR_PIPELINE_CREATION_FAILED;
+    }
+    free(vk_layouts);
+    free(vk_push_ranges);
+
+    /* Single compute stage; the SHARED device pipeline cache
+     * (VkPipelineCache is type-agnostic) under the cache shard. */
+    memset(&stage_info, 0, sizeof(stage_info));
+    stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stage_info.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    stage_info.module = shader->module;
+    stage_info.pName = shader->entry_point;
+    memset(&pipeline_info, 0, sizeof(pipeline_info));
+    pipeline_info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipeline_info.stage = stage_info;
+    pipeline_info.layout = pipeline->layout;
+    lc_device_lock_cache(device);
+    if (vkCreateComputePipelines(device->device, device->pipeline_cache,
+                                 1, &pipeline_info, NULL,
+                                 &pipeline->pipeline) != VK_SUCCESS) {
+        lc_device_unlock_cache(device);
+        pipeline->pipeline = VK_NULL_HANDLE;
+        vkDestroyPipelineLayout(device->device, pipeline->layout, NULL);
+        pipeline->layout = VK_NULL_HANDLE;
+        lc_vk_compute_free_copies(pipeline);
+        return LC_ERROR_PIPELINE_CREATION_FAILED;
+    }
+    lc_device_unlock_cache(device);
+    return LC_SUCCESS;
+}
+
+void lc_vulkan_compute_pipeline_destroy(lc_compute_pipeline *pipeline) {
+    VkDevice device_handle = VK_NULL_HANDLE;
+
+    if (pipeline == NULL) {
+        return;
+    }
+    if (pipeline->device != NULL) {
+        device_handle = pipeline->device->device;
+    }
+    /* Lifetime is ordered by retirement (destroy wrapper defers),
+     * so no global idle here. Canonical copies free on every path. */
+    lc_vk_compute_free_copies(pipeline);
+    if (pipeline->pipeline != VK_NULL_HANDLE) {
+        if (device_handle != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device_handle, pipeline->pipeline, NULL);
+        }
+        pipeline->pipeline = VK_NULL_HANDLE;
+    }
+    if (pipeline->layout != VK_NULL_HANDLE) {
+        if (device_handle != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device_handle, pipeline->layout,
+                                    NULL);
+        }
+        pipeline->layout = VK_NULL_HANDLE;
+    }
+    pipeline->compute_shader = NULL;
 }

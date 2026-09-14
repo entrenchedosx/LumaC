@@ -75,7 +75,7 @@ int main(void) {
     lc_pipeline *pipeline = NULL;
     lc_window_desc window_desc;
     lc_device_desc device_desc = { 0 };
-    lc_swapchain_desc swapchain_desc;
+    lc_swapchain_desc swapchain_desc = { 0 };
     lc_shader_desc shader_desc;
     lc_graphics_pipeline_desc pipeline_desc = { 0 };
     lc_result res;

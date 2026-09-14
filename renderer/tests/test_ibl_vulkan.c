@@ -3086,7 +3086,7 @@ int main(void) {
 
     /* ---- PART P18-AS/AI: 500-frame endurance + multiview ----
      * Full stack (PBR + shadowed light + IBL + HDR + tonemap + post)
-     * for 500 frames: camera orbit, ball motion, env yaw, moving
+     * for 1000 frames: camera orbit, ball motion, env yaw, moving
      * shadow light, mid-run resize (256->128->256), tint-identity
      * post for a stretch, public-readback captures every 100 frames
      * (the ONLY readbacks in the run — PART AR), cache enabled for
@@ -3098,6 +3098,8 @@ int main(void) {
         lr_environment *penv = NULL;
         lr_mesh *ball = NULL;
         lr_material *mat = NULL;
+        lc_buffer *stream_buffer = NULL;
+        lc_gpu_signal stream_done = {0};
         static const float white[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
         static const float ident3[3] = { 1.0f, 1.0f, 1.0f };
         ibl_frame_ops ops;
@@ -3105,7 +3107,7 @@ int main(void) {
         lr_light light;
         int f;
         int frames_ok = 0;
-        double cap_lum[6];
+        double cap_lum[10];
         int cap_n = 0;
         uint32_t pipes_warm = 0;
         uint32_t pipes_end = 0;
@@ -3120,8 +3122,18 @@ int main(void) {
             lr_mesh_create_sphere(env.renderer, 1.0f, 24, 12, &ball) !=
                 LR_SUCCESS ||
             (mat = make_pbr(&env, white, 0.0f, 0.5f)) == NULL) {
-            TEST_CHECK(0, "endurance500: scene builds");
+            TEST_CHECK(0, "endurance1000: scene builds");
         } else {
+            lc_buffer_desc stream_desc;
+
+            memset(&stream_desc, 0, sizeof(stream_desc));
+            stream_desc.size = 4096;
+            stream_desc.usage = LC_BUFFER_USAGE_STORAGE;
+            stream_desc.memory = LC_MEMORY_GPU_ONLY;
+            if (lc_buffer_create(env.device, &stream_desc,
+                                 &stream_buffer) != LC_SUCCESS) {
+                TEST_CHECK(0, "endurance1000: streaming buffer creates");
+            }
             memset(&ops, 0, sizeof(ops));
             memcpy(ops.ambient, black3, sizeof(black3));
             ops.items = items;
@@ -3144,11 +3156,35 @@ int main(void) {
             /* Lifetime baseline: this renderer is shared by all
              * PARTs, so the counter already holds earlier builds. */
             lr_renderer_get_environment_info(env.renderer, &info_base);
-            for (f = 0; f < 500; f++) {
+            for (f = 0; f < 1000 && stream_buffer != NULL; f++) {
                 float a = 0.02f * (float)f;
                 float ca = cosf(a);
                 float sa = sinf(a);
                 unsigned char *px = NULL;
+                uint32_t stream_words[64];
+                lc_buffer *temporary = NULL;
+                lc_buffer_desc temporary_desc;
+
+                memset(stream_words, f, sizeof(stream_words));
+                if (lc_upload_buffer_async(env.device, stream_buffer, 0,
+                                           stream_words,
+                                           sizeof(stream_words),
+                                           &stream_done) != LC_SUCCESS) {
+                    break;
+                }
+                /* Independent short-lived resources model streaming metadata
+                 * churn while rendering remains in flight. */
+                if ((f % 10) == 0) {
+                    memset(&temporary_desc, 0, sizeof(temporary_desc));
+                    temporary_desc.size = 1024;
+                    temporary_desc.usage = LC_BUFFER_USAGE_UNIFORM;
+                    temporary_desc.memory = LC_MEMORY_CPU_TO_GPU;
+                    if (lc_buffer_create(env.device, &temporary_desc,
+                                         &temporary) != LC_SUCCESS) {
+                        break;
+                    }
+                    lc_buffer_destroy(temporary);
+                }
 
                 /* Motion on every axis the phase owns. */
                 look_at_origin(&env, 6.0f * ca, 0.5f + 0.2f * sa,
@@ -3208,7 +3244,7 @@ int main(void) {
                         env.renderer);
                 }
                 /* Requested captures only (PART AR): every 100. */
-                if ((f % 100) == 0 && cap_n < 6) {
+                if ((f % 100) == 0 && cap_n < 10) {
                     lc_image_readback_desc rd;
                     lc_image_readback_info ri;
                     unsigned char *cap = NULL;
@@ -3247,11 +3283,15 @@ int main(void) {
             pipes_end =
                 lr_renderer_get_pipeline_count(env.renderer);
             lr_renderer_get_environment_info(env.renderer, &info);
-            TEST_CHECK(frames_ok == 500,
-                       "endurance500: 500 frames without failure");
+            if (stream_done.value != 0) {
+                (void)lc_gpu_signal_wait(env.device, stream_done,
+                                         LC_TIMEOUT_INFINITE);
+            }
+            TEST_CHECK(frames_ok == 1000,
+                       "endurance1000: 1000 frames with streaming");
             TEST_CHECK(info.environment_rebuilds ==
                            info_base.environment_rebuilds + 1,
-                       "endurance500: env builds once, never reprocesses");
+                       "endurance1000: env builds once, never reprocesses");
             {
                 double lo = cap_lum[0];
                 double hi = cap_lum[0];
@@ -3265,17 +3305,39 @@ int main(void) {
                         hi = cap_lum[i];
                     }
                 }
-                /* f = 0,100,200,300,400 -> five captures. Bounds
+                /* Ten captures at 100-frame intervals. Bounds
                  * are validity (not black, not over 1.0 LDR) plus
                  * motion (range across orbit positions). */
-                TEST_CHECK(cap_n == 5 && lo >= 0.01 && hi <= 1.0 &&
+                TEST_CHECK(cap_n == 10 && lo >= 0.01 && hi <= 1.0 &&
                                (hi - lo) > 0.03,
-                           "endurance500: captures sane and vary");
+                           "endurance1000: captures sane and vary");
             }
             TEST_CHECK(pipes_warm > 0 &&
                            pipes_end == pipes_warm &&
                            pipes_end <= 16,
-                       "endurance500: pipelines bounded and stable");
+                       "endurance1000: pipelines bounded and stable");
+            {
+                lc_transfer_stats transfer_stats;
+                lc_memory_stats memory_stats;
+
+                lc_device_poll_completed(env.device);
+                memset(&transfer_stats, 0, sizeof(transfer_stats));
+                memset(&memory_stats, 0, sizeof(memory_stats));
+                lc_device_get_transfer_stats(env.device, &transfer_stats);
+                lc_device_get_memory_stats(env.device, &memory_stats);
+                TEST_CHECK(transfer_stats.uploads_in_flight == 0 &&
+                               transfer_stats.staging_used == 0,
+                           "endurance1000: streaming staging fully reclaimed");
+                printf("[info] endurance1000 uploads=%llu bytes=%llu "
+                       "submissions=%llu staging_high=%llu retired_high=%llu "
+                       "blocks=%llu\n",
+                       (unsigned long long)1000,
+                       (unsigned long long)transfer_stats.bytes_uploaded,
+                       (unsigned long long)transfer_stats.transfer_submissions,
+                       (unsigned long long)transfer_stats.staging_high_water,
+                       (unsigned long long)transfer_stats.retired_high_water,
+                       (unsigned long long)memory_stats.block_count);
+            }
             /* AI: two orientations through public readback differ. */
             {
                 static const float pxd[3] = { 1.0f, 0.0f, 0.0f };
@@ -3310,7 +3372,8 @@ int main(void) {
             test_wait_idle(device);
         }
         if (mat != NULL) {
-            lr_material_destroy(mat);
+        lc_buffer_destroy(stream_buffer);
+        lr_material_destroy(mat);
         }
         if (ball != NULL) {
             lr_mesh_destroy(ball);

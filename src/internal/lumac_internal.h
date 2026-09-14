@@ -27,13 +27,14 @@
  */
 typedef struct lc_state {
     int initialized;
-    uint64_t next_resource_id; /* monotonic stable IDs, starts at 1 */
+    uint64_t next_resource_id; /* atomically issued, starts at 1 */
     lc_window *windows;
     lc_device *devices;
     lc_surface *surfaces;
     lc_swapchain *swapchains;
     lc_shader *shaders;
     lc_pipeline *pipelines;
+    lc_compute_pipeline *compute_pipelines;
     lc_buffer *buffers;
     lc_image *images;
     lc_image_view *image_views;
@@ -98,6 +99,10 @@ void lc_pipeline_destroy_for_device(const lc_device *device);
 /* Nonzero when a pipeline handle is live. Shared by frame.c for
  * bind/draw validation. See src/graphics/pipeline.c. */
 int lc_pipeline_is_live(const lc_pipeline *pipeline);
+
+/* Destroys all live compute pipelines. Called by lc_shutdown().
+ * See src/graphics/compute_pipeline.c. */
+void lc_compute_pipeline_destroy_all(void);
 
 /* Destroys all live buffers. Called by lc_shutdown().
  * See src/graphics/buffer.c. */

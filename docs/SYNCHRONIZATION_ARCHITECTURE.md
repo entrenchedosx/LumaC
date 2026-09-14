@@ -1,5 +1,9 @@
 # Luma Synchronization Architecture (Phase 19, PARTs A–J, AM–AO)
 
+Phase 20 keeps semantic states and adds recording-local intents for worker
+lists. Global state advances only in list execution order. Device completion
+values order transfer, frames, staging reclamation, and native retirement.
+
 Backend-neutral resource states with subresource tracking,
 automatic transitions where safe, and one explicit transition
 API. LumaC converts states to backend synchronization (Vulkan
@@ -64,11 +68,20 @@ Canonical proofs (all pixel-exact, all validation-clean):
 
 ## Futures (PARTs AM–AO)
 
-- Parallel recording: tracking is per-image today; per-queue or
-  per-recording epochs slot in without changing states or calls.
-- Multi-queue: barriers use IGNORED families now; ownership
-  transfers land in the sync layer only.
-- Timelines: a future submit/wait API references the same states;
-  no Vulkan fence/semaphore types leak today.
+- Parallel recording uses per-list state-intent logs and reconciles them in
+  explicit execution order; see `COMMAND_RECORDING_ARCHITECTURE.md`.
+- Graphics and transfer queues now share a backend-neutral timeline. GPU-only
+  buffers use concurrent family sharing where a dedicated transfer family is
+  active; image transfers remain on graphics until split copy/finalize support.
+- Public `lc_gpu_signal` values expose poll/wait completion without leaking
+  Vulkan fence or semaphore types.
 - Compute: SHADER_READ_WRITE maps to GENERAL; storage states are
   already named.
+- Phase 21 buffer states: whole-resource tracked states
+  (TRANSFER_SRC/DST, VERTEX/INDEX/UNIFORM/STORAGE_READ,
+  STORAGE_WRITE, INDIRECT_READ) with stage/access mapping and
+  explicit transitions; barriers are illegal inside passes
+  (no subpass self-dependency), so buffer transitions record
+  outside passes and indirect draws strictly require
+  INDIRECT_READ. Descriptor updates accept untracked and
+  transfer-ordered buffers, rejecting wrong-slot reuse.

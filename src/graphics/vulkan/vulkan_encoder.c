@@ -27,7 +27,7 @@ static int lc_enc_frame_ready(const lc_swapchain *swapchain) {
            swapchain->device->device != VK_NULL_HANDLE &&
            swapchain->vk_swapchain != VK_NULL_HANDLE &&
            swapchain->cmd_pool != VK_NULL_HANDLE &&
-           swapchain->current_frame < LC_MAX_FRAMES_IN_FLIGHT &&
+           swapchain->current_frame < swapchain->max_flights &&
            swapchain->frame_active &&
            swapchain->current_image < swapchain->image_count;
 }
@@ -53,13 +53,76 @@ static float lc_enc_clamp01(float v) {
 static lc_resource_state lc_enc_tracked_at(const lc_image *image,
                                               const lc_image_view *view) {
     size_t idx;
+    lc_resource_state st;
 
     if (image == NULL || image->states == NULL || view == NULL) {
         return LC_RESOURCE_STATE_UNDEFINED;
     }
     idx = (size_t)view->base_array_layer * image->mip_levels +
           view->base_mip_level;
-    return image->states[idx];
+    lc_device_lock_state(image->device);
+    st = image->states[idx];
+    lc_device_unlock_state(image->device);
+    return st;
+}
+
+/* Shared offscreen pass lookup + framebuffer ensure (explicit
+ * passes and worker-list inheritance). Keyed identically so both
+ * see the same VkRenderPass for equal recipes. */
+lc_result lc_vulkan_offscreen_pass(lc_device *device,
+                                   lc_render_target *target,
+                                   const lc_render_pass_desc *desc,
+                                   VkRenderPass *out_pass) {
+    lc_vk_pass_key key;
+    uint32_t i;
+    lc_result res;
+
+    if (device == NULL || target == NULL || desc == NULL ||
+        out_pass == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    memset(&key, 0, sizeof(key));
+    key.color_count = target->color_count;
+    for (i = 0; i < key.color_count; i++) {
+        key.color_formats[i] =
+            lc_vulkan_translate_format(target->color_formats[i]);
+        key.color_loads[i] = lc_vulkan_translate_load(
+            desc->color_attachments[i].load_op);
+        key.color_stores[i] = lc_vulkan_translate_store(
+            desc->color_attachments[i].store_op);
+    }
+    key.depth_format = (target->depth_view != NULL)
+                           ? lc_vulkan_translate_format(target->depth_format)
+                           : VK_FORMAT_UNDEFINED;
+    /* Sampled-usage depth selects the sampled-readable final layout
+     * (must agree with pass creation + end-of-pass adoption). */
+    key.depth_sampled =
+        (target->depth_view != NULL && target->depth_view->image != NULL &&
+         (target->depth_view->image->usage & LC_IMAGE_USAGE_SAMPLED) !=
+             0)
+            ? 1
+            : 0;
+    if (desc->depth_attachment != NULL) {
+        key.depth_load =
+            lc_vulkan_translate_load(desc->depth_attachment->depth_load_op);
+        key.depth_store =
+            lc_vulkan_translate_store(desc->depth_attachment->depth_store_op);
+    } else {
+        key.depth_load = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        key.depth_store = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    }
+    key.samples = lc_vulkan_translate_samples(target->samples);
+    key.present = 0;
+
+    res = lc_vulkan_pass_cache_get(device, &key, out_pass);
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+    /* Multiple workers may first-touch the same target concurrently. */
+    lc_device_lock_cache(device);
+    res = lc_vulkan_target_ensure_framebuffer(target, *out_pass);
+    lc_device_unlock_cache(device);
+    return res;
 }
 
 lc_result lc_vulkan_encoder_begin_offscreen(
@@ -67,7 +130,6 @@ lc_result lc_vulkan_encoder_begin_offscreen(
     const lc_render_pass_desc *desc) {
     lc_swapchain *swapchain;
     lc_vk_flight *flight;
-    lc_vk_pass_key key;
     VkRenderPass pass = VK_NULL_HANDLE;
     VkRenderPassBeginInfo begin_info;
     VkClearValue clear_values[LC_MAX_COLOR_ATTACHMENTS + 1];
@@ -156,44 +218,10 @@ lc_result lc_vulkan_encoder_begin_offscreen(
         return LC_ERROR_INVALID_ARGUMENT;
     }
 
-    memset(&key, 0, sizeof(key));
-    key.color_count = target->color_count;
-    for (i = 0; i < key.color_count; i++) {
-        key.color_formats[i] =
-            lc_vulkan_translate_format(target->color_formats[i]);
-        key.color_loads[i] = lc_vulkan_translate_load(
-            desc->color_attachments[i].load_op);
-        key.color_stores[i] = lc_vulkan_translate_store(
-            desc->color_attachments[i].store_op);
-    }
-    key.depth_format = (target->depth_view != NULL)
-                           ? lc_vulkan_translate_format(target->depth_format)
-                           : VK_FORMAT_UNDEFINED;
-    /* Sampled-usage depth selects the sampled-readable final layout
-     * (must agree with pass creation + end-of-pass adoption). */
-    key.depth_sampled =
-        (target->depth_view != NULL && target->depth_view->image != NULL &&
-         (target->depth_view->image->usage & LC_IMAGE_USAGE_SAMPLED) !=
-             0)
-            ? 1
-            : 0;
-    if (desc->depth_attachment != NULL) {
-        key.depth_load =
-            lc_vulkan_translate_load(desc->depth_attachment->depth_load_op);
-        key.depth_store =
-            lc_vulkan_translate_store(desc->depth_attachment->depth_store_op);
-    } else {
-        key.depth_load = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        key.depth_store = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    }
-    key.samples = lc_vulkan_translate_samples(target->samples);
-    key.present = 0;
-
-    res = lc_vulkan_pass_cache_get(swapchain->device, &key, &pass);
+    res = lc_vulkan_offscreen_pass(target->device, target, desc, &pass);
     if (res != LC_SUCCESS) {
         return res;
     }
-    res = lc_vulkan_target_ensure_framebuffer(target, pass);
     if (res != LC_SUCCESS) {
         return res;
     }
@@ -470,10 +498,13 @@ lc_result lc_vulkan_encoder_end(lc_command_encoder *enc) {
 }
 
 lc_result lc_vulkan_encoder_bind(lc_command_encoder *enc,
-                                 const lc_pipeline *pipeline) {
+                                  const lc_pipeline *pipeline) {
     lc_swapchain *swapchain;
     lc_vk_flight *flight;
 
+    if (enc != NULL && enc->worker_mode) {
+        return lc_worker_record_bind_pipeline(enc, pipeline);
+    }
     if (enc == NULL || pipeline == NULL || enc->swapchain == NULL ||
         !enc->in_pass) {
         return LC_ERROR_INVALID_ARGUMENT;
@@ -494,10 +525,13 @@ lc_result lc_vulkan_encoder_bind(lc_command_encoder *enc,
 lc_result lc_vulkan_encoder_bind_set(lc_command_encoder *enc,
                                      const lc_pipeline *pipeline,
                                      uint32_t slot,
-                                     const lc_binding_set *set) {
+                                     lc_binding_set *set) {
     lc_swapchain *swapchain;
     lc_vk_flight *flight;
 
+    if (enc != NULL && enc->worker_mode) {
+        return lc_worker_record_bind_set(enc, pipeline, slot, set);
+    }
     if (enc == NULL || pipeline == NULL || set == NULL ||
         enc->swapchain == NULL || !enc->in_pass) {
         return LC_ERROR_INVALID_ARGUMENT;
@@ -524,6 +558,10 @@ lc_result lc_vulkan_encoder_bind_vertex(lc_command_encoder *enc,
     lc_vk_flight *flight;
     VkDeviceSize vk_offset;
 
+    if (enc != NULL && enc->worker_mode) {
+        return lc_worker_record_bind_vertex(enc, binding, buffer,
+                                            offset);
+    }
     if (enc == NULL || buffer == NULL || enc->swapchain == NULL ||
         !enc->in_pass) {
         return LC_ERROR_INVALID_ARGUMENT;
@@ -553,6 +591,10 @@ lc_result lc_vulkan_encoder_bind_index(lc_command_encoder *enc,
     lc_vk_flight *flight;
     VkIndexType vk_type;
 
+    if (enc != NULL && enc->worker_mode) {
+        return lc_worker_record_bind_index(enc, buffer, offset,
+                                           index_type);
+    }
     if (enc == NULL || buffer == NULL || enc->swapchain == NULL ||
         !enc->in_pass) {
         return LC_ERROR_INVALID_ARGUMENT;
@@ -597,6 +639,10 @@ lc_result lc_vulkan_encoder_push(lc_command_encoder *enc,
     lc_vk_flight *flight;
     VkShaderStageFlags stages;
 
+    if (enc != NULL && enc->worker_mode) {
+        return lc_worker_record_push(enc, pipeline, visibility, offset,
+                                     size, data);
+    }
     if (enc == NULL || pipeline == NULL || data == NULL ||
         enc->swapchain == NULL || !enc->in_pass) {
         return LC_ERROR_INVALID_ARGUMENT;
@@ -625,6 +671,9 @@ lc_result lc_vulkan_encoder_draw(lc_command_encoder *enc,
     lc_swapchain *swapchain;
     lc_vk_flight *flight;
 
+    if (enc != NULL && enc->worker_mode) {
+        return lc_worker_record_draw(enc, vertex_count, first_vertex);
+    }
     if (enc == NULL || enc->swapchain == NULL || !enc->in_pass) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
@@ -643,6 +692,9 @@ lc_result lc_vulkan_encoder_draw_indexed(
     lc_swapchain *swapchain;
     lc_vk_flight *flight;
 
+    if (enc != NULL && enc->worker_mode) {
+        return lc_worker_record_draw_indexed(enc, index_count, instance_count, first_index, vertex_offset, first_instance);
+    }
     if (enc == NULL || enc->swapchain == NULL || !enc->in_pass) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
@@ -663,6 +715,9 @@ lc_result lc_vulkan_encoder_draw_instanced(
     lc_swapchain *swapchain;
     lc_vk_flight *flight;
 
+    if (enc != NULL && enc->worker_mode) {
+        return lc_worker_record_draw_instanced(enc, vertex_count, instance_count, first_vertex, first_instance);
+    }
     if (enc == NULL || enc->swapchain == NULL || !enc->in_pass) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
@@ -676,9 +731,13 @@ lc_result lc_vulkan_encoder_draw_instanced(
     return LC_SUCCESS;
 }
 
-/* Explicit image transition into the frame command buffer. Allowed
- * between passes (the primary use: end A, transition, begin B) as
- * well as inside passes; never outside an open frame. */
+/* Explicit image transition into the frame command buffer.
+ * Allowed between passes (the primary use: end A, transition,
+ * begin B); never inside an open pass and never outside an open
+ * frame. Phase 22, PART U: explicit transitions of any kind are
+ * illegal inside render-pass instances (passes carry no
+ * self-dependency for vkCmdPipelineBarrier); attachment flow
+ * rides render-pass begin/end semantics instead. */
 lc_result lc_vulkan_encoder_transition(lc_command_encoder *enc,
                                        lc_image *image,
                                        uint32_t base_mip,
@@ -692,8 +751,16 @@ lc_result lc_vulkan_encoder_transition(lc_command_encoder *enc,
     if (enc == NULL || image == NULL || enc->swapchain == NULL) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
+    if (enc->worker_mode) {
+        return lc_worker_record_transition(
+            enc, image, base_mip, level_count, base_layer, layer_count,
+            new_state);
+    }
     swapchain = enc->swapchain;
     if (!lc_enc_frame_ready(swapchain)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (enc->in_pass || swapchain->rp_open) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
     if (image->device != swapchain->device) {
@@ -703,4 +770,366 @@ lc_result lc_vulkan_encoder_transition(lc_command_encoder *enc,
     return lc_vulkan_encoder_transition_image(
         flight->cmd, image, base_mip, level_count, base_layer,
         layer_count, new_state);
+}
+
+/* ------------------------------------------------------------------ */
+/* Compute + indirect (Phase 21). Dispatch records outside render     */
+/* passes only; indirect draws follow the same rules as direct draws. */
+/* ------------------------------------------------------------------ */
+
+lc_result lc_vulkan_encoder_bind_compute_pipeline(
+    lc_command_encoder *enc, const lc_compute_pipeline *pipeline) {
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+
+    if (enc == NULL || pipeline == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (enc->worker_mode) {
+        return lc_worker_record_bind_compute_pipeline(enc, pipeline);
+    }
+    if (enc->swapchain == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    if (!lc_enc_frame_ready(swapchain)) {
+        return LC_ERROR_UNKNOWN;
+    }
+    if (pipeline->device != swapchain->device ||
+        pipeline->pipeline == VK_NULL_HANDLE) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    flight = lc_enc_flight(swapchain);
+    vkCmdBindPipeline(flight->cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      pipeline->pipeline);
+    enc->bound_compute_pipeline = pipeline;
+    return LC_SUCCESS;
+}
+
+lc_result lc_vulkan_encoder_dispatch(lc_command_encoder *enc, uint32_t x,
+                                     uint32_t y, uint32_t z) {
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+    const lc_device *device;
+
+    if (enc == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (enc->worker_mode) {
+        return lc_worker_record_dispatch(enc, x, y, z);
+    }
+    if (enc->swapchain == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    /* Dispatch outside render passes (Vulkan forbids dispatch
+     * inside a pass instance) but inside an open frame. Pending
+     * legacy clears compose: they realize as a pass at submit
+     * time, after this dispatch, so only an OPEN pass (explicit
+     * or legacy) is rejected. */
+    if (!lc_enc_frame_ready(swapchain) || enc->in_pass ||
+        swapchain->rp_open) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (enc->bound_compute_pipeline == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    device = swapchain->device;
+    if (x == 0 || y == 0 || z == 0) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (x > device->max_workgroup_count[0] ||
+        y > device->max_workgroup_count[1] ||
+        z > device->max_workgroup_count[2]) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    flight = lc_enc_flight(swapchain);
+    vkCmdDispatch(flight->cmd, x, y, z);
+    return LC_SUCCESS;
+}
+
+lc_result lc_vulkan_encoder_push_compute(
+    lc_command_encoder *enc, const lc_compute_pipeline *pipeline,
+    uint32_t visibility, uint32_t offset, uint32_t size,
+    const void *data) {
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+    VkShaderStageFlags stages = 0;
+
+    if (enc == NULL || pipeline == NULL || data == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (enc->worker_mode) {
+        return lc_worker_record_push_compute(enc, pipeline, visibility,
+                                             offset, size, data);
+    }
+    if (enc->swapchain == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    /* Same outside-pass rule as dispatch (push writes the same
+     * command stream; pending clears compose at submit). */
+    if (!lc_enc_frame_ready(swapchain) || enc->in_pass ||
+        swapchain->rp_open) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (enc->bound_compute_pipeline != pipeline ||
+        pipeline->layout == VK_NULL_HANDLE) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if ((visibility & LC_SHADER_VISIBILITY_COMPUTE) != 0) {
+        stages |= VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    if (stages == 0 || size == 0) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    flight = lc_enc_flight(swapchain);
+    vkCmdPushConstants(flight->cmd, pipeline->layout, stages, offset,
+                       size, data);
+    return LC_SUCCESS;
+}
+
+/* Indirect layouts are backend-neutral by contract; assert the
+ * Vulkan equivalence once here (D3D12 maps the same fields). */
+_Static_assert(sizeof(lc_indirect_draw_command) == 16,
+               "lc_indirect_draw_command must be 16 bytes");
+_Static_assert(sizeof(lc_indirect_draw_indexed_command) == 20,
+               "lc_indirect_draw_indexed_command must be 20 bytes");
+_Static_assert(sizeof(lc_indirect_draw_command) ==
+                   sizeof(VkDrawIndirectCommand),
+               "non-indexed indirect layout must match Vulkan");
+_Static_assert(sizeof(lc_indirect_draw_indexed_command) ==
+                   sizeof(VkDrawIndexedIndirectCommand),
+               "indexed indirect layout must match Vulkan");
+
+/* Validate one indirect batch (shared frame/worker rules). */
+lc_result lc_vk_indirect_batch_valid(const lc_buffer *buffer,
+                                     uint64_t offset, uint32_t draw_count,
+                                     uint32_t stride, uint32_t elem_size) {
+    uint64_t need = 0;
+
+    if (buffer == NULL || buffer->vk_buffer == VK_NULL_HANDLE) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if ((buffer->usage & LC_BUFFER_USAGE_INDIRECT) == 0) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (draw_count == 0 || stride < elem_size ||
+        (stride % 4u) != 0u || (offset % 4u) != 0u) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    need = (uint64_t)draw_count * (uint64_t)stride;
+    if (need > buffer->size || offset > buffer->size - need) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    return LC_SUCCESS;
+}
+
+lc_result lc_vulkan_encoder_draw_indirect(lc_command_encoder *enc,
+                                          lc_buffer *buffer, uint64_t offset,
+                                          uint32_t draw_count,
+                                          uint32_t stride) {
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+    lc_result res;
+
+    if (enc == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (enc->worker_mode) {
+        return lc_worker_record_draw_indirect(enc, buffer, offset,
+                                              draw_count, stride);
+    }
+    if (enc->swapchain == NULL || !enc->in_pass) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    if (!lc_enc_frame_ready(swapchain) || enc->bound_pipeline == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    res = lc_vk_indirect_batch_valid(buffer, offset, draw_count, stride,
+                                     (uint32_t)sizeof(
+                                         lc_indirect_draw_command));
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+    flight = lc_enc_flight(swapchain);
+    /* The indirect buffer must already be INDIRECT_READ: barriers
+     * are illegal inside a render pass (passes carry no
+     * self-dependency), so producers transition before the pass
+     * opens (renderer prepare does this). Loud reject otherwise. */
+    {
+        lc_resource_state st;
+
+        lc_device_lock_transfer(swapchain->device);
+        st = buffer->buffer_state;
+        lc_device_unlock_transfer(swapchain->device);
+        if (st != LC_RESOURCE_STATE_INDIRECT_READ) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+    }
+    if (draw_count == 1) {
+        vkCmdDrawIndirect(flight->cmd, buffer->vk_buffer,
+                          (VkDeviceSize)offset, 1, stride);
+        return LC_SUCCESS;
+    }
+    if (swapchain->device->multi_draw_indirect != 0) {
+        vkCmdDrawIndirect(flight->cmd, buffer->vk_buffer,
+                          (VkDeviceSize)offset, draw_count, stride);
+        return LC_SUCCESS;
+    }
+    /* Compatibility loop: N single indirect draws (honest fallback,
+     * counted as such in stats by the caller). */
+    {
+        uint32_t i;
+
+        for (i = 0; i < draw_count; i++) {
+            vkCmdDrawIndirect(flight->cmd, buffer->vk_buffer,
+                              (VkDeviceSize)offset +
+                                  (VkDeviceSize)i * (VkDeviceSize)stride,
+                              1, stride);
+        }
+    }
+    return LC_SUCCESS;
+}
+
+lc_result lc_vulkan_encoder_draw_indexed_indirect(
+    lc_command_encoder *enc, lc_buffer *buffer, uint64_t offset,
+    uint32_t draw_count, uint32_t stride) {
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+    lc_result res;
+
+    if (enc == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (enc->worker_mode) {
+        return lc_worker_record_draw_indexed_indirect(
+            enc, buffer, offset, draw_count, stride);
+    }
+    if (enc->swapchain == NULL || !enc->in_pass) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    if (!lc_enc_frame_ready(swapchain) || enc->bound_pipeline == NULL ||
+        !enc->index_bound || enc->bound_index_buffer == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    res = lc_vk_indirect_batch_valid(
+        buffer, offset, draw_count, stride,
+        (uint32_t)sizeof(lc_indirect_draw_indexed_command));
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+    flight = lc_enc_flight(swapchain);
+    /* Same outside-pass rule: the producer transitions before the
+     * pass opens (barriers are illegal inside passes). */
+    {
+        lc_resource_state st;
+
+        lc_device_lock_transfer(swapchain->device);
+        st = buffer->buffer_state;
+        lc_device_unlock_transfer(swapchain->device);
+        if (st != LC_RESOURCE_STATE_INDIRECT_READ) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+    }
+    if (draw_count == 1 || swapchain->device->multi_draw_indirect != 0) {
+        vkCmdDrawIndexedIndirect(flight->cmd, buffer->vk_buffer,
+                                 (VkDeviceSize)offset, draw_count,
+                                 stride);
+        return LC_SUCCESS;
+    }
+    {
+        uint32_t i;
+
+        for (i = 0; i < draw_count; i++) {
+            vkCmdDrawIndexedIndirect(flight->cmd, buffer->vk_buffer,
+                                     (VkDeviceSize)offset +
+                                         (VkDeviceSize)i *
+                                             (VkDeviceSize)stride,
+                                     1, stride);
+        }
+    }
+    return LC_SUCCESS;
+}
+
+/* Explicit buffer transition into the frame command buffer. Allowed
+ * between passes as well as inside passes; never outside an open
+ * frame. Worker encoders log the intent for execute-time
+ * reconciliation. */
+lc_result lc_vulkan_encoder_transition_buffer(lc_command_encoder *enc,
+                                              lc_buffer *buffer,
+                                              lc_resource_state new_state) {
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+    lc_result res;
+
+    if (enc == NULL || buffer == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (buffer->device == NULL ||
+        buffer->vk_buffer == VK_NULL_HANDLE) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!lc_vk_sync_state_valid_for_buffer(new_state)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (enc->worker_mode) {
+        return lc_worker_record_transition_buffer(enc, buffer,
+                                                  new_state);
+    }
+    if (enc->swapchain == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    if (!lc_enc_frame_ready(swapchain)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    /* Buffer barriers are illegal inside a render pass (passes
+     * carry no self-dependency): reject open passes. Image
+     * transitions allow in-pass use (pre-existing behavior). */
+    if (enc->in_pass || swapchain->rp_open) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (buffer->device != swapchain->device) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    flight = lc_enc_flight(swapchain);
+    lc_device_lock_transfer(swapchain->device);
+    res = lc_vulkan_buffer_transition(flight->cmd, buffer, new_state);
+    lc_device_unlock_transfer(swapchain->device);
+    return res;
+}
+
+lc_result lc_vulkan_encoder_bind_compute_set(
+    lc_command_encoder *enc, const lc_compute_pipeline *pipeline,
+    uint32_t slot, lc_binding_set *set) {
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+
+    if (enc == NULL || pipeline == NULL || set == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (enc->worker_mode) {
+        return lc_worker_record_bind_compute_set(enc, pipeline, slot,
+                                                 set);
+    }
+    if (enc->swapchain == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    if (!lc_enc_frame_ready(swapchain)) {
+        return LC_ERROR_UNKNOWN;
+    }
+    if (slot >= pipeline->layout_count ||
+        set->vk_set == VK_NULL_HANDLE ||
+        pipeline->layout == VK_NULL_HANDLE) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    flight = lc_enc_flight(swapchain);
+    vkCmdBindDescriptorSets(flight->cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            pipeline->layout, slot, 1, &set->vk_set, 0,
+                            NULL);
+    return LC_SUCCESS;
 }

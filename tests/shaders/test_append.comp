@@ -1,0 +1,29 @@
+/* Phase 21 atomic-append fixture: compacts flagged indices.
+ * Models the visible-instance compaction primitive (PART AA). */
+#version 450
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) readonly buffer In {
+    uint flags[];
+} src;
+layout(set = 0, binding = 1) buffer Out {
+    uint indices[];
+} dst;
+layout(set = 0, binding = 2) buffer Counter {
+    uint count;
+    uint capacity;
+} counter;
+layout(push_constant) uniform Params {
+    uint count;
+} params;
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= params.count) {
+        return;
+    }
+    if (src.flags[id] != 0u) {
+        uint slot = atomicAdd(counter.count, 1u);
+        if (slot < counter.capacity) {
+            dst.indices[slot] = id;
+        }
+    }
+}

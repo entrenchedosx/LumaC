@@ -146,7 +146,7 @@ int main(int argc, char **argv) {
     lr_camera camera;
     lc_window_desc window_desc;
     lc_device_desc device_desc = { 0 };
-    lc_swapchain_desc swapchain_desc;
+    lc_swapchain_desc swapchain_desc = { 0 };
     /* Screenshot target (offscreen LDR, capture-capable): renders the
      * same output the swapchain shows, then reads back publicly. */
     lc_image *shot_image = NULL;

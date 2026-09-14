@@ -1,5 +1,9 @@
 # Luma GPU Memory Architecture (Phase 19, PARTs K–AD, AL, 13–18)
 
+Phase 20 retains the block allocator and adds a live-byte cap for async staging,
+completion-keyed reclamation, oldest-upload pressure waits, and a one-request
+oversized policy. Retired bindings return only after native destruction is safe.
+
 One-allocation-per-resource was the bring-up model. The Phase 19
 allocator replaces it with block suballocation behind unchanged
 `lc_buffer` / `lc_image` handles. Users never see heaps, memory
@@ -85,8 +89,11 @@ mechanism — not an accident of packing.
 
 ## Threading (PART AL)
 
-One allocator mutex guards pools; everything else stays
-single-threaded by contract. No giant LumaC lock.
+One allocator mutex guards block selection, suballocation, reclamation, and
+statistics. Resource IDs are atomic and buffer-registry mutations are guarded,
+so independent threads may create/map/destroy buffers on one device. Phase 20's
+four-thread stress performs 800 such cycles and is also run under TSan. There
+is no giant recording lock.
 
 ## Streaming readiness (PARTs 22, AM/AO)
 
@@ -95,4 +102,7 @@ stable IDs across offset reuse, lazily grown classes, range-exact
 transitions, transfer-capable pools, mapped persistent upload
 memory, budget queries. Deliberately NOT built: streaming
 policies, defragmentation moves, render-graph aliasing,
-async copy/compute queues, bindless, D3D12.
+defragmentation moves, render-graph aliasing, bindless, D3D12.
+Compute queues are discovered (Phase 21) but not scheduled.
+Asynchronous transfer-queue uploads are described in
+`ASYNC_TRANSFER_ARCHITECTURE.md`.

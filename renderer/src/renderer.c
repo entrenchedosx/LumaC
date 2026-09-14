@@ -929,6 +929,12 @@ void lr_renderer_destroy(lr_renderer *renderer) {
         renderer->depth_pipelines[i].pipeline = NULL;
     }
     renderer->depth_pipeline_count = 0;
+    for (i = 0; i < renderer->instanced_pipeline_count; i++) {
+        lc_pipeline_destroy(renderer->instanced_pipelines[i].pipeline);
+        renderer->instanced_pipelines[i].pipeline = NULL;
+    }
+    renderer->instanced_pipeline_count = 0;
+    lr_gpu_destroy_shared(renderer);
     lr_post_destroy(renderer);
     lr_renderer_destroy_env_resources(renderer);
     for (i = 0; i < LR_MAX_SHADOWS; i++) {
@@ -1728,17 +1734,36 @@ static lr_result lr_render_items(lr_renderer *renderer,
         return LR_SUCCESS;
     }
     lr_queue_sort(renderer->queue, renderer->queued);
-    for (i = 0; i < renderer->queued; i++) {
-        lr_queued_item *item = &renderer->queue[i];
-        lc_pipeline *pipeline = NULL;
-        lc_result cr;
-        int want_pbr;
+    /* GPU-driven PBR draws first (prepared groups, one indirect
+     * draw each); the CPU loop below then handles only unlit items
+     * (and PBR items when no GPU preparation happened). */
+    {
+        int gpu_pbr_done = 0;
 
-        /* Defensive skips (never dereference dead entries). */
-        if (!lr_mesh_is_live(renderer, item->mesh) ||
-            !lr_material_is_live(renderer, item->material)) {
-            continue;
+        if (renderer->render_mode == LR_RENDER_MODE_GPU_DRIVEN &&
+            renderer->gpu_prepared_frame == renderer->frame_number) {
+            if (lr_gpu_record_draws(renderer, encoder, target,
+                                    &signature) != LR_SUCCESS) {
+                return LR_ERROR_RENDER;
+            }
+            gpu_pbr_done = 1;
         }
+        for (i = 0; i < renderer->queued; i++) {
+            lr_queued_item *item = &renderer->queue[i];
+            lc_pipeline *pipeline = NULL;
+            lc_result cr;
+            int want_pbr;
+
+            /* Defensive skips (never dereference dead entries). */
+            if (!lr_mesh_is_live(renderer, item->mesh) ||
+                !lr_material_is_live(renderer, item->material)) {
+                continue;
+            }
+            want_pbr = (item->material->type ==
+                        LR_MATERIAL_PBR_METALLIC_ROUGHNESS);
+            if (gpu_pbr_done && want_pbr) {
+                continue;
+            }
         /* Main-frustum-culled entries skip main draws but stay
          * queued as shadow casters (prepare already used them). */
         if (!item->main_visible) {
@@ -1878,6 +1903,7 @@ static lr_result lr_render_items(lr_renderer *renderer,
             renderer->stats.unlit_draw_calls++;
         }
     }
+    }
     return LR_SUCCESS;
 }
 
@@ -1972,6 +1998,20 @@ lr_result lr_renderer_render_scene(lr_renderer *renderer,
     if (renderer->active_env != NULL &&
         renderer->active_env->ready) {
         renderer->stats.ibl_enabled = 1;
+    }
+    /* GPU-driven visibility runs before the pass opens (dispatch
+     * is illegal inside a render-pass instance). Legacy
+     * lr_renderer_render callers in GPU mode must call
+     * lr_renderer_prepare_gpu themselves before opening passes. */
+    if (renderer->render_mode == LR_RENDER_MODE_GPU_DRIVEN) {
+        uint64_t gpu0 = lr_perf_now();
+
+        res = lr_gpu_prepare(renderer, encoder);
+        renderer->gpu_stats.cpu_prepare_ms = lr_perf_to_ms(
+            lr_perf_now() - gpu0, renderer->perf_freq);
+        if (res != LR_SUCCESS) {
+            return res;
+        }
     }
     memset(&catt, 0, sizeof(catt));
     catt.view = renderer->hdr_view;

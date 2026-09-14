@@ -370,6 +370,85 @@ typedef struct lr_render_stats {
     uint32_t environment_rebuilds; /* env (re)builds this frame */
 } lr_render_stats;
 
+/* Render mode (Phase 21): CPU per-draw submission (default,
+ * historical behavior) or GPU-driven instanced submission
+ * (frustum culling + indirect draws on the GPU, PBR-compatible).
+ * Shadows stay on the CPU path in both modes. */
+typedef enum lr_render_mode {
+    LR_RENDER_MODE_CPU = 0,
+    LR_RENDER_MODE_GPU_DRIVEN = 1
+} lr_render_mode;
+
+/* One GPU instance (Phase 21, PART U): explicit 96-byte layout
+ * shared with the culling and instanced shaders (std430: mat4 +
+ * vec4 + 4x uint; no host pointers). mesh_index is reserved for
+ * future multi-mesh groups (0 today: one mesh per group). */
+typedef struct lr_gpu_instance {
+    float model[16];
+    float bounds[4]; /* local center.xyz, radius */
+    uint32_t mesh_index;
+    uint32_t object_id;
+    uint32_t pad[2];
+} lr_gpu_instance;
+
+/* GPU-driven frame diagnostics (Phase 21, PART 35). Counters are
+ * per-frame except where noted. instances_visible/culled fill only
+ * via lr_renderer_update_gpu_visibility_stats (a documented,
+ * test-only GPU download stall); production frames leave the
+ * previous values in place and never stall. */
+typedef struct lr_gpu_driven_stats {
+    uint64_t instances_submitted;
+    uint64_t instances_visible;
+    uint64_t instances_culled;
+    uint64_t compute_dispatches;
+    uint64_t indirect_draw_calls;
+    uint64_t indirect_commands;
+    uint64_t gpu_driven_batches;   /* groups drawn */
+    uint64_t descriptor_sets_alive;
+    uint64_t descriptor_updates;
+    uint64_t counter_overflows;    /* groups that exceeded capacity */
+    double cpu_prepare_ms;         /* grouping + upload + record time */
+} lr_gpu_driven_stats;
+
+/**
+ * Select the render submission mode (default CPU). GPU-driven mode
+ * requires compute + indirect support; otherwise INVALID_ARGUMENT
+ * and the mode stays unchanged (CPU fallback always usable).
+ */
+lr_result lr_renderer_set_render_mode(lr_renderer *renderer,
+                                      lr_render_mode mode);
+
+/** Current render mode (CPU when NULL). */
+lr_render_mode lr_renderer_get_render_mode(const lr_renderer *renderer);
+
+/**
+ * Prepare GPU-driven visibility for the current frame (Phase 21):
+ * group queued PBR items, upload instance data, run culling +
+ * finalize dispatches. Must be called on an open frame with NO
+ * open pass (dispatch is illegal inside a pass);
+ * lr_renderer_render_scene calls it automatically. Legacy
+ * lr_renderer_render callers in GPU mode must call it after
+ * lr_renderer_begin and before opening their pass.
+ */
+lr_result lr_renderer_prepare_gpu(lr_renderer *renderer,
+                                  lc_command_encoder *encoder);
+
+/**
+ * Copy out GPU-driven diagnostics (zeros for NULL renderer/out).
+ */
+void lr_renderer_get_gpu_driven_stats(
+    const lr_renderer *renderer,
+    lr_gpu_driven_stats *out_stats);
+
+/**
+ * TEST-ONLY: download per-group visible counters and fill
+ * instances_visible/culled (+ overflow detection with a loud
+ * Debug report). Stalls the GPU by design; never call in
+ * production frames.
+ */
+lr_result lr_renderer_update_gpu_visibility_stats(
+    lr_renderer *renderer);
+
 /* ------------------------------------------------------------------
  * Lights (Phase 15: submitted per-frame data, NOT scene entities).
  *

@@ -160,6 +160,17 @@ lc_result lc_swapchain_create(lc_device *device, lc_surface *surface,
     swapchain->surface = surface;
     swapchain->vsync = (desc->vsync != 0) ? 1 : 0;
     swapchain->preferred_image_count = desc->image_count;
+    /* Flight slots (PART AE): 0 selects the default; clamp the rest
+     * (never reject: uninitialized-descriptor callers must still get
+     * a working swapchain). */
+    if (desc->max_frames_in_flight == 0 ||
+        desc->max_frames_in_flight > 8) {
+        swapchain->max_flights = (desc->max_frames_in_flight == 0)
+                                     ? LC_MAX_FRAMES_IN_FLIGHT
+                                     : 8;
+    } else {
+        swapchain->max_flights = desc->max_frames_in_flight;
+    }
 
     /* Fresh build: transactional helper either fills the struct or
      * leaves it empty ( VK_NULL_HANDLE / NULL / 0 ). */

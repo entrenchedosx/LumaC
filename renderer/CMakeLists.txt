@@ -44,6 +44,9 @@ file(COPY
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky.frag.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tonemap.frag.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/post_tint.frag.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr_instanced.vert.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/cull.comp.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/finalize.comp.spv"
     DESTINATION "${LR_SPV_DIR}")
 find_program(LR_GLSLC glslc HINTS "$ENV{VULKAN_SDK}/Bin")
 if(LR_GLSLC)
@@ -63,6 +66,9 @@ if(LR_GLSLC)
             "${LR_SPV_DIR}/sky.frag.spv"
             "${LR_SPV_DIR}/tonemap.frag.spv"
             "${LR_SPV_DIR}/post_tint.frag.spv"
+            "${LR_SPV_DIR}/pbr_instanced.vert.spv"
+            "${LR_SPV_DIR}/cull.comp.spv"
+            "${LR_SPV_DIR}/finalize.comp.spv"
         COMMAND "${LR_GLSLC}" -fshader-stage=vert -O
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/unlit.vert"
             -o "${LR_SPV_DIR}/unlit.vert.spv"
@@ -105,6 +111,15 @@ if(LR_GLSLC)
         COMMAND "${LR_GLSLC}" -fshader-stage=frag -O
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/post_tint.frag"
             -o "${LR_SPV_DIR}/post_tint.frag.spv"
+        COMMAND "${LR_GLSLC}" -fshader-stage=vert -O
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr_instanced.vert"
+            -o "${LR_SPV_DIR}/pbr_instanced.vert.spv"
+        COMMAND "${LR_GLSLC}" -fshader-stage=compute -O
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/cull.comp"
+            -o "${LR_SPV_DIR}/cull.comp.spv"
+        COMMAND "${LR_GLSLC}" -fshader-stage=compute -O
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/finalize.comp"
+            -o "${LR_SPV_DIR}/finalize.comp.spv"
         DEPENDS
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/unlit.vert"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/unlit.frag"
@@ -120,6 +135,9 @@ if(LR_GLSLC)
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky.frag"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tonemap.frag"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/post_tint.frag"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr_instanced.vert"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/cull.comp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/finalize.comp"
         COMMENT "Compiling Luma Renderer shaders")
     add_custom_target(luma_renderer_shaders DEPENDS
         "${LR_SPV_DIR}/unlit.vert.spv"
@@ -135,7 +153,10 @@ if(LR_GLSLC)
         "${LR_SPV_DIR}/sky.vert.spv"
         "${LR_SPV_DIR}/sky.frag.spv"
         "${LR_SPV_DIR}/tonemap.frag.spv"
-        "${LR_SPV_DIR}/post_tint.frag.spv")
+        "${LR_SPV_DIR}/post_tint.frag.spv"
+        "${LR_SPV_DIR}/pbr_instanced.vert.spv"
+        "${LR_SPV_DIR}/cull.comp.spv"
+        "${LR_SPV_DIR}/finalize.comp.spv")
 endif()
 
 # Embedded SPIR-V bytes (portable hex dump, no host tools needed).
@@ -251,6 +272,30 @@ add_custom_command(
         "-DSYM=lr_post_tint_frag_spv"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hex_to_c.cmake"
     DEPENDS "${LR_SPV_DIR}/post_tint.frag.spv")
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/lr_pbr_instanced_vert_spv.c"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DIN=${LR_SPV_DIR}/pbr_instanced.vert.spv"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/lr_pbr_instanced_vert_spv.c"
+        "-DSYM=lr_pbr_instanced_vert_spv"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hex_to_c.cmake"
+    DEPENDS "${LR_SPV_DIR}/pbr_instanced.vert.spv")
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/lr_cull_comp_spv.c"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DIN=${LR_SPV_DIR}/cull.comp.spv"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/lr_cull_comp_spv.c"
+        "-DSYM=lr_cull_comp_spv"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hex_to_c.cmake"
+    DEPENDS "${LR_SPV_DIR}/cull.comp.spv")
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/lr_finalize_comp_spv.c"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DIN=${LR_SPV_DIR}/finalize.comp.spv"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/lr_finalize_comp_spv.c"
+        "-DSYM=lr_finalize_comp_spv"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hex_to_c.cmake"
+    DEPENDS "${LR_SPV_DIR}/finalize.comp.spv")
 
 add_library(luma_renderer STATIC
     src/renderer.c
@@ -261,6 +306,7 @@ add_library(luma_renderer STATIC
     src/draw_list.c
     src/environment.c
     src/post.c
+    src/gpu_driven.c
     "${CMAKE_CURRENT_BINARY_DIR}/lr_unlit_vert_spv.c"
     "${CMAKE_CURRENT_BINARY_DIR}/lr_unlit_frag_spv.c"
     "${CMAKE_CURRENT_BINARY_DIR}/lr_pbr_vert_spv.c"
@@ -275,6 +321,9 @@ add_library(luma_renderer STATIC
     "${CMAKE_CURRENT_BINARY_DIR}/lr_sky_frag_spv.c"
     "${CMAKE_CURRENT_BINARY_DIR}/lr_tonemap_frag_spv.c"
     "${CMAKE_CURRENT_BINARY_DIR}/lr_post_tint_frag_spv.c"
+    "${CMAKE_CURRENT_BINARY_DIR}/lr_pbr_instanced_vert_spv.c"
+    "${CMAKE_CURRENT_BINARY_DIR}/lr_cull_comp_spv.c"
+    "${CMAKE_CURRENT_BINARY_DIR}/lr_finalize_comp_spv.c"
 )
 if(TARGET luma_renderer_shaders)
     add_dependencies(luma_renderer luma_renderer_shaders)
@@ -406,12 +455,28 @@ if(UNIX AND NOT APPLE)
 endif()
 add_test(NAME test_ibl_vulkan COMMAND test_ibl_vulkan)
 
+# GPU-driven rendering (Phase 21): culling, compaction, indirect
+# draws, CPU/GPU equivalence, edge cases, multi-draw.
+add_executable(test_gpu_driven_vulkan tests/test_gpu_driven_vulkan.c)
+target_link_libraries(test_gpu_driven_vulkan PRIVATE luma_renderer lumac Vulkan::Vulkan)
+target_include_directories(test_gpu_driven_vulkan PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(TARGET luma_renderer_shaders)
+    add_dependencies(test_gpu_driven_vulkan luma_renderer_shaders)
+endif()
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_gpu_driven_vulkan PRIVATE m)
+endif()
+add_test(NAME test_gpu_driven_vulkan COMMAND test_gpu_driven_vulkan)
+
 # Shared Windows builds place lumac.dll beside the top-level tests;
 # renderer tests live one directory deeper, so extend their DLL search
 # path explicitly (no-op for static builds).
 if(WIN32)
     set_tests_properties(test_renderer test_renderer_vulkan test_pbr
         test_pbr_vulkan test_shadow test_shadow_vulkan test_ibl
-        test_ibl_vulkan PROPERTIES
+        test_ibl_vulkan test_gpu_driven_vulkan PROPERTIES
         ENVIRONMENT "PATH=$<TARGET_FILE_DIR:lumac>\;$ENV{PATH}")
 endif()

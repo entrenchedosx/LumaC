@@ -143,7 +143,7 @@ static int make_surface(lc_device *device, lc_window *window,
 /* 0 = ready, 1 = environmental SKIP, -1 = hard failure */
 static int make_swapchain(lc_device *device, lc_surface *surface,
                           lc_swapchain **out) {
-    lc_swapchain_desc desc;
+    lc_swapchain_desc desc = { 0 };
 
     desc.width = 800;
     desc.height = 600;
@@ -505,7 +505,7 @@ int main(void) {
                 lc_window *other_win = NULL;
                 lc_surface *other_surf = NULL;
                 lc_swapchain *other_sc = NULL;
-                lc_swapchain_desc sdesc;
+                lc_swapchain_desc sdesc = { 0 };
                 lc_device_desc ddesc = { 0 };
 
                 ddesc.backend = LC_BACKEND_VULKAN;

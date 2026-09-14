@@ -324,12 +324,27 @@ lc_result lc_vulkan_image_create(lc_image *image, lc_device *device,
 
     /* Per-subresource semantic states, all UNDEFINED (calloc zeroes,
      * and UNDEFINED is 0 by design). Sized mips x layers so mixed
-     * states stay representable and truthful. */
+     * states stay representable and truthful. Owners/epochs start
+     * zeroed (owners fixed up below). */
     image->states = (lc_resource_state *)calloc(
         (size_t)image->mip_levels * (size_t)image->array_layers,
         sizeof(lc_resource_state));
-    if (image->states == NULL) {
+    image->owners = (uint32_t *)calloc(
+        (size_t)image->mip_levels * (size_t)image->array_layers,
+        sizeof(uint32_t));
+    image->epochs = (uint64_t *)calloc(
+        (size_t)image->mip_levels * (size_t)image->array_layers,
+        sizeof(uint64_t));
+    if (image->states == NULL || image->owners == NULL ||
+        image->epochs == NULL) {
         lc_vk_mem_binding doomed;
+
+        free(image->states);
+        image->states = NULL;
+        free(image->owners);
+        image->owners = NULL;
+        free(image->epochs);
+        image->epochs = NULL;
 
         vkDestroyImageView(device->device, image->default_view, NULL);
         image->default_view = VK_NULL_HANDLE;
@@ -346,6 +361,19 @@ lc_result lc_vulkan_image_create(lc_image *image, lc_device *device,
         vkDestroyImage(device->device, image->vk_image, NULL);
         image->vk_image = VK_NULL_HANDLE;
         return LC_ERROR_OUT_OF_MEMORY;
+    }
+    /* Owners start at the graphics family (calloc would zero, which
+     * need not equal any family). */
+    {
+        uint32_t m;
+        uint32_t l;
+
+        for (l = 0; l < image->array_layers; l++) {
+            for (m = 0; m < image->mip_levels; m++) {
+                image->owners[(size_t)l * image->mip_levels + m] =
+                    device->graphics_queue_family;
+            }
+        }
     }
     return LC_SUCCESS;
 }
@@ -364,6 +392,14 @@ void lc_vulkan_image_destroy(lc_image *image) {
     if (image->states != NULL) {
         free(image->states);
         image->states = NULL;
+    }
+    if (image->owners != NULL) {
+        free(image->owners);
+        image->owners = NULL;
+    }
+    if (image->epochs != NULL) {
+        free(image->epochs);
+        image->epochs = NULL;
     }
     if (device_handle == VK_NULL_HANDLE) {
         image->default_view = VK_NULL_HANDLE;
@@ -735,7 +771,7 @@ lc_result lc_vulkan_image_generate_mipmaps(lc_image *image) {
 
             /* Source level becomes readable... */
             res = lc_vk_sync_record_span(
-                cmd, image, i - 1, 1, image->array_layers,
+                cmd, image, i - 1, 1, 0, image->array_layers,
                 LC_RESOURCE_STATE_TRANSFER_DST,
                 LC_RESOURCE_STATE_TRANSFER_SRC);
             if (res != LC_SUCCESS) {
@@ -770,7 +806,7 @@ lc_result lc_vulkan_image_generate_mipmaps(lc_image *image) {
             /* ...then sampled-readable; it is never a blit source
              * again, so no later transition touches it. */
             res = lc_vk_sync_record_span(
-                cmd, image, i - 1, 1, image->array_layers,
+                cmd, image, i - 1, 1, 0, image->array_layers,
                 LC_RESOURCE_STATE_TRANSFER_SRC,
                 LC_RESOURCE_STATE_SHADER_READ);
             if (res != LC_SUCCESS) {
@@ -780,7 +816,7 @@ lc_result lc_vulkan_image_generate_mipmaps(lc_image *image) {
         if (res == LC_SUCCESS) {
             /* Final level never sourced a blit: straight to sampled. */
             res = lc_vk_sync_record_span(
-                cmd, image, image->mip_levels - 1, 1,
+                cmd, image, image->mip_levels - 1, 1, 0,
                 image->array_layers, LC_RESOURCE_STATE_TRANSFER_DST,
                 LC_RESOURCE_STATE_SHADER_READ);
         }

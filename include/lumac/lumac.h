@@ -70,7 +70,10 @@ typedef enum lc_result {
     /* Recoverable capability gap (e.g. format lacks linear blit
      * support, anisotropy unavailable): valid request, valid device,
      * unsupported combination. Not fatal. */
-    LC_ERROR_UNSUPPORTED = 22
+    LC_ERROR_UNSUPPORTED = 22,
+    /* Bounded wait expired (signal/retirement waits with an explicit
+     * timeout only; never from infinite waits). */
+    LC_ERROR_TIMEOUT = 23
 } lc_result;
 
 /* -------------------------------------------------------------------------
@@ -195,6 +198,18 @@ typedef struct lc_device_desc {
     int enable_validation;
     const char *pipeline_cache_path;
     int disable_pipeline_cache;
+    /* Async staging cap in bytes (PART V; 0 selects the 256 MiB
+     * default). Schedulers wait for the oldest completion rather
+     * than exceed it, so staging stays bounded under load. */
+    uint64_t upload_staging_cap;
+    /* Test-only capability forcing (Phase 22, PARTs W-Y):
+     * nonzero forces the named fallback even on capable hardware
+     * so the binary-fallback, graphics-transfer, and
+     * graphics-compute paths get exercised everywhere. Production
+     * code leaves all three zero. */
+    int force_binary_fallback;  /* disable timeline semaphores */
+    int force_graphics_transfer;/* alias transfer to graphics */
+    int force_graphics_compute; /* alias compute to graphics */
 } lc_device_desc;
 
 /**
@@ -241,18 +256,20 @@ LC_API void lc_device_wait_idle(lc_device *device);
 LC_API const char *lc_device_get_name(const lc_device *device);
 
 /* -------------------------------------------------------------------------
- * Monotonic clock (Phase 18: profiling foundation).
+ * Monotonic clock (Phase 18: profiling foundation; Phase 22
+ * nanosecond contract).
  *
- * Backend-neutral high-resolution monotonic ticks for CPU-side timing
- * (renderer frame profiles, pipeline-creation timing). Never wall
- * time; never Vulkan timestamps (GPU timing is deferred debt).
- * Threading: callable from any thread.
+ * Backend-neutral monotonic time for CPU-side timing (renderer
+ * frame profiles, pipeline-creation timing) and nanosecond
+ * timeout APIs. Never wall time; never Vulkan timestamps (GPU
+ * timing is deferred debt). Threading: callable from any thread.
  * ------------------------------------------------------------------------- */
 
-/** Ticks per second (> 0 always; fallback scale when unavailable). */
+/** Nanoseconds per second (1,000,000,000 on every platform). */
 LC_API uint64_t lc_clock_frequency(void);
 
-/** Current monotonic tick count (arbitrary epoch; differences only). */
+/** Current monotonic time in nanoseconds (arbitrary epoch;
+ *  differences only). */
 LC_API uint64_t lc_clock_now(void);
 
 /**
@@ -342,12 +359,17 @@ typedef struct lc_swapchain lc_swapchain;
 
 /* Swapchain creation parameters. image_count == 0 selects an automatic
  * count derived from the surface capabilities. vsync != 0 prefers the
- * guaranteed FIFO present mode; vsync == 0 prefers low-latency modes. */
+ * guaranteed FIFO present mode; vsync == 0 prefers low-latency modes.
+ * max_frames_in_flight == 0 selects the default (2); otherwise 1..8
+ * flight slots are allocated (clamped). It is independent of the
+ * swapchain image count (more slots than images simply wait longer
+ * on image ownership). */
 typedef struct lc_swapchain_desc {
     uint32_t width;
     uint32_t height;
     uint32_t image_count;
     int vsync;
+    uint32_t max_frames_in_flight;
 } lc_swapchain_desc;
 
 /**
@@ -505,7 +527,8 @@ typedef struct lc_shader lc_shader;
 /* Backend-neutral shader stages. Only stages actually implemented. */
 typedef enum lc_shader_stage {
     LC_SHADER_STAGE_VERTEX = 0,
-    LC_SHADER_STAGE_FRAGMENT = 1
+    LC_SHADER_STAGE_FRAGMENT = 1,
+    LC_SHADER_STAGE_COMPUTE = 2
 } lc_shader_stage;
 
 /* Shader creation parameters. `code` points to SPIR-V words
@@ -916,7 +939,8 @@ typedef enum lc_buffer_usage {
     LC_BUFFER_USAGE_UNIFORM      = 1 << 2,
     LC_BUFFER_USAGE_STORAGE      = 1 << 3,
     LC_BUFFER_USAGE_TRANSFER_SRC = 1 << 4,
-    LC_BUFFER_USAGE_TRANSFER_DST = 1 << 5
+    LC_BUFFER_USAGE_TRANSFER_DST = 1 << 5,
+    LC_BUFFER_USAGE_INDIRECT     = 1 << 6
 } lc_buffer_usage;
 
 /* Memory placement model. No backend memory flags are exposed. */
@@ -1005,6 +1029,29 @@ LC_API lc_result lc_buffer_write(
     lc_buffer *buffer,
     uint64_t offset,
     const void *data,
+    uint64_t size
+);
+
+/**
+ * Read bytes back from a buffer with bounds and overflow checking
+ * (Phase 21, test/debug path — never in steady production frames:
+ * GPU-only buffers drain prior device work first). CPU-visible
+ * buffers invalidate + memcpy; GPU-only buffers copy through
+ * staging.
+ *
+ * @param buffer Live buffer.
+ * @param offset Byte offset; must be within the buffer.
+ * @param dst Destination bytes (may be NULL only when size == 0).
+ * @param size Byte count; offset + size must fit the buffer.
+ * @return LC_SUCCESS, LC_ERROR_INVALID_ARGUMENT (NULL/dead buffer,
+ *         out-of-range read, NULL dst with nonzero size),
+ *         LC_ERROR_OUT_OF_MEMORY (staging allocation),
+ *         LC_ERROR_UNKNOWN (transfer failure).
+ */
+LC_API lc_result lc_buffer_read(
+    lc_buffer *buffer,
+    uint64_t offset,
+    void *dst,
     uint64_t size
 );
 
@@ -2040,16 +2087,18 @@ typedef struct lc_image_subresource_range {
  * buffer (no immediate submit). The old state comes from LumaC
  * tracking — callers name only the destination (PART F). Updates
  * tracking immediately (recorded-not-executed discipline, same as
- * render-pass finals).
+ * render-pass finals). Allowed between passes only: never inside
+ * an open pass (explicit barriers are illegal in render-pass
+ * instances) and never outside an open frame.
  *
  * Suitable states for images: UNDEFINED, COLOR_ATTACHMENT_WRITE,
  * DEPTH_ATTACHMENT_WRITE, SHADER_READ, SHADER_READ_WRITE,
  * TRANSFER_SRC, TRANSFER_DST. Buffer-only states and PRESENT are
  * rejected for images.
- *
  * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
  *         LC_ERROR_INVALID_ARGUMENT (NULL handles, dead objects, no
- *         open frame, bad/overflowing range, bad state for images).
+ *         open frame, open pass, bad/overflowing range, bad state
+ *         for images).
  */
 LC_API lc_result lc_encoder_transition_image(
     lc_command_encoder *encoder,
@@ -2144,6 +2193,538 @@ typedef struct lc_memory_budget {
 LC_API void lc_device_get_memory_budget(
     const lc_device *device,
     lc_memory_budget *out_budget);
+
+/* -------------------------------------------------------------------------
+ * Multithreaded recording, queues, async transfer (Phase 20).
+ *
+ * Thread-safety contract (binding, PART H):
+ * - independent buffer create/map/destroy calls are thread-safe (the shared
+ *   allocator, stable-ID issuer, retirement queue, and buffer registry are
+ *   synchronized); other resource lifecycle APIs retain their section's
+ *   main-thread contract;
+ * - immutable queries/stats are thread-safe while the queried handle's
+ *   lifetime is externally stable;
+ * - command recording on DIFFERENT worker encoders: thread-safe;
+ * - the SAME encoder from two threads: NOT thread-safe;
+ * - destroying an object referenced by an unexecuted command list:
+ *   safe (list fails loudly at execute; physical retirement is
+ *   deferred until GPU completion);
+ * - immediate (synchronous) transfer/upload/readback calls serialize
+ *   internally and are thread-safe; overlapping same-image access
+ *   across threads without ordering is an application bug, as in
+ *   raw Vulkan.
+ * ------------------------------------------------------------------------- */
+
+/* Backend-neutral queue types (no family indices publicly; a future
+ * D3D12 backend maps these onto direct/copy/compute queues).
+ * COMPUTE is exposed for forward compatibility; async compute
+ * scheduling itself is deferred. */
+typedef enum lc_queue_type {
+    LC_QUEUE_GRAPHICS = 0,
+    LC_QUEUE_TRANSFER = 1,
+    LC_QUEUE_COMPUTE = 2
+} lc_queue_type;
+
+/* Backend-neutral queue diagnostics (editor/MCP-friendly). */
+typedef struct lc_queue_info {
+    int available;            /* queue type usable on this device */
+    int dedicated;            /* nonzero: own family (transfer only) */
+    uint32_t count;           /* retrieved queues of this type */
+    int async_supported;      /* nonzero: overlaps graphics work */
+} lc_queue_info;
+
+/**
+ * Copy out queue diagnostics (zeros for NULL device or unknown
+ * type; out may be NULL for a no-op).
+ */
+LC_API void lc_device_get_queue_info(
+    const lc_device *device,
+    lc_queue_type type,
+    lc_queue_info *out_info);
+
+/* -------------------------------------------------------------------------
+ * GPU completion tokens (Phase 20, PART Q).
+ *
+ * Value-based (timeline-style) completion: submissions produce
+ * monotonically increasing values; polling/waiting observes them.
+ * Maps to Vulkan timeline semaphores where supported (preferred)
+ * and to D3D12 fences later; binary-fence fallback where timeline
+ * semaphores are unavailable. A zero value means "nothing" (always
+ * complete).
+ * ------------------------------------------------------------------------- */
+typedef struct lc_gpu_signal {
+    uint64_t value;
+} lc_gpu_signal;
+
+/* Infinite wait (lc_gpu_signal_wait only). */
+#define LC_TIMEOUT_INFINITE (~(uint64_t)0)
+
+/** Nonzero when the signal has completed (1 for zero values and
+ *  NULL device handling: NULL device reports not-ready... actually
+ *  zero signals are complete; NULL device returns 0). */
+LC_API int lc_gpu_signal_is_ready(lc_device *device,
+                                  lc_gpu_signal signal);
+
+/**
+ * Block until the signal completes or timeout_ns elapses.
+ *
+ * @return LC_SUCCESS, LC_ERROR_INVALID_ARGUMENT (NULL device),
+ *         LC_ERROR_TIMEOUT (bounded wait expired).
+ */
+LC_API lc_result lc_gpu_signal_wait(lc_device *device,
+                                    lc_gpu_signal signal,
+                                    uint64_t timeout_ns);
+
+/* -------------------------------------------------------------------------
+ * Worker recording contexts + command lists (Phase 20, PARTs A–E).
+ *
+ * A worker encoder records on exactly one thread at a time;
+ * different encoders record concurrently with no global recording
+ * mutex (one command pool per encoder, PART C; buffers recycled
+ * across begins, PART D). Lists are finished secondary-style work
+ * executed deterministically inside a frame encoder's open pass
+ * (batch submission, PART 28). Only graphics-queue recording
+ * exists in Phase 20 (other queue types: UNSUPPORTED, reserved).
+ *
+ * Recordable into worker lists: pipeline/set/vertex/index binds,
+ * push constants, draws, image transitions. Render passes are
+ * opened by the executing primary, never inside a list.
+ * ------------------------------------------------------------------------- */
+
+/* Opaque finished command list. Never dereference. */
+typedef struct lc_command_list lc_command_list;
+
+/* Worker encoder creation parameters. LC_QUEUE_GRAPHICS records
+ * graphics work; LC_QUEUE_COMPUTE records compute work on the
+ * baseline graphics-queue path (Phase 21). */
+typedef struct lc_command_encoder_desc {
+    lc_queue_type queue;
+} lc_command_encoder_desc;
+
+/**
+ * Create a worker recording context on a device. Requires lc_init()
+ * first and a live device. Independent command pool; safe to record
+ * on its own thread while other encoders record elsewhere.
+ *
+ * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
+ *         LC_ERROR_INVALID_ARGUMENT (NULL device/desc/out, dead
+ *         device, non-graphics queue), LC_ERROR_OUT_OF_MEMORY.
+ */
+LC_API lc_result lc_command_encoder_create(
+    lc_device *device,
+    const lc_command_encoder_desc *desc,
+    lc_command_encoder **out_encoder);
+
+/**
+ * Destroy a worker encoder (not frame-borrowed ones: those die with
+ * their swapchain). Safe with NULL. Unexecuted lists created from
+ * it must be destroyed first (INVALID_ARGUMENT otherwise... no:
+ * lists hold their own pool references; destroying the encoder
+ * first invalidates unexecuted lists, and executing them afterwards
+ * fails safely — documented, tested).
+ */
+LC_API void lc_command_encoder_destroy(lc_command_encoder *encoder);
+
+/**
+ * Begin recording a list against an offscreen target + pass shape
+ * (provides render-pass/framebuffer inheritance for the secondary
+ * buffer; no pass opens on the worker). The target must stay alive
+ * through execute. Exactly one open list per encoder at a time.
+ * Width/height must equal the target extent; views must be the
+ * target's attachments in order (same rules as
+ * lc_encoder_begin_render_pass). Swapchain targets are rejected
+ * (presentation stays primary-only in Phase 20).
+ */
+LC_API lc_result lc_command_list_begin(
+    lc_command_encoder *encoder,
+    lc_render_target *target,
+    const lc_render_pass_desc *desc);
+
+/**
+ * Finish recording; the encoder becomes reusable for the next list
+ * (command buffer recycled). The list borrows nothing: referenced
+ * handles are logged by identity for execute-time validation.
+ */
+LC_API lc_result lc_command_encoder_finish(
+    lc_command_encoder *encoder,
+    lc_command_list **out_list);
+
+/**
+ * Destroy a finished list, recycling its command buffer. Safe with
+ * NULL. Executing afterwards fails safely (never crashes).
+ */
+LC_API void lc_command_list_destroy(lc_command_list *list);
+
+/**
+ * Execute finished lists, in order, inside the primary's currently
+ * open explicit pass. Signatures must be mutually compatible (same
+ * target family: validated structurally; mismatch is
+ * PIPELINE_INCOMPATIBLE... INVALID_ARGUMENT). State intents
+ * reconcile in execution order; conflicts fail loudly with
+ * INVALID_ARGUMENT and record nothing further. Submitting the
+ * frame afterwards yields ONE completion covering all lists.
+ */
+LC_API lc_result lc_encoder_execute_lists(
+    lc_command_encoder *primary,
+    lc_command_list *const *lists,
+    uint32_t list_count);
+
+/**
+ * Query the frame-flight slot a frame-borrowed encoder records
+ * into (Phase 21, per-flight GPU-driven resources). out_index
+ * receives the current slot, out_count the slot count (either may
+ * be NULL). Worker encoders are rejected (INVALID_ARGUMENT); the
+ * slot is stable between lc_begin_frame and lc_end_frame on the
+ * owning swapchain.
+ */
+LC_API lc_result lc_encoder_get_flight_slot(
+    lc_command_encoder *encoder,
+    uint32_t *out_index,
+    uint32_t *out_count);
+
+/* -------------------------------------------------------------------------
+ * Async transfer: uploads, readbacks, staging, retirement
+ * (Phase 20, PARTs S–Z, AA–AE).
+ *
+ * Scheduling never blocks on the GPU (bounded only by the staging
+ * cap, which waits for the oldest completion). Source data is
+ * copied into Luma-owned staging BEFORE return, so caller buffers
+ * may be reused immediately (PART S lifetime rule). Staging is
+ * reclaimed only after GPU completion (PART U); pressure waits
+ * for the oldest in-flight request (PART V).
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Schedule an async buffer upload (device + offset validated like
+ * lc_buffer_write; destination may be any placement). Returns a
+ * signal for polling/waiting. Never waits on the GPU.
+ *
+ * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
+ *         LC_ERROR_INVALID_ARGUMENT (NULL device/buffer, NULL data
+ *         with nonzero size, dead objects, out-of-range write),
+ *         LC_ERROR_OUT_OF_MEMORY (staging).
+ */
+LC_API lc_result lc_upload_buffer_async(
+    lc_device *device,
+    lc_buffer *dst,
+    uint64_t dst_offset,
+    const void *data,
+    uint64_t size,
+    lc_gpu_signal *out_signal);
+
+/* Async image upload region (mirrors lc_image_upload_desc). */
+typedef struct lc_image_upload_async_desc {
+    uint32_t mip_level;
+    uint32_t array_layer;
+    uint32_t width;
+    uint32_t height;
+    uint32_t depth;
+    const void *data;
+    uint64_t data_size;
+} lc_image_upload_async_desc;
+
+/**
+ * Schedule an async image upload (validated like lc_image_write).
+ * Returns a signal for polling/waiting. Never waits on the GPU.
+ *
+ * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
+ *         LC_ERROR_INVALID_ARGUMENT (bad handles/range/size/usage),
+ *         LC_ERROR_OUT_OF_MEMORY (staging).
+ */
+LC_API lc_result lc_upload_image_async(
+    lc_device *device,
+    lc_image *dst,
+    const lc_image_upload_async_desc *upload,
+    lc_gpu_signal *out_signal);
+
+/* Opaque async readback request. Never dereference. */
+typedef struct lc_readback_request lc_readback_request;
+
+/**
+ * Schedule an async image readback (validated like the sync
+ * query). Layout semantics match the synchronous call (tightly
+ * packed deterministic rows). Never waits on the GPU.
+ *
+ * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
+ *         LC_ERROR_INVALID_ARGUMENT, LC_ERROR_OUT_OF_MEMORY.
+ */
+LC_API lc_result lc_image_readback_async(
+    lc_device *device,
+    lc_image *image,
+    const lc_image_readback_desc *desc,
+    lc_readback_request **out_request);
+
+/** Nonzero when the request's GPU copy has completed. */
+LC_API int lc_readback_request_is_ready(
+    lc_readback_request *request);
+
+/**
+ * Block until completion or timeout_ns elapses.
+ *
+ * @return LC_SUCCESS, LC_ERROR_INVALID_ARGUMENT (NULL request),
+ *         LC_ERROR_TIMEOUT (bounded wait expired).
+ */
+LC_API lc_result lc_readback_request_wait(
+    lc_readback_request *request,
+    uint64_t timeout_ns);
+
+/**
+ * Copy the result into tightly packed caller memory (dst rules
+ * mirror lc_image_readback, including sizing queries). Requires * completion (INVALID_ARGUMENT otherwise... no: waits are the
+ * caller's job — mapping an incomplete request returns
+ * LC_ERROR_INVALID_ARGUMENT; document, test).
+ */
+LC_API lc_result lc_readback_request_map(
+    lc_readback_request *request,
+    void *dst,
+    size_t dst_size,
+    size_t *out_required_size);
+
+/**
+ * Destroy a request, releasing staging (waits for its own
+ * completion first — never frees in-flight GPU memory). Safe with
+ * NULL.
+ */
+LC_API void lc_readback_request_destroy(lc_readback_request *request);
+
+/* Transfer + retirement diagnostics (editor/streaming profilers,
+ * MCP futures). Counters are lifetime-monotonic except *_used,
+ * *_in_flight, and *_pending (point-in-time). */
+typedef struct lc_transfer_stats {
+    uint64_t graphics_submissions;
+    uint64_t transfer_submissions;
+    uint64_t bytes_uploaded;
+    uint64_t bytes_read_back;
+    uint64_t staging_committed;   /* pool bytes backing staging */
+    uint64_t staging_used;        /* live staged bytes */
+    uint64_t staging_high_water;  /* max live staged bytes */
+    uint64_t uploads_in_flight;
+    uint64_t command_lists_in_flight;
+    uint64_t retired_pending;     /* logically dead, GPU-held */
+    uint64_t retired_high_water;  /* max pending observed */
+    /* Phase 22 concurrency/pressure counters. */
+    uint64_t pending_transfers;   /* linked in-flight entries now */
+    uint64_t staging_waits;       /* lifetime pressure waits taken */
+    uint64_t reclaimed_transfers; /* lifetime entries unlinked */
+    uint64_t retired_completed;   /* lifetime retirements executed */
+    uint64_t emit_retries;        /* lifetime emit-capacity retries */
+    int timeline_active;          /* nonzero: timeline completion */
+    int binary_fallback_active;   /* nonzero: fence fallback */
+} lc_transfer_stats;
+
+/**
+ * Copy out transfer/retirement diagnostics (zeros for NULL device;
+ * out may be NULL for a no-op).
+ */
+LC_API void lc_device_get_transfer_stats(
+    const lc_device *device,
+    lc_transfer_stats *out_stats);
+
+/**
+ * Reclaim completed staging/retirement work without submitting
+ * anything (optional progress pump; submission and waits already
+ * reclaim lazily). Never blocks.
+ */
+LC_API void lc_device_poll_completed(lc_device *device);
+
+/* -------------------------------------------------------------------------
+ * Compute pipelines, dispatch, and indirect drawing (Phase 21).
+ *
+ * Compute shaders are created through the same lc_shader_create path
+ * with LC_SHADER_STAGE_COMPUTE. Compute pipelines bind binding
+ * layouts + push ranges exactly like graphics pipelines (no
+ * render-target signature) and participate in the same pipeline
+ * cache. Dispatch is recorded on frame encoders and on compute
+ * worker lists; on hardware without a separate compute queue it
+ * executes on the graphics queue (baseline compatibility path).
+ *
+ * Scheduling model (binding): async compute overlapping graphics is
+ * a later phase. The queue model already exposes LC_QUEUE_COMPUTE
+ * and GPU-side completion values, so no API change is needed when
+ * overlapping lands.
+ * ------------------------------------------------------------------------- */
+
+/* Opaque compute-pipeline handle. Never dereference. */
+typedef struct lc_compute_pipeline lc_compute_pipeline;
+
+/* Compute pipeline creation parameters. The shader must be a live
+ * LC_SHADER_STAGE_COMPUTE module on the same device. Binding
+ * layouts are ordered by slot, exactly like graphics pipelines.
+ * Push ranges use lc_shader_visibility bits (VERTEX/FRAGMENT/COMPUTE
+ * as appropriate; compute pipelines normally use COMPUTE). */
+typedef struct lc_compute_pipeline_desc {
+    lc_shader *compute_shader;
+    const lc_binding_layout *const *binding_layouts;
+    uint32_t binding_layout_count;
+    const lc_push_constant_range *push_constant_ranges;
+    uint32_t push_constant_range_count;
+} lc_compute_pipeline_desc;
+
+/**
+ * Create a compute pipeline on a device. Participates in the same
+ * binary pipeline cache as graphics pipelines.
+ *
+ * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
+ *         LC_ERROR_INVALID_ARGUMENT (NULL device/desc/shader/out,
+ *         dead objects, non-compute shader, bad ranges/layouts),
+ *         LC_ERROR_UNSUPPORTED (compute not supported),
+ *         LC_ERROR_OUT_OF_MEMORY, LC_ERROR_PIPELINE_CREATION_FAILED.
+ */
+LC_API lc_result lc_compute_pipeline_create(
+    lc_device *device,
+    const lc_compute_pipeline_desc *desc,
+    lc_compute_pipeline **out_pipeline);
+
+/** Destroy a compute pipeline. Safe with NULL. In-flight GPU use
+ *  retires through the existing deferred-retirement queue. */
+LC_API void lc_compute_pipeline_destroy(lc_compute_pipeline *pipeline);
+
+/**
+ * Bind a compute pipeline for dispatch. Frame encoders: allowed
+ * outside an open pass only (dispatch inside a render pass is
+ * rejected). Worker compute lists: always allowed while open.
+ */
+LC_API lc_result lc_encoder_bind_compute_pipeline(
+    lc_command_encoder *encoder,
+    lc_compute_pipeline *pipeline);
+
+/**
+ * Dispatch compute workgroups (x, y, z). Each count must be >= 1
+ * and within the device compute limits (see
+ * lc_device_get_compute_capabilities). Requires a bound compute
+ * pipeline. Storage/invocation out-of-range behavior is the
+ * shader's contract (guard `id >= count`).
+ */
+LC_API lc_result lc_encoder_dispatch(lc_command_encoder *encoder,
+                                     uint32_t x, uint32_t y, uint32_t z);
+
+/**
+ * Bind a descriptor set to a compute pipeline slot (same
+ * content-matching rules as lc_encoder_bind_binding_set, against
+ * the compute pipeline's canonical signatures). Frame encoders:
+ * allowed outside an open pass. Worker compute lists: always
+ * allowed while open.
+ */
+LC_API lc_result lc_encoder_bind_compute_set(
+    lc_command_encoder *enc,
+    lc_compute_pipeline *pipeline,
+    uint32_t slot,
+    lc_binding_set *set);
+
+/**
+ * Push constants to a compute pipeline (visibility must fit the
+ * pipeline's ranges; COMPUTE visibility typical). Same alignment
+ * and range rules as lc_encoder_push_constants.
+ */
+LC_API lc_result lc_encoder_push_compute_constants(
+    lc_command_encoder *enc,
+    lc_compute_pipeline *pipeline,
+    uint32_t visibility,
+    uint32_t offset,
+    uint32_t size,
+    const void *data);
+
+/**
+ * Begin a compute worker list (dispatch/buffer-transition/push
+ * recording without render-pass inheritance). Exactly one open
+ * list per encoder. Execute only when the primary has no open
+ * pass, and never mixed with graphics lists in one batch.
+ */
+LC_API lc_result lc_command_list_begin_compute(
+    lc_command_encoder *encoder);
+
+/**
+ * Transition a buffer to a semantic state (compute/indirect
+ * ordering). Frame encoders record a barrier immediately
+ * (recorded-not-executed discipline, like image transitions);
+ * worker lists log the intent for execute-time reconciliation.
+ * Allowed between passes only: never inside an open pass
+ * (explicit barriers are illegal in render-pass instances).
+ */
+LC_API lc_result lc_encoder_transition_buffer(
+    lc_command_encoder *enc,
+    lc_buffer *buffer,
+    lc_resource_state new_state);
+
+/* -------------------------------------------------------------------------
+ * Indirect drawing (Phase 21).
+ *
+ * Layouts are explicit-width and backend-neutral; the Vulkan backend
+ * asserts structural compatibility with VkDrawIndirectCommand /
+ * VkDrawIndexedIndirectCommand internally. D3D12 maps these onto
+ * indirect-argument structures without API change.
+ * ------------------------------------------------------------------------- */
+
+/* Non-indexed indirect draw command (one element per draw). */
+typedef struct lc_indirect_draw_command {
+    uint32_t vertex_count;
+    uint32_t instance_count;
+    uint32_t first_vertex;
+    uint32_t first_instance;
+} lc_indirect_draw_command;
+
+/* Indexed indirect draw command (one element per draw). */
+typedef struct lc_indirect_draw_indexed_command {
+    uint32_t index_count;
+    uint32_t instance_count;
+    uint32_t first_index;
+    int32_t vertex_offset;
+    uint32_t first_instance;
+} lc_indirect_draw_indexed_command;
+
+/**
+ * Record a non-indexed indirect draw batch. `buffer` must carry
+ * INDIRECT_READ-capable usage and hold at least
+ * offset + draw_count * stride bytes (stride >= sizeof command;
+ * stride must be a multiple of 4). Requires a bound graphics
+ * pipeline and an open pass (same rules as lc_encoder_draw).
+ * Multi-draw executes natively when supported, else as a
+ * compatibility loop of single indirect draws.
+ */
+LC_API lc_result lc_encoder_draw_indirect(lc_command_encoder *encoder,
+                                          lc_buffer *buffer,
+                                          uint64_t offset,
+                                          uint32_t draw_count,
+                                          uint32_t stride);
+
+/**
+ * Record an indexed indirect draw batch (same rules as the
+ * non-indexed form, plus a bound index buffer).
+ */
+LC_API lc_result lc_encoder_draw_indexed_indirect(
+    lc_command_encoder *encoder,
+    lc_buffer *buffer,
+    uint64_t offset,
+    uint32_t draw_count,
+    uint32_t stride);
+
+/* -------------------------------------------------------------------------
+ * Compute/indirect capabilities (Phase 21, backend-neutral).
+ * ------------------------------------------------------------------------- */
+
+/* Backend-neutral compute/indirect capability report. */
+typedef struct lc_compute_capabilities {
+    int compute_supported;      /* dispatch path usable */
+    int indirect_draw_supported;
+    int multi_draw_indirect;    /* native N-command indirect */
+    int indirect_count;         /* GPU-count indirect variant */
+    int dedicated_compute;      /* nonzero: own compute queue family */
+    uint32_t max_workgroup_size[3];
+    uint32_t max_workgroup_count[3];
+    uint32_t max_workgroup_invocations;
+    uint32_t max_shared_memory; /* bytes of workgroup-local memory */
+    uint32_t max_push_size;     /* push-constant bytes */
+    uint32_t subgroup_size;     /* 0 when unknown */
+} lc_compute_capabilities;
+
+/**
+ * Copy out compute/indirect capabilities (zeros for NULL device or
+ * NULL out handling: NULL device zeroes *out when provided; NULL
+ * out is a no-op).
+ */
+LC_API void lc_device_get_compute_capabilities(
+    const lc_device *device,
+    lc_compute_capabilities *out_caps);
 
 /* -------------------------------------------------------------------------
  * Resource identity (Phase 18: ABA hardening).

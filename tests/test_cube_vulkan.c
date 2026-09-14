@@ -84,7 +84,7 @@ static int make_surface(lc_device *device, lc_window *window,
 
 static int make_swapchain(lc_device *device, lc_surface *surface,
                           lc_swapchain **out) {
-    lc_swapchain_desc desc;
+    lc_swapchain_desc desc = { 0 };
 
     desc.width = 800;
     desc.height = 600;
@@ -601,6 +601,7 @@ static int render_cube_frames(cube_ctx *ctx, int want) {
 }
 
 int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
     printf("Running LumaC cube (Phase 11) integration test...\n");
 
     lc_shutdown();

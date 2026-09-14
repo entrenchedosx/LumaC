@@ -39,6 +39,7 @@ set(LUMAC_SOURCES
     src/graphics/frame.c
     src/graphics/shader.c
     src/graphics/pipeline.c
+    src/graphics/compute_pipeline.c
     src/graphics/buffer.c
     src/graphics/vulkan/vulkan_backend.c
     src/graphics/vulkan/vulkan_surface.c
@@ -63,6 +64,9 @@ set(LUMAC_SOURCES
     src/graphics/encoder.c
     src/graphics/vulkan/vulkan_render_target.c
     src/graphics/vulkan/vulkan_encoder.c
+    src/graphics/vulkan/vulkan_worker.c
+    src/graphics/vulkan/vulkan_transfer.c
+    src/graphics/vulkan/vulkan_compute.c
 )
 
 # Platform backend selection (only the current OS backend is compiled)
@@ -103,7 +107,13 @@ target_link_libraries(lumac PRIVATE Vulkan::Vulkan)
 if(WIN32)
     target_compile_definitions(lumac PRIVATE VK_USE_PLATFORM_WIN32_KHR)
 elseif(UNIX AND NOT APPLE)
-    target_compile_definitions(lumac PRIVATE VK_USE_PLATFORM_XLIB_KHR)
+    # pthread_mutexattr_settype/PTHREAD_MUTEX_RECURSIVE are POSIX interfaces
+    # hidden by glibc under strict -std=c11 unless a POSIX feature level is
+    # requested before system headers are included.
+    target_compile_definitions(lumac PRIVATE
+        VK_USE_PLATFORM_XLIB_KHR
+        _POSIX_C_SOURCE=200809L
+    )
 endif()
 
 # Platform dependencies (no external windowing frameworks)
@@ -154,6 +164,9 @@ file(COPY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples/render_to_texture/shaders/mrt.frag.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/chain_copy.vert.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/chain_copy.frag.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/test_double.comp.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/test_append.comp.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/test_storage.comp.spv"
     DESTINATION "${LC_SPV_DIR}")
 find_program(LC_GLSLC glslc HINTS "$ENV{VULKAN_SDK}/Bin")
 if(LC_GLSLC)
@@ -163,6 +176,9 @@ if(LC_GLSLC)
             "${LC_SPV_DIR}/triangle.frag.spv"
             "${LC_SPV_DIR}/chain_copy.vert.spv"
             "${LC_SPV_DIR}/chain_copy.frag.spv"
+            "${LC_SPV_DIR}/test_double.comp.spv"
+            "${LC_SPV_DIR}/test_append.comp.spv"
+            "${LC_SPV_DIR}/test_storage.comp.spv"
             "${LC_SPV_DIR}/vb_triangle.vert.spv"
             "${LC_SPV_DIR}/tex_quad.vert.spv"
             "${LC_SPV_DIR}/tex_quad.frag.spv"
@@ -211,11 +227,23 @@ if(LC_GLSLC)
         COMMAND "${LC_GLSLC}" -fshader-stage=frag
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/render_to_texture/shaders/mrt.frag"
             -o "${LC_SPV_DIR}/mrt.frag.spv"
+        COMMAND "${LC_GLSLC}" -fshader-stage=compute -O
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/test_double.comp"
+            -o "${LC_SPV_DIR}/test_double.comp.spv"
+        COMMAND "${LC_GLSLC}" -fshader-stage=compute -O
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/test_append.comp"
+            -o "${LC_SPV_DIR}/test_append.comp.spv"
+        COMMAND "${LC_GLSLC}" -fshader-stage=compute -O
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/test_storage.comp"
+            -o "${LC_SPV_DIR}/test_storage.comp.spv"
         DEPENDS
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/triangle/shaders/triangle.vert"
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/triangle/shaders/triangle.frag"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/chain_copy.vert"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/chain_copy.frag"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/test_double.comp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/test_append.comp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/test_storage.comp"
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/vertex_triangle/shaders/vb_triangle.vert"
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/textured_quad/shaders/tex_quad.vert"
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/textured_quad/shaders/tex_quad.frag"
@@ -231,6 +259,9 @@ if(LC_GLSLC)
         "${LC_SPV_DIR}/triangle.frag.spv"
         "${LC_SPV_DIR}/chain_copy.vert.spv"
         "${LC_SPV_DIR}/chain_copy.frag.spv"
+        "${LC_SPV_DIR}/test_double.comp.spv"
+        "${LC_SPV_DIR}/test_append.comp.spv"
+        "${LC_SPV_DIR}/test_storage.comp.spv"
         "${LC_SPV_DIR}/vb_triangle.vert.spv"
         "${LC_SPV_DIR}/tex_quad.vert.spv"
         "${LC_SPV_DIR}/tex_quad.frag.spv"
@@ -260,6 +291,7 @@ if(LUMAC_BUILD_EXAMPLES)
         add_subdirectory(examples/renderer_scene)
         add_subdirectory(examples/shadow_scene)
         add_subdirectory(examples/ibl_scene)
+        add_subdirectory(examples/gpu_driven_scene)
     endif()
     if(LUMA_BUILD_ASSETS)
         add_subdirectory(examples/model_viewer)
@@ -459,6 +491,40 @@ if(LUMAC_BUILD_TESTS)
     target_include_directories(test_memory PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     add_test(NAME test_memory COMMAND test_memory)
 
+    # Phase 20: device-only async uploads/readback, completion values,
+    # staging pressure/oversize policy, and caller-data ownership.
+    add_executable(test_phase20_transfer_vulkan tests/test_phase20_transfer_vulkan.c)
+    target_link_libraries(test_phase20_transfer_vulkan PRIVATE lumac Vulkan::Vulkan)
+    target_include_directories(test_phase20_transfer_vulkan PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME test_phase20_transfer_vulkan COMMAND test_phase20_transfer_vulkan)
+
+    # Phase 21: compute fundamentals (pipelines, dispatch, worker
+    # compute lists, atomics, buffer states, isolated queue submit).
+    add_executable(test_phase21_compute_vulkan tests/test_phase21_compute_vulkan.c)
+    target_link_libraries(test_phase21_compute_vulkan PRIVATE lumac Vulkan::Vulkan)
+    target_include_directories(test_phase21_compute_vulkan PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(test_phase21_compute_vulkan PRIVATE LC_COMPUTE_SPV_DIR="${LC_SPV_DIR}")
+    if(TARGET lumac_triangle_shaders)
+        add_dependencies(test_phase21_compute_vulkan lumac_triangle_shaders)
+    endif()
+    add_test(NAME test_phase21_compute_vulkan COMMAND test_phase21_compute_vulkan)
+
+    # Phase 20: four native threads, independent command pools, 50k
+    # real draws, batch execution, three frames-in-flight, pixel proof.
+    add_executable(test_phase20_recording_vulkan tests/test_phase20_recording_vulkan.c)
+    target_link_libraries(test_phase20_recording_vulkan PRIVATE lumac)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(test_phase20_recording_vulkan PRIVATE Threads::Threads)
+    endif()
+    target_include_directories(test_phase20_recording_vulkan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_definitions(test_phase20_recording_vulkan PRIVATE LC_TRIANGLE_SPV_DIR="${LC_SPV_DIR}")
+    if(TARGET lumac_triangle_shaders)
+        add_dependencies(test_phase20_recording_vulkan lumac_triangle_shaders)
+    endif()
+    add_test(NAME test_phase20_recording_vulkan COMMAND test_phase20_recording_vulkan)
+
     # Headless-safe: validates image-view argument handling, never
     # touches Vulkan or the window system
     add_executable(test_image_view tests/test_image_view.c)
@@ -472,6 +538,13 @@ if(LUMAC_BUILD_TESTS)
     target_link_libraries(test_binding PRIVATE lumac)
     target_include_directories(test_binding PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     add_test(NAME test_binding COMMAND test_binding)
+
+    # Headless-safe: pins the nanosecond clock contract (monotonicity,
+    # frequency identity, sleep-delta sanity), no GPU involved
+    add_executable(test_clock tests/test_clock.c)
+    target_link_libraries(test_clock PRIVATE lumac)
+    target_include_directories(test_clock PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    add_test(NAME test_clock COMMAND test_clock)
 
     # Integration: real views, layouts, sets, updates, allocator stress,
     # textured rendering (120 frames, resize, two windows, cube bind);

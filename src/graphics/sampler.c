@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <string.h>
 
 #include "lumac/lumac.h"
 #include "internal/lumac_internal.h"
@@ -101,11 +102,25 @@ lc_result lc_sampler_create(lc_device *device, const lc_sampler_desc *desc,
 }
 
 void lc_sampler_destroy(lc_sampler *sampler) {
+    lc_device *device;
+    lc_retire_entry entry;
+
     if (sampler == NULL) {
         return;
     }
+    device = sampler->device;
+    if (device != NULL) {
+        lc_vk_cmdlist_poison_for(device, sampler);
+    }
     lc_sampler_list_remove(sampler);
-    lc_vulkan_sampler_destroy(sampler);
+    /* In-flight frames may still bind the sampler; retire it. */
+    memset(&entry, 0, sizeof(entry));
+    entry.kind = LC_RETIRE_SAMPLER;
+    entry.sampler = sampler->vk_sampler;
+    sampler->vk_sampler = VK_NULL_HANDLE;
+    if (device != NULL) {
+        lc_vk_retire(device, &entry);
+    }
     free(sampler);
 }
 

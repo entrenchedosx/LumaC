@@ -1,5 +1,9 @@
 # Luma Renderer Architecture
 
+The renderer remains behaviorally unchanged in Phase 20. It may incrementally
+adopt worker command lists and async asset upload without becoming responsible
+for native queues, synchronization primitives, or resource retirement.
+
 Luma Renderer (`lr_*`, Phase 13) is a small scene renderer on top of
 **public LumaC only**. It owns no GPU backend code, includes no
 LumaC internals, and LumaC never depends on it:
@@ -208,3 +212,14 @@ through pools transparently. New proofs live in
 `test_ibl_vulkan` PARTs P19-MEM (zero per-frame allocation
 churn), P19-CHURN (bounded under resource churn), and P19-AR
 (imported-asset GPU memory fully returns).
+
+Phase 21 GPU-driven mode (`LR_RENDER_MODE_GPU_DRIVEN`, see
+`GPU_DRIVEN_RENDERING_ARCHITECTURE.md`): PBR items group by
+(mesh, material, shadow-flag) into shared instance buffers with
+per-flight visible/counter/indirect resources; compute culling
+plus finalize dispatches run before the pass opens; one indexed
+indirect draw per group renders through the PBR-compatible
+instanced pipeline. Shadows stay CPU, unlit items stay per-draw,
+CPU fallback is always available. Proofs live in
+`test_gpu_driven_vulkan` (oracle agreement, pixel equivalence,
+edge cases, multi-draw) and `examples/gpu_driven_scene`.

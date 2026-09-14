@@ -97,7 +97,7 @@ int main(int argc, char **argv) {
     lr_camera camera;
     lc_window_desc window_desc;
     lc_device_desc device_desc = { 0 };
-    lc_swapchain_desc swapchain_desc;
+    lc_swapchain_desc swapchain_desc = { 0 };
     unsigned long frame = 0;
     unsigned long max_frames = 0;
     int exit_code = 1;

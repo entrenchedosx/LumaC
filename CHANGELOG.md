@@ -1,5 +1,56 @@
 # Changelog
 
+## Phase 21
+
+- Added backend-neutral compute: `LC_SHADER_STAGE_COMPUTE`,
+  `lc_compute_pipeline` (shared binary pipeline cache, warm/cold/
+  corrupt/disabled coverage), dispatch on frame encoders and
+  compute worker lists, graphics-queue fallback, compute queue
+  discovery with honest capabilities, and an isolated
+  cross-queue dispatch proof (overlapping async compute
+  explicitly deferred).
+- Added buffer state tracking (`TRANSFER_SRC/DST`, `VERTEX/INDEX/
+  UNIFORM/STORAGE_READ`, `STORAGE_WRITE`, `INDIRECT_READ`) with
+  execution/access barriers, `lc_encoder_transition_buffer`,
+  storage-image bindings (`SHADER_READ_WRITE`/`GENERAL`), and a
+  sync `lc_buffer_read` test/debug path.
+- Added indirect drawing (`lc_encoder_draw_indirect`,
+  `lc_encoder_draw_indexed_indirect`): explicit-width commands,
+  native multi-draw when enabled else an honest loop,
+  `INDIRECT_READ` gating (barriers live outside passes),
+  `LC_BUFFER_USAGE_INDIRECT`; indirect-count deferred with the
+  device capability reported.
+- Added renderer GPU-driven mode: per-(mesh, material,
+  shadow-flag) groups with shared instance buffers, per-flight
+  visible/counter/indirect resources, atomic-append compaction
+  with capacity guards, compute frustum culling (CPU oracle
+  agreement required), one indexed indirect draw per group
+  through the PBR-compatible instanced pipeline, CPU fallback,
+  per-frame diagnostics, and a 100k-instance benchmark plus
+  1000-frame endurance.
+- Added `tests/test_phase21_compute_vulkan` (127 checks),
+  `renderer/tests/test_gpu_driven_vulkan` (94 checks), and
+  `examples/gpu_driven_scene` (`--frames/--instances/
+  --cpu-culling/--gpu-culling/--no-validation/--screenshot`,
+  `docs/images/gpu-driven-scene.png`).
+- Fixed: GPU-only buffers gain transfer-source for download
+  copies (VUID); secondary buffers always carry inheritance info
+  (VUID); multi-draw/indirect-count features enabled when
+  offered (VUID); compute-compatible outside-pass dispatch next
+  to pending clears; group regrow preserving filled instances.
+
+## Phase 20
+
+- Added worker recording contexts and immutable single-use command lists with
+  ordered batch execution and submission-time state validation.
+- Added queue classes, dedicated-transfer diagnostics, timeline-style GPU
+  completion, and configurable frames in flight.
+- Added bounded async buffer/image uploads, async image readback, and
+  completion-keyed deferred destruction.
+- Added validation-backed tests for 1,000 uploads, oversized staging, and
+  50,000 real draw recordings across four CPU threads with pixel proof, plus
+  concurrent allocator churn and ThreadSanitizer coverage.
+
 ## Unreleased
 
 - Luma AAA memory + synchronization foundation (Phase 19):

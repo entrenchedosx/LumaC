@@ -1,5 +1,10 @@
 # LumaC
 
+Phase 20 adds independently recordable command lists, configurable frames in
+flight, queue diagnostics and completion values, bounded asynchronous transfer,
+async readback, and deferred native-resource retirement. See the Phase 20
+architecture documents in `docs/`.
+
 Lightweight cross-platform graphics API written in C11, with native Windows/Linux windowing and a Vulkan backend.
 
 [![C11](https://img.shields.io/badge/C-C11-blue)](https://en.cppreference.com/w/c/11)
@@ -91,6 +96,14 @@ graph yet — those build on this foundation.
   write→read visibility, block-suballocating GPU memory pools with
   dedicated policy, flush/invalidate mapping, memory stats/budget/
   introspection (10k buffers back onto 1 block)
+- Compute + indirect + GPU-driven rendering: backend-neutral compute
+  pipelines sharing the pipeline cache, dispatch on frame encoders
+  and compute worker lists (graphics-queue fallback, compute queue
+  discovery with honest capabilities), buffer state tracking with
+  storage/indirect barriers, indirect draws (native multi-draw or
+  honest loop), and a renderer GPU-driven mode (frustum culling +
+  compaction + one indirect draw per mesh/material group through
+  PBR, with CPU fallback) proven to 100,000 instances
 
 ## Current Status
 
@@ -178,6 +191,7 @@ lighting a dielectric/copper sphere trio with no direct lights —
 .\build\examples\pbr_scene\Debug\pbr_scene.exe
 .\build\examples\shadow_scene\Debug\shadow_scene.exe --frames 600
 .\build\examples\ibl_scene\Debug\ibl_scene.exe --frames 600
+.\build\examples\gpu_driven_scene\Debug\gpu_driven_scene.exe --frames 100 --instances 20000
 # Linux:
 /build/triangle/triangle
 /build/vertex_triangle/vertex_triangle
@@ -189,6 +203,7 @@ lighting a dielectric/copper sphere trio with no direct lights —
 /build/pbr_scene/pbr_scene
 /build/shadow_scene/shadow_scene
 /build/ibl_scene/ibl_scene
+/build/gpu_driven_scene/gpu_driven_scene --frames 100 --instances 20000
 ```
 
 The texture example needs no window: it uploads a checkerboard,

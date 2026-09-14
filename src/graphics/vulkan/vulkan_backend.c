@@ -400,7 +400,14 @@ static lc_result lc_vk_create_logical(lc_device *device,
     VkDeviceQueueCreateInfo *queue_infos = NULL;
     VkDeviceCreateInfo create_info;
     VkPhysicalDeviceFeatures enabled_features;
-    const char *device_extensions[1];
+    /* swapchain always; timeline KHR when the driver offers it
+     * (core 1.2 path needs no extension — enabling is harmless and
+     * version-gated below). */
+    const char *device_extensions[2];
+    uint32_t extension_count = 1;
+    int want_timeline_khr = 0;
+    VkPhysicalDeviceTimelineSemaphoreFeaturesKHR timeline_features;
+    VkPhysicalDeviceProperties props;
 
     vkGetPhysicalDeviceQueueFamilyProperties(physical, &family_count, NULL);
     if (family_count == 0) {
@@ -424,10 +431,55 @@ static lc_result lc_vk_create_logical(lc_device *device,
      * support. */
     device_extensions[0] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
 
+    /* Timeline semaphores (Phase 20, PART R): KHR extension when
+     * offered (works on any loader version); the 1.2-core entry
+     * points are used unconditionally below guarded by support. */
+    memset(&props, 0, sizeof(props));
+    vkGetPhysicalDeviceProperties(physical, &props);
+    {
+        /* Query the actual feature bit (never enable blindly:
+         * unsupported TRUE fails device creation). features2 is
+         * core in 1.1; resolve dynamically for 1.0 loaders. */
+        PFN_vkGetPhysicalDeviceFeatures2 pfn_features2 =
+            (PFN_vkGetPhysicalDeviceFeatures2)vkGetInstanceProcAddr(
+                device->instance, "vkGetPhysicalDeviceFeatures2");
+        VkPhysicalDeviceTimelineSemaphoreFeaturesKHR query;
+        int have_ext = lc_vk_has_device_extension(
+            physical, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
+
+        memset(&query, 0, sizeof(query));
+        if (pfn_features2 != NULL &&
+            (props.apiVersion >= VK_API_VERSION_1_2 || have_ext)) {
+            VkPhysicalDeviceFeatures2 features2;
+
+            query.sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES_KHR;
+            memset(&features2, 0, sizeof(features2));
+            features2.sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            features2.pNext = &query;
+            pfn_features2(physical, &features2);
+            if (query.timelineSemaphore == VK_TRUE) {
+                /* KHR path only needs the extension on < 1.2. */
+                if (props.apiVersion < VK_API_VERSION_1_2) {
+                    device_extensions[extension_count++] =
+                        VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME;
+                }
+                want_timeline_khr = 1;
+            }
+        }
+    }
+    /* Forced binary fallback (Phase 22 test path): never even ask
+     * for timeline semaphores. */
+    if (device->force_binary_fallback) {
+        want_timeline_khr = 0;
+    }
+
     /* Deliberate minimal features: sampler anisotropy is enabled when
-     * supported so samplers can offer it; everything else stays off.
-     * Support is recorded on the device for sampler validation and
-     * capability queries. */
+     * supported so samplers can offer it; multi-draw indirect is
+     * enabled when supported (Phase 21 native path; harmless until
+     * used); everything else stays off. Support is recorded on the
+     * device for sampler validation and capability queries. */
     memset(&enabled_features, 0, sizeof(enabled_features));
     {
         VkPhysicalDeviceFeatures supported;
@@ -440,15 +492,59 @@ static lc_result lc_vk_create_logical(lc_device *device,
         } else {
             device->anisotropy_supported = 0;
         }
+        if (supported.multiDrawIndirect != VK_FALSE) {
+            enabled_features.multiDrawIndirect = VK_TRUE;
+        }
     }
 
     memset(&create_info, 0, sizeof(create_info));
     create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     create_info.queueCreateInfoCount = family_count;
     create_info.pQueueCreateInfos = queue_infos;
-    create_info.enabledExtensionCount = 1;
+    create_info.enabledExtensionCount = extension_count;
     create_info.ppEnabledExtensionNames = device_extensions;
     create_info.pEnabledFeatures = &enabled_features;
+    /* drawIndirectCount (Phase 21 capability reporting + future
+     * count path): enable when the 1.2 feature exists, chained
+     * with the timeline struct when both are present. Never
+     * enabled blindly. */
+    {
+        PFN_vkGetPhysicalDeviceFeatures2 pfn12 =
+            (PFN_vkGetPhysicalDeviceFeatures2)vkGetInstanceProcAddr(
+                device->instance, "vkGetPhysicalDeviceFeatures2");
+
+        memset(&device->vulkan12_enabled, 0,
+               sizeof(device->vulkan12_enabled));
+        if (pfn12 != NULL) {
+            VkPhysicalDeviceVulkan12Features query;
+            VkPhysicalDeviceFeatures2 features2;
+
+            memset(&query, 0, sizeof(query));
+            query.sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+            memset(&features2, 0, sizeof(features2));
+            features2.sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            features2.pNext = &query;
+            pfn12(physical, &features2);
+            if (query.drawIndirectCount != VK_FALSE) {
+                device->vulkan12_enabled.sType =
+                    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+                device->vulkan12_enabled.drawIndirectCount = VK_TRUE;
+            }
+        }
+    }
+    if (device->vulkan12_enabled.drawIndirectCount != VK_FALSE) {
+        device->vulkan12_enabled.pNext = (void *)create_info.pNext;
+        create_info.pNext = &device->vulkan12_enabled;
+    }
+    if (want_timeline_khr) {
+        memset(&timeline_features, 0, sizeof(timeline_features));
+        timeline_features.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES_KHR;
+        timeline_features.timelineSemaphore = VK_TRUE;
+        create_info.pNext = &timeline_features;
+    }
 
     if (vkCreateDevice(physical, &create_info, NULL, &device->device) !=
         VK_SUCCESS) {
@@ -487,6 +583,344 @@ static lc_result lc_vk_create_logical(lc_device *device,
         lc_vulkan_device_destroy(device);
         return LC_ERROR_DEVICE_CREATION_FAILED;
     }
+    /* Transfer queue (Phase 20, PART O): prefer TRANSFER-only, then
+     * TRANSFER-without-graphics, then any TRANSFER-capable family;
+     * fall back to the graphics family (identical behavior). */
+    {
+        VkQueueFamilyProperties *families = NULL;
+        uint32_t count = 0;
+        uint32_t best = graphics_family;
+        int best_rank = -1;
+        uint32_t i;
+
+        vkGetPhysicalDeviceQueueFamilyProperties(physical, &count,
+                                                 NULL);
+        if (count > 0) {
+            families = (VkQueueFamilyProperties *)malloc(
+                sizeof(VkQueueFamilyProperties) * count);
+        }
+        if (families != NULL) {
+            vkGetPhysicalDeviceQueueFamilyProperties(physical, &count,
+                                                     families);
+            for (i = 0; i < count; i++) {
+                VkQueueFlags flags = families[i].queueFlags;
+                int rank = -1;
+
+                if ((flags & VK_QUEUE_TRANSFER_BIT) == 0) {
+                    continue;
+                }
+                if ((flags & VK_QUEUE_GRAPHICS_BIT) == 0 &&
+                    (flags & VK_QUEUE_COMPUTE_BIT) == 0) {
+                    rank = 3; /* TRANSFER-only: best */
+                } else if ((flags & VK_QUEUE_GRAPHICS_BIT) == 0) {
+                    rank = 2;
+                } else if (i != graphics_family) {
+                    rank = 1;
+                } else {
+                    rank = 0;
+                }
+                if (rank > best_rank) {
+                    best_rank = rank;
+                    best = i;
+                }
+            }
+            free(families);
+        }
+        device->transfer_queue_family = (uint32_t)best;
+        device->transfer_queue =
+            lc_vulkan_get_queue(device, (uint32_t)best);
+        if (device->transfer_queue == VK_NULL_HANDLE) {
+            device->transfer_queue_family = graphics_family;
+            device->transfer_queue = device->graphics_queue;
+        }
+        device->has_dedicated_transfer =
+            (device->transfer_queue_family != graphics_family) ? 1 : 0;
+        /* Forced graphics transfer (Phase 22 test path). */
+        if (device->force_graphics_transfer) {
+            device->transfer_queue_family = graphics_family;
+            device->transfer_queue = device->graphics_queue;
+            device->has_dedicated_transfer = 0;
+        }
+    }
+    /* Compute queue (Phase 21, PART G): prefer a COMPUTE-only
+     * family, then COMPUTE-without-graphics, then any
+     * COMPUTE-capable family; fall back to aliasing graphics.
+     * Production dispatch records into frame/worker buffers (no
+     * scheduler yet); the separate handle proves cross-queue
+     * dispatch in isolation and reserves the async-compute shape. */
+    {
+        VkQueueFamilyProperties *families = NULL;
+        uint32_t count = 0;
+        uint32_t best = graphics_family;
+        int best_rank = -1;
+        uint32_t i;
+
+        vkGetPhysicalDeviceQueueFamilyProperties(physical, &count,
+                                                 NULL);
+        if (count > 0) {
+            families = (VkQueueFamilyProperties *)malloc(
+                sizeof(VkQueueFamilyProperties) * count);
+        }
+        if (families != NULL) {
+            vkGetPhysicalDeviceQueueFamilyProperties(physical, &count,
+                                                     families);
+            for (i = 0; i < count; i++) {
+                VkQueueFlags flags = families[i].queueFlags;
+                int rank = -1;
+
+                if ((flags & VK_QUEUE_COMPUTE_BIT) == 0) {
+                    continue;
+                }
+                if ((flags & VK_QUEUE_GRAPHICS_BIT) == 0 &&
+                    (flags & VK_QUEUE_TRANSFER_BIT) == 0) {
+                    rank = 3; /* COMPUTE-only: best */
+                } else if ((flags & VK_QUEUE_GRAPHICS_BIT) == 0) {
+                    rank = 2;
+                } else if (i != graphics_family) {
+                    rank = 1;
+                } else {
+                    rank = 0;
+                }
+                if (rank > best_rank) {
+                    best_rank = rank;
+                    best = i;
+                }
+            }
+            free(families);
+        }
+        device->compute_queue_family = (uint32_t)best;
+        device->compute_queue =
+            lc_vulkan_get_queue(device, (uint32_t)best);
+        if (device->compute_queue == VK_NULL_HANDLE) {
+            device->compute_queue_family = graphics_family;
+            device->compute_queue = device->graphics_queue;
+        }
+        device->has_dedicated_compute =
+            (device->compute_queue_family != graphics_family) ? 1 : 0;
+        /* Forced graphics compute (Phase 22 test path). */
+        if (device->force_graphics_compute) {
+            device->compute_queue_family = graphics_family;
+            device->compute_queue = device->graphics_queue;
+            device->has_dedicated_compute = 0;
+        }
+    }
+    /* Compute/indirect properties (Phase 21, PARTs AQ/AL): queried
+     * once; zeros when compute is unsupported (no compute queue
+     * family found at all is treated as unsupported). The 1.1 entry
+     * points resolve dynamically so 1.0 loaders keep working (1.2
+     * features then read as unsupported). */
+    {
+        VkPhysicalDeviceProperties props;
+        VkPhysicalDeviceFeatures feats;
+        PFN_vkGetPhysicalDeviceFeatures2 pfn_features2 = NULL;
+        PFN_vkGetPhysicalDeviceProperties2 pfn_props2 = NULL;
+
+        memset(&props, 0, sizeof(props));
+        vkGetPhysicalDeviceProperties(physical, &props);
+        memset(&feats, 0, sizeof(feats));
+        vkGetPhysicalDeviceFeatures(physical, &feats);
+        if (device->instance != VK_NULL_HANDLE) {
+            pfn_features2 =
+                (PFN_vkGetPhysicalDeviceFeatures2)vkGetInstanceProcAddr(
+                    device->instance, "vkGetPhysicalDeviceFeatures2");
+            pfn_props2 =
+                (PFN_vkGetPhysicalDeviceProperties2)vkGetInstanceProcAddr(
+                    device->instance,
+                    "vkGetPhysicalDeviceProperties2");
+        }
+        device->compute_supported =
+            (device->compute_queue != VK_NULL_HANDLE) ? 1 : 0;
+        device->indirect_draw_supported = device->compute_supported;
+        device->multi_draw_indirect =
+            (feats.multiDrawIndirect != 0) ? 1 : 0;
+        device->indirect_count_supported = 0;
+        if (pfn_features2 != NULL) {
+            VkPhysicalDeviceVulkan12Features feats12;
+            VkPhysicalDeviceFeatures2 feats2;
+
+            memset(&feats12, 0, sizeof(feats12));
+            feats12.sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+            memset(&feats2, 0, sizeof(feats2));
+            feats2.sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            feats2.pNext = &feats12;
+            pfn_features2(physical, &feats2);
+            device->indirect_count_supported =
+                (feats12.drawIndirectCount != 0) ? 1 : 0;
+        }
+        device->max_workgroup_size[0] =
+            props.limits.maxComputeWorkGroupSize[0];
+        device->max_workgroup_size[1] =
+            props.limits.maxComputeWorkGroupSize[1];
+        device->max_workgroup_size[2] =
+            props.limits.maxComputeWorkGroupSize[2];
+        device->max_workgroup_count[0] =
+            props.limits.maxComputeWorkGroupCount[0];
+        device->max_workgroup_count[1] =
+            props.limits.maxComputeWorkGroupCount[1];
+        device->max_workgroup_count[2] =
+            props.limits.maxComputeWorkGroupCount[2];
+        device->max_workgroup_invocations =
+            props.limits.maxComputeWorkGroupInvocations;
+        device->max_compute_shared_memory =
+            props.limits.maxComputeSharedMemorySize;
+        device->max_compute_push_size =
+            props.limits.maxPushConstantsSize;
+        device->subgroup_size = 0;
+        if (pfn_props2 != NULL) {
+            VkPhysicalDeviceSubgroupProperties subgroup;
+            VkPhysicalDeviceProperties2 props2;
+
+            memset(&subgroup, 0, sizeof(subgroup));
+            subgroup.sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+            memset(&props2, 0, sizeof(props2));
+            props2.sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+            props2.pNext = &subgroup;
+            pfn_props2(physical, &props2);
+            if ((subgroup.supportedOperations &
+                 VK_SUBGROUP_FEATURE_BASIC_BIT) != 0) {
+                device->subgroup_size = subgroup.subgroupSize;
+            }
+        }
+    }
+    /* Timeline semaphore (Phase 20, PARTs Q–R): shared by graphics
+     * and transfer submissions (one monotonic value domain). Falls
+     * back to binary fences per request when unsupported. */
+    device->timeline = VK_NULL_HANDLE;
+    device->timeline_next = 1;
+    device->timeline_ok = 0;
+    if (want_timeline_khr) {
+        VkSemaphoreTypeCreateInfo type_info;
+        VkSemaphoreCreateInfo sem_info;
+
+        memset(&type_info, 0, sizeof(type_info));
+        type_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+        type_info.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+        type_info.initialValue = 0;
+        memset(&sem_info, 0, sizeof(sem_info));
+        sem_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        sem_info.pNext = &type_info;
+        if (vkCreateSemaphore(device->device, &sem_info, NULL,
+                               &device->timeline) == VK_SUCCESS) {
+            device->timeline_ok = 1;
+            /* Core-1.2 entry points may not exist on 1.0 loaders;
+             * resolve dynamically (NULL = fallback mode). The
+             * signal pointer is required too: Phase 22 host-signals
+             * reserved-but-unsubmitted values on submit failure so
+             * no waiter can stall on a timeline gap. */
+            device->pfn_sem_counter =
+                (PFN_vkGetSemaphoreCounterValue)vkGetDeviceProcAddr(
+                    device->device, "vkGetSemaphoreCounterValue");
+            device->pfn_sem_wait =
+                (PFN_vkWaitSemaphores)vkGetDeviceProcAddr(
+                    device->device, "vkWaitSemaphores");
+            device->pfn_sem_signal =
+                (PFN_vkSignalSemaphore)vkGetDeviceProcAddr(
+                    device->device, "vkSignalSemaphore");
+            if (device->pfn_sem_counter == NULL ||
+                device->pfn_sem_wait == NULL ||
+                device->pfn_sem_signal == NULL) {
+                vkDestroySemaphore(device->device, device->timeline,
+                                   NULL);
+                device->timeline = VK_NULL_HANDLE;
+                device->timeline_ok = 0;
+                device->pfn_sem_counter = NULL;
+                device->pfn_sem_wait = NULL;
+                device->pfn_sem_signal = NULL;
+            }
+        } else {
+            device->timeline = VK_NULL_HANDLE;
+        }
+    }
+    /* Phase 20 locks: transfer scheduler, resource-state tracking,
+     * pipeline/pass caches, descriptor allocator. Best effort each;
+     * unlocked operation still honors the single-threaded contract
+     * (documented). The transfer shard is recursive: schedulers nest
+     * immediate submits inside transfer-locked sections. */
+#if defined(_WIN32) || defined(_WIN64)
+    device->transfer_mutex_init = 0;
+    /* CRITICAL_SECTION is already reentrant. */
+    if (InitializeCriticalSectionAndSpinCount(&device->transfer_mutex,
+                                              4000) != 0) {
+        device->transfer_mutex_init = 1;
+    }
+#else
+        pthread_mutexattr_t attr;
+
+        if (pthread_mutexattr_init(&attr) == 0) {
+            if (pthread_mutexattr_settype(&attr,
+                                          PTHREAD_MUTEX_RECURSIVE) == 0 &&
+                pthread_mutex_init(&device->transfer_mutex, &attr) ==
+                    0) {
+                device->transfer_mutex_init = 1;
+            }
+            pthread_mutexattr_destroy(&attr);
+        }
+#endif
+#if defined(_WIN32) || defined(_WIN64)
+    device->state_mutex_init =
+        (InitializeCriticalSectionAndSpinCount(&device->state_mutex,
+                                               4000) != 0)
+            ? 1
+            : 0;
+    device->cache_mutex_init =
+        (InitializeCriticalSectionAndSpinCount(&device->cache_mutex,
+                                               4000) != 0)
+            ? 1
+            : 0;
+    device->desc_mutex_init =
+        (InitializeCriticalSectionAndSpinCount(&device->desc_mutex,
+                                               4000) != 0)
+            ? 1
+            : 0;
+    device->submit_mutex_init =
+        (InitializeCriticalSectionAndSpinCount(&device->submit_mutex,
+                                               4000) != 0)
+            ? 1
+            : 0;
+#else
+    /* (transfer_mutex already recursive above) */
+    /* The state shard nests (marks inside reconciled executes), so
+     * POSIX needs a recursive mutex (CRITICAL_SECTION is already
+     * reentrant on Windows). */
+    {
+        pthread_mutexattr_t attr;
+
+        device->state_mutex_init = 0;
+        if (pthread_mutexattr_init(&attr) == 0) {
+            if (pthread_mutexattr_settype(&attr,
+                                          PTHREAD_MUTEX_RECURSIVE) == 0 &&
+                pthread_mutex_init(&device->state_mutex, &attr) == 0) {
+                device->state_mutex_init = 1;
+            }
+            pthread_mutexattr_destroy(&attr);
+        }
+    }
+    device->cache_mutex_init =
+        (pthread_mutex_init(&device->cache_mutex, NULL) == 0) ? 1 : 0;
+    device->desc_mutex_init =
+        (pthread_mutex_init(&device->desc_mutex, NULL) == 0) ? 1 : 0;
+    /* Phase 22: submit nests transfer (frame holds submit across
+     * emit), so POSIX needs it recursive like the state shard
+     * (CRITICAL_SECTION is already reentrant on Windows). */
+    {
+        pthread_mutexattr_t submit_attr;
+
+        device->submit_mutex_init = 0;
+        if (pthread_mutexattr_init(&submit_attr) == 0) {
+            if (pthread_mutexattr_settype(&submit_attr,
+                                          PTHREAD_MUTEX_RECURSIVE) == 0 &&
+                pthread_mutex_init(&device->submit_mutex,
+                                   &submit_attr) == 0) {
+                device->submit_mutex_init = 1;
+            }
+            pthread_mutexattr_destroy(&submit_attr);
+        }
+    }
+#endif
     /* Allocator mutex (PART AL): internal lock only, never a giant
      * LumaC lock. Best effort: without it the allocator runs
      * unlocked (single-threaded contract still holds). */
@@ -758,6 +1192,18 @@ lc_result lc_vulkan_device_create(lc_device *device,
     memset(&props, 0, sizeof(props));
     enable_validation = desc->enable_validation;
     disable_cache = (desc->disable_pipeline_cache != 0) ? 1 : 0;
+    /* Staging cap (PART V): 0 selects the default. */
+    device->staging_cap = (desc->upload_staging_cap != 0)
+                              ? desc->upload_staging_cap
+                              : (256u * 1024u * 1024u);
+    /* Test-only forcing (Phase 22): honored below at queue and
+     * timeline selection. */
+    device->force_binary_fallback =
+        (desc->force_binary_fallback != 0) ? 1 : 0;
+    device->force_graphics_transfer =
+        (desc->force_graphics_transfer != 0) ? 1 : 0;
+    device->force_graphics_compute =
+        (desc->force_graphics_compute != 0) ? 1 : 0;
 
     if (enable_validation != 0) {
         if (lc_vk_has_validation_layer() &&
@@ -821,6 +1267,17 @@ void lc_vulkan_device_destroy(lc_device *device) {
                                NULL);
     }
     device->pipeline_cache = VK_NULL_HANDLE;
+    /* Phase 20 transfer/retirement flush first (waits for GPU work,
+     * then frees staging, command buffers, retired objects — the
+     * documented shutdown exception to the no-global-idle rule),
+     * then the timeline semaphore itself. */
+    lc_vk_transfer_shutdown(device);
+    if (device->timeline != VK_NULL_HANDLE &&
+        device->device != VK_NULL_HANDLE) {
+        vkDestroySemaphore(device->device, device->timeline, NULL);
+    }
+    device->timeline = VK_NULL_HANDLE;
+    device->timeline_ok = 0;
     /* Memory allocator first (frees all blocks; tracked dependents
      * already gone via device-destroy hooks), then upload context,
      * descriptor pools, and the Phase 12 render-pass cache:
@@ -853,4 +1310,48 @@ void lc_vulkan_device_destroy(lc_device *device) {
         device->instance = VK_NULL_HANDLE;
     }
     device->physical_device = VK_NULL_HANDLE;
+    /* Phase 20 locks (transfer/state/cache/desc/submit). */
+#if defined(_WIN32) || defined(_WIN64)
+    if (device->transfer_mutex_init) {
+        DeleteCriticalSection(&device->transfer_mutex);
+        device->transfer_mutex_init = 0;
+    }
+    if (device->state_mutex_init) {
+        DeleteCriticalSection(&device->state_mutex);
+        device->state_mutex_init = 0;
+    }
+    if (device->cache_mutex_init) {
+        DeleteCriticalSection(&device->cache_mutex);
+        device->cache_mutex_init = 0;
+    }
+    if (device->desc_mutex_init) {
+        DeleteCriticalSection(&device->desc_mutex);
+        device->desc_mutex_init = 0;
+    }
+    if (device->submit_mutex_init) {
+        DeleteCriticalSection(&device->submit_mutex);
+        device->submit_mutex_init = 0;
+    }
+#else
+    if (device->transfer_mutex_init) {
+        pthread_mutex_destroy(&device->transfer_mutex);
+        device->transfer_mutex_init = 0;
+    }
+    if (device->state_mutex_init) {
+        pthread_mutex_destroy(&device->state_mutex);
+        device->state_mutex_init = 0;
+    }
+    if (device->cache_mutex_init) {
+        pthread_mutex_destroy(&device->cache_mutex);
+        device->cache_mutex_init = 0;
+    }
+    if (device->desc_mutex_init) {
+        pthread_mutex_destroy(&device->desc_mutex);
+        device->desc_mutex_init = 0;
+    }
+    if (device->submit_mutex_init) {
+        pthread_mutex_destroy(&device->submit_mutex);
+        device->submit_mutex_init = 0;
+    }
+#endif
 }

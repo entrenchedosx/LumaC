@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <string.h>
 
 #include "lumac/lumac.h"
 #include "internal/lumac_internal.h"
@@ -227,6 +228,9 @@ lc_result lc_render_target_create(
 }
 
 void lc_render_target_destroy(lc_render_target *target) {
+    lc_device *device;
+    lc_retire_entry entry;
+
     if (target == NULL) {
         return;
     }
@@ -235,7 +239,19 @@ void lc_render_target_destroy(lc_render_target *target) {
     if (target->is_swapchain_borrow) {
         return;
     }
+    device = target->device;
+    if (device != NULL) {
+        lc_vk_cmdlist_poison_for(device, target);
+    }
     lc_render_target_list_remove(target);
+    memset(&entry, 0, sizeof(entry));
+    entry.kind = LC_RETIRE_FRAMEBUFFER;
+    entry.framebuffer = target->framebuffer;
+    target->framebuffer = VK_NULL_HANDLE;
+    target->framebuffer_valid = 0;
+    if (device != NULL) {
+        lc_vk_retire(device, &entry);
+    }
     lc_vulkan_render_target_destroy(target);
     free(target);
 }

@@ -31,6 +31,7 @@ void lc_shutdown(void) {
      * VkSwapchainKHR needs its device alive; a VkSurfaceKHR needs its
      * device's instance and native window. */
     lc_pipeline_destroy_all();
+    lc_compute_pipeline_destroy_all();
     lc_binding_set_destroy_all();
     lc_binding_layout_destroy_all();
     lc_shader_destroy_all();

@@ -163,7 +163,7 @@ static int extent_plausible(lc_swapchain *sc, lc_window *win, unsigned w,
  * is proven and failures are FAILs. */
 static int make_swapchain_first(lc_device *device, lc_surface *surface,
                                 lc_swapchain **out) {
-    lc_swapchain_desc desc;
+    lc_swapchain_desc desc = { 0 };
 
     desc.width = 800;
     desc.height = 600;
@@ -196,7 +196,7 @@ int main(void) {
         lc_window *window = NULL;
         lc_surface *surface = NULL;
         lc_swapchain *swapchain = NULL;
-        lc_swapchain_desc desc;
+        lc_swapchain_desc desc = { 0 };
         lc_swapchain *second = (lc_swapchain *)0x1;
         lc_device *other_device = NULL;
         int env;
@@ -283,7 +283,7 @@ int main(void) {
         /* Device/surface mismatch is rejected. */
         {
             lc_device_desc ddesc = { 0 };
-            lc_swapchain_desc sdesc;
+            lc_swapchain_desc sdesc = { 0 };
             lc_swapchain *bad = (lc_swapchain *)0x1;
 
             ddesc.backend = LC_BACKEND_VULKAN;
@@ -320,7 +320,7 @@ int main(void) {
         lc_window *window = NULL;
         lc_surface *surface = NULL;
         lc_swapchain *swapchain = NULL;
-        lc_swapchain_desc desc;
+        lc_swapchain_desc desc = { 0 };
 
         TEST_CHECK(make_device(&device) == 0, "device for recreate test");
         TEST_CHECK(make_window(&window) == 0, "window for recreate test");
@@ -413,7 +413,7 @@ int main(void) {
         lc_surface *surf_b = NULL;
         lc_swapchain *sc_a = NULL;
         lc_swapchain *sc_b = NULL;
-        lc_swapchain_desc desc;
+        lc_swapchain_desc desc = { 0 };
         lc_swapchain *sc_a2 = NULL;
 
         desc.width = 800;
@@ -467,7 +467,7 @@ int main(void) {
         lc_window *window = NULL;
         lc_surface *surface = NULL;
         lc_swapchain *swapchain = NULL;
-        lc_swapchain_desc desc;
+        lc_swapchain_desc desc = { 0 };
 
         desc.width = 800;
         desc.height = 600;
@@ -504,7 +504,7 @@ int main(void) {
         lc_window *window = NULL;
         lc_surface *surface = NULL;
         lc_swapchain *swapchain = NULL;
-        lc_swapchain_desc desc;
+        lc_swapchain_desc desc = { 0 };
 
         desc.width = 800;
         desc.height = 600;
@@ -539,7 +539,7 @@ int main(void) {
         lc_window *window = NULL;
         lc_surface *surface = NULL;
         lc_swapchain *swapchain = NULL;
-        lc_swapchain_desc desc;
+        lc_swapchain_desc desc = { 0 };
 
         desc.width = 800;
         desc.height = 600;

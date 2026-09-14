@@ -28,7 +28,7 @@ int main(void) {
     lc_swapchain *out = sentinel;
     lc_device *fake_device = (lc_device *)0x1; /* validity checked first */
     lc_surface *fake_surface = (lc_surface *)0x1; /* validity checked first */
-    lc_swapchain_desc desc;
+    lc_swapchain_desc desc = { 0 };
     lc_result r;
 
     printf("Running LumaC swapchain validation tests...\n");

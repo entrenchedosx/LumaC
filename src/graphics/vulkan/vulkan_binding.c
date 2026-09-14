@@ -133,7 +133,6 @@ static const lc_binding_desc *lc_vk_find_slot(const lc_binding_desc *slots,
 lc_result lc_vulkan_binding_layout_create(lc_binding_layout *layout,
                                           lc_device *device,
                                           const lc_binding_layout_desc *desc) {
-    VkPhysicalDeviceProperties props;
     VkDescriptorSetLayoutBinding *vk_bindings = NULL;
     VkDescriptorSetLayoutCreateInfo info;
     uint32_t i;
@@ -149,11 +148,10 @@ lc_result lc_vulkan_binding_layout_create(lc_binding_layout *layout,
         device->physical_device == VK_NULL_HANDLE) {
         return LC_ERROR_BACKEND_UNAVAILABLE;
     }
-    memset(&props, 0, sizeof(props));
-    vkGetPhysicalDeviceProperties(device->physical_device, &props);
-    if (desc->binding_count > props.limits.maxBoundDescriptorSets) {
-        return LC_ERROR_INVALID_ARGUMENT;
-    }
+    /* maxBoundDescriptorSets limits simultaneously bound descriptor-set
+     * layouts in a pipeline layout, not bindings inside one set.  Vulkan
+     * validates the applicable per-stage/per-type descriptor limits when
+     * this layout is consumed by a pipeline. */
     for (i = 0; i < desc->binding_count; i++) {
         VkDescriptorType ignored;
 
@@ -364,8 +362,12 @@ lc_result lc_vulkan_binding_set_create(lc_binding_set *set,
         layout->device->device == VK_NULL_HANDLE) {
         return LC_ERROR_BACKEND_UNAVAILABLE;
     }
+    /* Shared pool allocator across threads (PART 24 shard: one
+     * dedicated lock today, pool-per-thread sharding reserved). */
+    lc_device_lock_desc(layout->device);
     res = lc_vk_desc_alloc(layout->device, layout->vk_layout, &pool,
                            &vk_set);
+    lc_device_unlock_desc(layout->device);
     if (res != LC_SUCCESS) {
         return res;
     }
@@ -378,7 +380,10 @@ lc_result lc_vulkan_binding_set_create(lc_binding_set *set,
         set->slots = (lc_binding_desc *)malloc(sizeof(lc_binding_desc) *
                                                layout->binding_count);
         if (set->slots == NULL) {
-            vkFreeDescriptorSets(layout->device->device, pool, 1, &vk_set);
+            lc_device_lock_desc(layout->device);
+            vkFreeDescriptorSets(layout->device->device, pool, 1,
+                                 &vk_set);
+            lc_device_unlock_desc(layout->device);
             return LC_ERROR_OUT_OF_MEMORY;
         }
         memcpy(set->slots, layout->bindings,
@@ -399,8 +404,10 @@ void lc_vulkan_binding_set_destroy(lc_binding_set *set) {
     if (set->vk_set != VK_NULL_HANDLE && set->device != NULL &&
         set->device->device != VK_NULL_HANDLE &&
         set->vk_pool != VK_NULL_HANDLE) {
+        lc_device_lock_desc(set->device);
         vkFreeDescriptorSets(set->device->device, set->vk_pool, 1,
                              &set->vk_set);
+        lc_device_unlock_desc(set->device);
         set->vk_set = VK_NULL_HANDLE;
         set->vk_pool = VK_NULL_HANDLE;
     }
@@ -428,6 +435,31 @@ static lc_result lc_vk_validate_buffer_write(
         binding->buffer->vk_buffer == VK_NULL_HANDLE) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
+    /* Tracked-state agreement (Phase 21, PART J): UNDEFINED is the
+     * legacy lenient path (buffers predate tracking); TRANSFER_DST
+     * is transfer-ordered data (every frame submit waits all
+     * in-flight transfers, and completion is monotonic, so reads
+     * after any upload are safe without an extra barrier). Other
+     * states must name a compatible read: this still catches
+     * compute/vertex/index/indirect misuse and wrong-slot reuse.
+     * Writers transition explicitly via
+     * lc_encoder_transition_buffer. */
+    {
+        lc_resource_state st = binding->buffer->buffer_state;
+
+        if (st != LC_RESOURCE_STATE_UNDEFINED &&
+            st != LC_RESOURCE_STATE_TRANSFER_DST) {
+            if (slot->type == LC_BINDING_UNIFORM_BUFFER &&
+                st != LC_RESOURCE_STATE_UNIFORM_READ) {
+                return LC_ERROR_INVALID_ARGUMENT;
+            }
+            if (slot->type == LC_BINDING_STORAGE_BUFFER &&
+                st != LC_RESOURCE_STATE_STORAGE_READ &&
+                st != LC_RESOURCE_STATE_STORAGE_WRITE) {
+                return LC_ERROR_INVALID_ARGUMENT;
+            }
+        }
+    }
     if (binding->offset >= binding->buffer->size) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
@@ -454,10 +486,13 @@ static lc_result lc_vk_validate_buffer_write(
     return LC_SUCCESS;
 }
 
-/* Validate one image-view write: liveness, device match, and sampled
- * readability over the view's exact range (tracked semantic state). */
+/* Validate one image-view write: liveness, device match, and
+ * tracked readability over the view's exact range. Sampled images
+ * require SHADER_READ; storage images require SHADER_READ_WRITE
+ * (GENERAL layout), matching the compute storage path. */
 static lc_result lc_vk_validate_image_write(
-    lc_device *device, const lc_image_view *view) {
+    lc_device *device, const lc_image_view *view,
+    lc_binding_type type) {
     if (view == NULL || !lc_binding_is_live_view(view)) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
@@ -468,7 +503,9 @@ static lc_result lc_vk_validate_image_write(
     if (!lc_vk_sync_all_equal(view->image, view->base_mip_level,
                               view->mip_level_count, view->base_array_layer,
                               view->array_layer_count,
-                              LC_RESOURCE_STATE_SHADER_READ)) {
+                              (type == LC_BINDING_STORAGE_IMAGE)
+                                  ? LC_RESOURCE_STATE_SHADER_READ_WRITE
+                                  : LC_RESOURCE_STATE_SHADER_READ)) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
     return LC_SUCCESS;
@@ -529,13 +566,16 @@ static lc_result lc_vk_validate_write(
         if (view == NULL) {
             return LC_ERROR_INVALID_ARGUMENT;
         }
-        res = lc_vk_validate_image_write(device, view);
+        res = lc_vk_validate_image_write(device, view, write->type);
         if (res != LC_SUCCESS) {
             return res;
         }
         memset(image_info, 0, sizeof(*image_info));
         image_info->imageView = view->vk_view;
-        image_info->imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        image_info->imageLayout =
+            (write->type == LC_BINDING_SAMPLED_IMAGE)
+                ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                : VK_IMAGE_LAYOUT_GENERAL;
         vk_write->descriptorType =
             (write->type == LC_BINDING_SAMPLED_IMAGE)
                 ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
@@ -609,8 +649,13 @@ lc_result lc_vulkan_binding_set_update(lc_binding_set *set,
         }
     }
     if (res == LC_SUCCESS) {
+        /* Same-set concurrent updates are an application bug, but
+         * cross-set updates from threads must not race pool
+         * internals: serialize the Vulkan call itself. */
+        lc_device_lock_desc(device);
         vkUpdateDescriptorSets(device->device, write_count, vk_writes, 0,
                                NULL);
+        lc_device_unlock_desc(device);
     }
     free(vk_writes);
     free(buffer_infos);

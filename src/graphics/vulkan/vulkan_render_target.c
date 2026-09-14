@@ -204,9 +204,13 @@ lc_result lc_vulkan_pass_cache_get(lc_device *device,
     if (device->device == VK_NULL_HANDLE) {
         return LC_ERROR_BACKEND_UNAVAILABLE;
     }
+    /* Shared cache across threads (PART 22): lookup + insert under
+     * the cache shard. */
+    lc_device_lock_cache(device);
     for (i = 0; i < device->pass_cache_count; i++) {
         if (lc_vk_pass_key_equal(&device->pass_cache[i].key, key)) {
             *out_pass = device->pass_cache[i].pass;
+            lc_device_unlock_cache(device);
             return LC_SUCCESS;
         }
     }
@@ -218,6 +222,7 @@ lc_result lc_vulkan_pass_cache_get(lc_device *device,
                 (device->pass_cache_capacity + grow));
 
         if (grown == NULL) {
+            lc_device_unlock_cache(device);
             return LC_ERROR_OUT_OF_MEMORY;
         }
         device->pass_cache = grown;
@@ -228,12 +233,14 @@ lc_result lc_vulkan_pass_cache_get(lc_device *device,
         lc_result res = lc_vk_create_pass_object(device->device, key, &pass);
 
         if (res != LC_SUCCESS) {
+            lc_device_unlock_cache(device);
             return res;
         }
         device->pass_cache[device->pass_cache_count].key = *key;
         device->pass_cache[device->pass_cache_count].pass = pass;
         device->pass_cache_count++;
         *out_pass = pass;
+        lc_device_unlock_cache(device);
         return LC_SUCCESS;
     }
 }
@@ -508,11 +515,8 @@ void lc_vulkan_render_target_destroy(lc_render_target *target) {
     if (target->device != NULL) {
         device_handle = target->device->device;
     }
-    /* Coarse but correct: a target may be referenced by in-flight
-     * frames; destroys are rare (never per-frame by contract). */
-    if (device_handle != VK_NULL_HANDLE) {
-        vkDeviceWaitIdle(device_handle);
-    }
+    /* The public destroy path steals and retires the framebuffer.
+     * No device-wide wait belongs in normal target destruction. */
     if (target->framebuffer_valid &&
         target->framebuffer != VK_NULL_HANDLE) {
         if (device_handle != VK_NULL_HANDLE) {

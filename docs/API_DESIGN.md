@@ -1,5 +1,10 @@
 # LumaC API Design Principles
 
+Phase 20 abstractions remain backend-neutral: encoders/lists map to D3D12 command
+allocators/lists, queue classes map to direct/copy/compute queues, completion
+values map to D3D12 fences, and staging maps to upload/readback heaps. No Vulkan
+handle, family index, stage, access mask, or layout enters the public API.
+
 The API is pre-1.0: breaking changes are allowed while the
 architecture is being established. What follows is binding intent,
 not marketing.
@@ -179,8 +184,10 @@ before 1.0:
   Vulkan types.
 - Small apps unaffected: buffer/image creation signatures
   unchanged; zero-init discipline already applied tree-wide.
-- New debt (do not fix now): `lc_encoder_transition_image` is
-  image-only (buffer transitions arrive with buffer tracking);
-  `lc_memory_stats` has no fragmentation percentage (largest-free
-  suffices); OOM has no retry-with-smaller-blocks policy (callers
-  size explicitly).
+- Resolved in Phase 21: `lc_encoder_transition_buffer` now covers
+  buffer states (TRANSFER/STORAGE/INDIRECT/vertex/index/uniform).
+- New debt (do not fix now): `lc_memory_stats` has no
+  fragmentation percentage (largest-free suffices); OOM has no
+  retry-with-smaller-blocks policy (callers size explicitly);
+  `drawIndirectCount` is reported but has no public draw call
+  (arrives with the async-compute scheduler).

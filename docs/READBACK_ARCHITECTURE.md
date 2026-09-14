@@ -1,5 +1,8 @@
 # Luma Readback Architecture (Phase 18, PARTs A–L, AM–AQ, AR)
 
+Phase 20 adds async requests with poll, wait, map/copy, and destroy. The
+synchronous API now schedules, waits, and maps through that same implementation.
+
 Public CPU-visible capture of GPU images through LumaC only. No
 Vulkan staging buffers, command buffers, fences, or query pools
 are exposed; no backend-private access is needed by the renderer,

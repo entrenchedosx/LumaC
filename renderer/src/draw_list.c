@@ -73,8 +73,13 @@ lr_result lr_renderer_submit(lr_renderer *renderer,
                     slot->sphere_center, &slot->sphere_radius);
     /* Every submission is stored (up to max_objects) so off-screen
      * casters still reach shadow passes; main-pass visibility is
-     * just a flag now. */
-    if (!lr_frustum_test_sphere(renderer->frustum_planes,
+     * just a flag now. GPU-driven mode skips CPU culling (the GPU
+     * decides); every item stays flagged visible for the shadow
+     * path, which re-culls per light itself. */
+    if (renderer->render_mode == LR_RENDER_MODE_GPU_DRIVEN) {
+        slot->main_visible = 1;
+        renderer->stats.visible_objects++;
+    } else if (!lr_frustum_test_sphere(renderer->frustum_planes,
                                 slot->sphere_center, slot->sphere_radius)) {
         slot->main_visible = 0;
     } else {

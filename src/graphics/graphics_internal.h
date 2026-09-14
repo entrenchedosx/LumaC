@@ -185,6 +185,147 @@ struct lc_device {
     /* Memory-budget extension (VK_EXT_memory_budget): resolved flag
      * only; the entry point is fetched per query (old loaders). */
     int mem_budget_supported;
+
+    /* Queues (Phase 20): graphics plus an optional dedicated
+     * transfer queue (PARTs M–P). */
+    uint32_t transfer_queue_family;
+    VkQueue transfer_queue;
+    int has_dedicated_transfer;
+    /* Compute queue (Phase 21): a dedicated compute family when the
+     * device offers a useful one, else the graphics family (alias).
+     * Production dispatch records into frame/worker command buffers;
+     * the separate handle exists for isolated cross-queue tests and
+     * future async compute (no scheduler yet). */
+    uint32_t compute_queue_family;
+    VkQueue compute_queue;
+    int has_dedicated_compute;
+    /* Isolated compute-submit pool (Phase 21, PART Z): transient
+     * compute-family pool + a bounded ring of parked once-submits
+     * (buffer+fence each, reclaimed non-blockingly, drained at
+     * shutdown). Submit-shard guarded. */
+    VkCommandPool compute_pool;
+    VkCommandBuffer compute_once_cmds[8];
+    VkFence compute_once_fences[8];
+    uint32_t compute_once_count;
+    /* Compute/indirect device properties (Phase 21): queried once at
+     * creation; zeros when compute is unsupported. */
+    int compute_supported;
+    int indirect_draw_supported;
+    int multi_draw_indirect;
+    int indirect_count_supported;
+    uint32_t max_workgroup_size[3];
+    uint32_t max_workgroup_count[3];
+    uint32_t max_workgroup_invocations;
+    uint32_t max_compute_shared_memory;
+    uint32_t max_compute_push_size;
+    uint32_t subgroup_size;
+    /* Enabled 1.2 feature subset (Phase 21): drawIndirectCount when
+     * offered (never blind). Outlives creation for capability
+     * reporting. */
+    VkPhysicalDeviceVulkan12Features vulkan12_enabled;
+
+    /* Timeline completion (Phase 20, PARTs Q–R): one device timeline
+     * shared by graphics and transfer submissions (one monotonic value
+     * domain). Zero when unsupported (binary-fence fallback). */
+    VkSemaphore timeline;
+    uint64_t timeline_next; /* next value to signal (starts at 1) */
+    int timeline_ok;
+    /* Newest value any frame submit signaled (retirement horizon;
+     * updated under the transfer lock at submit). */
+    uint64_t last_frame_value;
+    /* Resolved 1.2 entry points (NULL on 1.0 loaders without KHR).
+     * All three are required for timeline mode; the signal pointer
+     * lets the scheduler host-signal reserved-but-unsubmitted
+     * values on submit failure so no waiter can stall on a gap. */
+    PFN_vkGetSemaphoreCounterValue pfn_sem_counter;
+    PFN_vkWaitSemaphores pfn_sem_wait;
+    PFN_vkSignalSemaphore pfn_sem_signal;
+
+    /* Transfer scheduling (Phase 20, PARTs S–V): pool + transient
+     * command buffers + in-flight entries + staging pressure.
+     * Guarded by transfer_mutex (tiny critical sections only). */
+#if defined(_WIN32) || defined(_WIN64)
+    CRITICAL_SECTION transfer_mutex;
+#else
+    pthread_mutex_t transfer_mutex;
+#endif
+    int transfer_mutex_init;
+    VkCommandPool transfer_pool;
+    uint32_t transfer_cmds_outstanding;
+    /* Immediate graphics pool for release/acquire submits (Phase
+     * 20): transient per-submit buffers, never CPU-waited. */
+    VkCommandPool imm_pool;
+    uint32_t imm_cmds_outstanding;
+    /* Fallback (no timeline): one shared binary semaphore for
+     * transfer->graphics handoff + armed flag. */
+    VkSemaphore fallback_sem;
+    int fallback_armed;
+    uint64_t staging_cap; /* 0 = default (256 MiB) */
+    /* Test-only capability forcing (Phase 22, PARTs W-Y): copied
+     * from the device desc, honored at creation. */
+    int force_binary_fallback;
+    int force_graphics_transfer;
+    int force_graphics_compute;
+    uint64_t staging_used;
+    uint64_t staging_high_water;
+    uint64_t stat_graphics_submissions;
+    uint64_t stat_transfer_submissions;
+    uint64_t stat_bytes_uploaded;
+    uint64_t stat_bytes_read;
+    uint64_t stat_uploads_in_flight;
+    uint64_t stat_lists_in_flight;
+    /* Phase 22 concurrency diagnostics (transfer lock). */
+    uint64_t stat_staging_waits;      /* lifetime pressure waits */
+    uint64_t stat_reclaimed_transfers;/* lifetime entries unlinked */
+    uint64_t stat_retired_completed;  /* lifetime retirements run */
+    uint64_t stat_emit_retries;       /* lifetime emit-cap retries */
+    struct lc_transfer_entry *transfers; /* in-flight async work */
+    struct lc_readback_request *requests; /* live async readbacks */
+
+    /* Deferred retirement (Phase 20, PARTs AB–AD): logically dead,
+     * GPU-held resources freed after completion. */
+    struct lc_retire_entry *retire_head;
+    struct lc_retire_entry *retire_tail;
+    uint64_t retire_pending_count;
+    uint64_t retire_high_water;
+
+    /* Submission sequencing + state lock (Phase 20, PARTs I–L):
+     * tiny dedicated mutex for tracking reads/writes only — never
+     * held across recording, draws, or submits. */
+#if defined(_WIN32) || defined(_WIN64)
+    CRITICAL_SECTION state_mutex;
+#else
+    pthread_mutex_t state_mutex;
+#endif
+    int state_mutex_init;
+    uint64_t submission_seq;
+
+    /* Cache + descriptor shards (Phase 20, PARTs 22/24): dedicated
+     * small locks (never the allocator or transfer locks). */
+#if defined(_WIN32) || defined(_WIN64)
+    CRITICAL_SECTION cache_mutex;
+    CRITICAL_SECTION desc_mutex;
+#else
+    pthread_mutex_t cache_mutex;
+    pthread_mutex_t desc_mutex;
+#endif
+    int cache_mutex_init;
+    int desc_mutex_init;
+    /* Graphics submission shard (Phase 20): serializes vkQueueSubmit
+     * (+present) on the graphics queue across frame, immediate, and
+     * acquire submits from any thread. Held only around the call. */
+#if defined(_WIN32) || defined(_WIN64)
+    CRITICAL_SECTION submit_mutex;
+#else
+    pthread_mutex_t submit_mutex;
+#endif
+    int submit_mutex_init;
+
+    /* Worker command-list registry (Phase 20, PART 26): all lists
+     * with validity + referenced handles (borrowed, compare-only). */
+    struct lc_cmdlist_record *cmdlists;
+    /* Live worker encoders (liveness validation). */
+    lc_command_encoder *worker_encoders;
 };
 
 /* Opaque public buffer type, completed here. A buffer belongs to one
@@ -212,6 +353,15 @@ struct lc_buffer {
     struct lc_vk_mem_block *memory_block; /* NULL when dedicated */
     lc_memory_class memory_class; /* allocator class used */
     uint64_t allocation_size;     /* aligned suballocation bytes */
+    /* Owning queue family (Phase 20, PART Y): transfer ops update. */
+    uint32_t owner_family;
+    /* Last async transfer value touching this buffer. */
+    uint64_t xfer_value;
+    /* Semantic buffer state (Phase 21, PART J): whole-resource
+     * tracking for compute/indirect dependencies. UNDEFINED until
+     * first use; transitions publish through the sync barrier
+     * helper (state shard). */
+    lc_resource_state buffer_state;
 
     lc_buffer *next;
     lc_buffer *prev;
@@ -278,7 +428,39 @@ typedef struct lc_vk_flight {
     VkSemaphore image_available; /* signaled by acquire, waited by submit */
     VkFence fence; /* signaled when this slot's submission completes */
     VkCommandBuffer cmd; /* reusable; reset and rerecorded each use */
+    uint64_t signal_value; /* timeline value signaled (0 in fallback) */
 } lc_vk_flight;
+
+/* Opaque public compute-pipeline type, completed here. Like
+ * graphics pipelines but with a single compute shader and no
+ * render-target signature. Shares the device pipeline cache and
+ * the deferred-retirement path (LC_RETIRE_PIPELINE). */
+struct lc_compute_pipeline {
+    lc_device *device;
+    lc_resource_id resource_id; /* stable, never reused */
+    lc_shader *compute_shader;  /* borrowed, must outlive creation */
+    VkPipelineLayout layout;
+    VkPipeline pipeline;
+    const lc_binding_layout **layouts; /* slot anchors, malloc'd */
+    uint32_t layout_count;
+    lc_binding_desc **slot_signatures; /* canonical per-slot copies */
+    uint32_t *slot_signature_counts;
+    lc_push_constant_range *push_ranges; /* malloc'd copy */
+    uint32_t push_range_count;
+    lc_compute_pipeline *next;
+    lc_compute_pipeline *prev;
+};
+
+/* Validate desc (live compute shader, layouts, push ranges) and
+ * create the VkPipeline + layout. Caller owns the struct. */
+lc_result lc_vulkan_compute_pipeline_create(lc_compute_pipeline *pipeline,
+                                            lc_device *device,
+                                            const lc_compute_pipeline_desc *desc);
+
+/* Destroys VkPipeline + layout (handles already stolen read as
+ * NULL). Frees canonical CPU copies. Device must still be alive
+ * for the Vk destroys; CPU frees happen on every path. */
+void lc_vulkan_compute_pipeline_destroy(lc_compute_pipeline *pipeline);
 
 /* Opaque public command-encoder type, completed here. Borrowed from
  * an open swapchain frame (inline storage, never allocated); valid
@@ -297,6 +479,10 @@ struct lc_command_encoder {
     uint64_t bound_index_offset;
     lc_index_type bound_index_type;
     int index_bound;
+    /* Phase 21 compute: last encoder-bound compute pipeline (frame
+     * encoders clear at frame begin; worker encoders at list
+     * begin). Graphics and compute binds coexist. */
+    const lc_compute_pipeline *bound_compute_pipeline;
     /* Pass-end bookkeeping for attachment tracking (no per-frame
      * allocation: bounded copies filled at begin, consumed at end). */
     lc_image_view *end_color_views[LC_MAX_COLOR_ATTACHMENTS];
@@ -305,7 +491,179 @@ struct lc_command_encoder {
     lc_image_view *end_depth_view;
     lc_store_op end_depth_store;
     int end_has_depth;
+    /* Phase 20 worker mode: 1 when this encoder is worker-owned
+     * (lc_command_encoder_create) rather than frame-borrowed.
+     * Worker encoders record secondary buffers for one list at a
+     * time; passes never open on them (inheritance comes from the
+     * list target instead). */
+    int worker_mode;
+    lc_command_list *worker_list; /* open list, or NULL */
+    lc_device *worker_device;     /* owner when worker_mode */
+    VkCommandPool worker_pool;    /* owned pool (recycled lists) */
+    uint32_t worker_live_lists;   /* lists outstanding (pool kept) */
+    int worker_zombie;            /* destroyed with live lists */
+    struct lc_command_encoder *worker_next;
+    struct lc_command_encoder *worker_prev;
 };
+
+/* Opaque public readback request, completed here. Staging stays
+ * alive until map/destroy; completion is timeline/fence based. */
+struct lc_readback_request {
+    lc_device *device;
+    lc_image *image; /* borrowed (destroy waits in-flight refs) */
+    lc_image_readback_desc desc;
+    lc_image_readback_info info;
+    uint64_t ready_value; /* timeline completion value */
+    int mapped;
+    struct lc_transfer_entry *entry; /* linked transfer (owned here) */
+    struct lc_readback_request *next;
+    struct lc_readback_request *prev;
+};
+
+/* Opaque public command-list type, completed here. A finished
+ * secondary-style recording plus its execution-time validation
+ * log (state intents + referenced handles, compare-only). */
+struct lc_command_list {
+    lc_device *device;
+    lc_resource_id resource_id; /* stable, never reused */
+    VkCommandPool pool;         /* borrowed worker pool (frees cmd) */
+    VkCommandBuffer cmd;        /* finished secondary buffer */
+    uint32_t queue_family;      /* recording family (graphics) */
+    /* Execution context (target + pass shape, borrowed). */
+    lc_render_target *target;
+    lc_render_pass_desc pass_desc;
+    lc_render_color_attachment pass_color[LC_MAX_COLOR_ATTACHMENTS];
+    lc_render_depth_attachment pass_depth;
+    int has_depth;
+    /* Validation log (PARTs I–K, 26): transitions + bind-reads. */
+    struct lc_list_log_entry *log;
+    uint32_t log_count;
+    uint32_t log_capacity;
+    /* Referenced wrappers (borrowed pointers, compare-only; the
+     * registry poisons lists whose referents die first). */
+    const void **refs;
+    uint32_t ref_count;
+    uint32_t ref_capacity;
+    int executed; /* set after first execution (single-shot lists) */
+    /* Phase 21 compute lists: recorded without render-pass
+     * inheritance (dispatch is illegal inside a pass); execute only
+     * when the primary has no open pass. */
+    int is_compute;
+    uint64_t completion_value; /* UINT64_MAX until frame submit binds it */
+    int destroy_requested;     /* deferred while the GPU owns cmd */
+    /* Phase 22 fallback completion: borrowed flight fence stamped
+     * at frame submit (binary-fence mode has no values).
+     * fallback_bound latches once (single-shot lists bind once);
+     * the fence NULLs if its flight dies first (teardown
+     * guarantees idle, so a bound-but-fenceless list is
+     * complete). */
+    VkFence fallback_fence;
+    int fallback_bound;
+    lc_command_list *next;
+    lc_command_list *prev;
+};
+
+/* One validation-log entry: a transition intent or a bind-read
+ * assumption, both verified in execution order at execute time. */
+typedef struct lc_list_log_entry {
+    int is_transition; /* 1: transition, 0: bind-read assumption */
+    int is_buffer;     /* 1: buffer transition (image NULL) */
+    lc_image *image;
+    lc_buffer *buffer;
+    uint32_t base_mip;
+    uint32_t level_count;
+    uint32_t base_layer;
+    uint32_t layer_count;
+    lc_resource_state from; /* tracked state at record time */
+    lc_resource_state to;   /* transition destination / SHADER_READ */
+} lc_list_log_entry;
+
+/* Device command-list registry record (PART 26): validity +
+ * borrowed referents for destroy-safety. */
+typedef struct lc_cmdlist_record {
+    lc_command_list *list;
+    lc_command_encoder *encoder; /* creator, may be destroyed */
+    int valid;
+    struct lc_cmdlist_record *next;
+    struct lc_cmdlist_record *prev;
+} lc_cmdlist_record;
+
+/* In-flight async transfer entry (PARTs S–V, W–X): staging plus
+ * ownership obligations. Staging frees on GPU completion;
+ * graphics-acquire records once at a frame boundary; the entry
+ * unlinks when both are done. */
+typedef struct lc_transfer_entry {
+    int is_readback;   /* 1: image->staging copy (else staging->dst) */
+    int is_image;      /* target kind (readbacks are always images) */
+    lc_image *image;   /* borrowed; destroy waits in-flight refs */
+    lc_buffer *buffer; /* borrowed; same rule */
+    uint32_t base_mip;
+    uint32_t level_count;
+    uint32_t base_layer;
+    uint32_t layer_count;
+    uint64_t buf_offset;
+    uint64_t buf_size;
+    lc_resource_state final_state; /* images: post-copy state */
+    /* Staging (transient VkBuffer + pool suballoc). */
+    VkBuffer stage_buffer;
+    lc_vk_mem_binding stage_mem;
+    uint64_t stage_bytes;
+    /* Transfer command (transient, transfer pool). */
+    VkCommandBuffer cmd;
+    int cmd_on_transfer_pool; /* otherwise allocated from imm_pool */
+    /* Release command (transient, graphics imm pool; dedicated path
+     * only, NULL otherwise). Freed at unlink like cmd. */
+    VkCommandBuffer cmd_rel;
+    /* Completion: timeline value, or fallback fence+semaphore. */
+    uint64_t signal_value;      /* consumable (ready) value */
+    uint64_t copy_value;        /* staging releasable at this value */
+    VkFence fallback_fence;     /* on the copy submit */
+    VkSemaphore fallback_rel;   /* release submit signal (dedicated) */
+    VkSemaphore fallback_copy;  /* copy submit signal (frame waits) */
+    int staging_released;
+    int acquired; /* graphics acquire recorded */
+    int keep_until_destroy; /* readbacks: unlink only at destroy */
+    int submitted; /* submits finished (reclaim skips until set) */
+    int destroy_claimed; /* wait_for drives acquire; unlink skips */
+    struct lc_transfer_entry *next;
+    struct lc_transfer_entry *prev;
+} lc_transfer_entry;
+
+/* Deferred retirement entry (PARTs AB–AD): logically dead wrapper
+ * already freed; these Vk objects + bindings die after GPU
+ * completion. Reclaimed by timeline query (or fence status in
+ * fallback mode). */
+typedef enum lc_retire_kind {
+    LC_RETIRE_BUFFER = 0,
+    LC_RETIRE_IMAGE = 1,
+    LC_RETIRE_VIEW = 2,
+    LC_RETIRE_SAMPLER = 3,
+    LC_RETIRE_PIPELINE = 4,
+    LC_RETIRE_SET = 5,
+    LC_RETIRE_LAYOUT = 6,
+    LC_RETIRE_FRAMEBUFFER = 7
+} lc_retire_kind;
+
+typedef struct lc_retire_entry {
+    lc_retire_kind kind;
+    VkBuffer buffer;
+    VkImage image;
+    VkImageView image_view;
+    VkImageView default_view;
+    VkSampler sampler;
+    VkPipeline pipeline;
+    VkPipelineLayout pipeline_layout;
+    VkDescriptorSet set;
+    VkDescriptorPool set_pool;
+    VkDescriptorSetLayout desc_layout;
+    VkFramebuffer framebuffer;
+    lc_vk_mem_binding binding; /* owned memory (buffer/image) */
+    uint64_t signal_value;     /* timeline reclaim threshold */
+    VkFence fallback_fence;    /* fence mode reclaim gate */
+    uint64_t bytes;            /* binding size (diagnostics) */
+    struct lc_retire_entry *next;
+    struct lc_retire_entry *prev;
+} lc_retire_entry;
 
 /* Opaque public render-target type, completed here. Offscreen targets
  * are device-owned (tracked list) and borrow their views; the
@@ -403,10 +761,12 @@ struct lc_swapchain {
     lc_index_type bound_index_type;
     int index_bound; /* nonzero once bound this frame */
 
-    /* Frame lifecycle (Phase 6). Pool/buffers/sync persist across
-     * recreates; per-image tracking is rebuilt with the images. */
+    /* Frame lifecycle (Phase 6, configurable Phase 20). Pool/buffers/
+     * sync persist across recreates; per-image tracking is rebuilt
+     * with the images. flights is malloc'd to max_flights slots. */
     VkCommandPool cmd_pool;
-    lc_vk_flight flights[LC_MAX_FRAMES_IN_FLIGHT];
+    lc_vk_flight *flights;
+    uint32_t max_flights; /* from desc (default LC_MAX_FRAMES_IN_FLIGHT) */
     uint32_t current_frame; /* next flight slot, not an image index */
     VkFence *images_in_flight; /* per image: fence to wait before reuse */
     uint32_t current_image; /* acquired index, valid only mid-frame */
@@ -618,7 +978,10 @@ void lc_vulkan_buffer_destroy(lc_buffer *buffer);
  */
 lc_result lc_vulkan_buffer_write(lc_buffer *buffer, uint64_t offset,
                                  const void *data, uint64_t size);
-
+/* Synchronous download (Phase 21, test/debug path): drains prior
+ * work, copies through staging, invalidates, memcpys out. */
+lc_result lc_vulkan_buffer_read(lc_buffer *buffer, uint64_t offset,
+                                void *dst, uint64_t size);
 /* Full-range invalidate for map (non-coherent correctness). */
 lc_result lc_vulkan_buffer_invalidate(lc_buffer *buffer);
 
@@ -726,7 +1089,16 @@ struct lc_image {
      * these states; mixed states (e.g. mip 0 SHADER_READ while mip
      * 1 renders) stay representable and truthful. */
     lc_resource_state *states;
-
+    /* Owning queue family per subresource (Phase 20, PART Y):
+     * graphics family normally, transfer family while an async
+     * transfer holds the range. Parallel array to states. */
+    uint32_t *owners;
+    /* Last submission sequence touching each subresource (Phase 20,
+     * PART L epochs). Parallel array to states. */
+    uint64_t *epochs;
+    /* Last async transfer value touching this image (same-resource
+     * ordering for streaming updates). */
+    uint64_t xfer_value;
     lc_image *next;
     lc_image *prev;
 };
@@ -852,9 +1224,15 @@ lc_result lc_vulkan_encoder_transition_image(
  * tracking touch; the caller marks). Mip-generation dance. */
 lc_result lc_vk_sync_record_span(VkCommandBuffer cmd, lc_image *image,
                                 uint32_t base_mip, uint32_t level_count,
-                                uint32_t layer_count,
+                                uint32_t base_layer, uint32_t layer_count,
                                 lc_resource_state old_state,
                                 lc_resource_state new_state);
+/* Barrier parameters for one semantic state (layout + stage +
+ * access). Returns 0 for states with no image meaning. */
+int lc_vk_sync_barrier_params(lc_resource_state state,
+                              VkImageLayout *out_layout,
+                              VkPipelineStageFlags *out_stage,
+                              VkAccessFlags *out_access);
 
 /* Opaque public sampler type, completed here. Device-owned, fully
  * independent of images (no bindings exist yet). */
@@ -1032,6 +1410,12 @@ void lc_vulkan_swapchain_target_sync(lc_swapchain *swapchain);
 lc_result lc_vulkan_target_ensure_framebuffer(lc_render_target *target,
                                               VkRenderPass pass);
 
+/* Shared offscreen pass lookup + framebuffer ensure (explicit
+ * passes and worker-list inheritance share one recipe). */
+lc_result lc_vulkan_offscreen_pass(lc_device *device,
+                                   lc_render_target *target,
+                                   const lc_render_pass_desc *desc,
+                                   VkRenderPass *out_pass);
 /* Encoder recording (all require an open frame; pass state validated
  * by the caller, re-checked here defensively). */
 lc_result lc_vulkan_encoder_begin_offscreen(    lc_command_encoder *enc, lc_render_target *target,
@@ -1045,7 +1429,7 @@ lc_result lc_vulkan_encoder_bind(lc_command_encoder *enc,
 lc_result lc_vulkan_encoder_bind_set(lc_command_encoder *enc,
                                      const lc_pipeline *pipeline,
                                      uint32_t slot,
-                                     const lc_binding_set *set);
+                                     lc_binding_set *set);
 lc_result lc_vulkan_encoder_bind_vertex(lc_command_encoder *enc,
                                         uint32_t binding,
                                         const lc_buffer *buffer,
@@ -1075,4 +1459,245 @@ lc_result lc_vulkan_encoder_transition(
     uint32_t level_count, uint32_t base_layer, uint32_t layer_count,
     lc_resource_state new_state);
 
+/* Phase 20 lock shards (tiny critical sections) plus the Phase 22
+ * nesting contract. The ONLY legal cross-shard nesting is
+ * submit -> transfer (frame submission holds submit across
+ * emit->submit); taking submit while holding transfer is forbidden,
+ * as is any other cross-shard nesting. Same-shard recursion is
+ * always legal. Debug builds assert every transition; see
+ * graphics.c for the enforced order. Submit is never held across
+ * recording/draws (only frame-end finalization + submits). */
+void lc_device_lock_transfer(lc_device *device);
+void lc_device_unlock_transfer(lc_device *device);
+void lc_device_lock_state(lc_device *device);
+void lc_device_unlock_state(lc_device *device);
+void lc_device_lock_cache(lc_device *device);
+void lc_device_unlock_cache(lc_device *device);
+void lc_device_lock_desc(lc_device *device);
+void lc_device_unlock_desc(lc_device *device);
+void lc_device_lock_submit(lc_device *device);
+void lc_device_unlock_submit(lc_device *device);
+/* Nonzero when the calling thread holds the submit shard (pool
+ * domain assertions). */
+int lc_device_submit_held(void);
+
+/* Timeline query without waiting (0 when unsupported/uncreated). */
+uint64_t lc_vk_timeline_counter(lc_device *device);
+/* Next submission value (reserves and returns timeline_next++ in
+ * timeline mode; device counter otherwise). */
+uint64_t lc_vk_signal_reserve(lc_device *device);
+/* Wait for a value (timeline wait or fence fallback emulation). */
+lc_result lc_vk_signal_wait(lc_device *device, uint64_t value,
+                            uint64_t timeout_ns);
+/* Non-blocking completion test for a value. */
+int lc_vk_signal_ready(lc_device *device, uint64_t value);
+/* Retire a Vk-level resource set for later reclamation. */
+void lc_vk_retire(lc_device *device, const lc_retire_entry *entry);
+/* Bind resources destroyed during an open frame to its newly reserved
+ * completion value before submission. */
+void lc_vk_retire_bind_active_frame(lc_device *device, uint64_t value);
+/* Reclaim due staging + retirements (no blocking). */
+void lc_vk_reclaim_completed(lc_device *device);
+/* Flush ALL pending retirements (waits; shutdown path only). */
+void lc_vk_retire_flush_all(lc_device *device);
+/* Emit graphics acquires for un-acquired in-flight transfers into
+ * an open frame command buffer (frame end, before end-cmd). Appends
+ * each entry's copy semaphore to the caller's wait arrays (bounded
+ * by cap; *inout_count updated). Timeline mode needs no semaphore
+ * waits (the frame's max-value wait orders the barriers), so the
+ * arrays stay untouched there but barriers are still recorded. */
+lc_result lc_vk_emit_pending_acquires(lc_device *device,
+                                      VkCommandBuffer cmd,
+                                      VkSemaphore *wait_sems,
+                                      VkPipelineStageFlags *wait_stages,
+                                      uint32_t *inout_count, uint32_t cap);
+/* Max in-flight transfer timeline value (0 when none) for frame
+ * submit waits. */
+uint64_t lc_vk_transfer_max_inflight(lc_device *device);
+/* Wait (CPU) for in-flight transfers touching one resource, then
+ * drop those entries' refs (destroy path). */
+void lc_vk_transfer_wait_for(lc_device *device, const lc_image *image,
+                             const lc_buffer *buffer);
+/* Async schedule entry points (vulkan_transfer.c): never block on
+ * the GPU (staging pressure waits for the oldest completion only).
+ * Uploads return the completion value (0 = already complete);
+ * readbacks return an owned request. */
+lc_result lc_vk_transfer_upload_buffer(lc_device *device, lc_buffer *dst,
+                                       uint64_t dst_offset,
+                                       const void *data, uint64_t size,
+                                       uint64_t *out_value);
+lc_result lc_vk_transfer_upload_image(
+    lc_device *device, lc_image *dst, uint32_t mip_level,
+    uint32_t array_layer, uint32_t width, uint32_t height,
+    uint32_t depth, const void *data, uint64_t data_size,
+    uint64_t *out_value);
+lc_result lc_vk_transfer_readback_image(lc_device *device, lc_image *image,
+                                        uint32_t mip_level,
+                                        uint32_t array_layer,
+                                        lc_readback_request **out_request);
+/* Free every live readback request (shutdown path only; the device
+ * is idle). */
+void lc_vk_requests_flush_all(lc_device *device);
+/* Destroy one request after its own completion (public destroy). */
+void lc_vk_request_discard(lc_device *device, lc_readback_request *req);
+/* Transfer engine shutdown (pools, locks, flushed retirements). */
+void lc_vk_transfer_shutdown(lc_device *device);
+/* Command-list registry + validation. */
+void lc_vk_cmdlist_register(lc_device *device, lc_cmdlist_record *rec);
+void lc_vk_cmdlist_unregister(lc_device *device,
+                              lc_cmdlist_record *rec);
+void lc_vk_cmdlist_poison_for(lc_device *device, const void *handle);
+void lc_vk_cmdlist_bind_active_frame(lc_device *device, uint64_t value);
+void lc_vk_cmdlist_reclaim_completed(lc_device *device);
+/* Binary-fallback fence binding + flight release (PART F). */
+void lc_vk_cmdlist_bind_fallback_fence(lc_device *device,
+                                       VkFence fence);
+void lc_vk_cmdlist_release_flight(lc_device *device,
+                                  const VkFence *fences,
+                                  uint32_t fence_count);
+void lc_vk_worker_shutdown(lc_device *device);
+/* Worker liveness. */
+int lc_vk_worker_live(const lc_command_encoder *enc);
+/* Worker backend entry points (vulkan_worker.c). */
+lc_result lc_vulkan_worker_create(lc_device *device, lc_queue_type queue,
+                                  lc_command_encoder **out);
+void lc_vulkan_worker_destroy(lc_command_encoder *enc);
+lc_result lc_vulkan_worker_begin(lc_command_encoder *enc,
+                                 lc_render_target *target,
+                                 const lc_render_pass_desc *desc);
+lc_result lc_vulkan_worker_finish(lc_command_encoder *enc,
+                                  lc_command_list **out_list);
+void lc_vulkan_worker_list_destroy(lc_command_list *list);
+lc_result lc_vulkan_worker_execute(lc_command_encoder *primary,
+                                   lc_command_list *const *lists,
+                                   uint32_t list_count,
+                                   VkCommandBuffer primary_cmd);
+lc_result lc_worker_record_bind_pipeline(lc_command_encoder *enc,
+                                         const lc_pipeline *pipeline);
+lc_result lc_worker_record_bind_set(lc_command_encoder *enc,
+                                    const lc_pipeline *pipeline,
+                                    uint32_t slot, lc_binding_set *set);
+lc_result lc_worker_record_bind_vertex(lc_command_encoder *enc,
+                                       uint32_t binding, const lc_buffer *buffer,
+                                       uint64_t offset);
+lc_result lc_worker_record_bind_index(lc_command_encoder *enc,
+                                      const lc_buffer *buffer, uint64_t offset,
+                                      lc_index_type index_type);
+lc_result lc_worker_record_push(lc_command_encoder *enc,
+                                const lc_pipeline *pipeline,
+                                uint32_t visibility, uint32_t offset,
+                                uint32_t size, const void *data);
+lc_result lc_worker_record_draw(lc_command_encoder *enc,
+                                uint32_t vertex_count,
+                                uint32_t first_vertex);
+lc_result lc_worker_record_draw_indexed(
+    lc_command_encoder *enc, uint32_t index_count, uint32_t instance_count,
+    uint32_t first_index, int32_t vertex_offset, uint32_t first_instance);
+lc_result lc_worker_record_draw_instanced(
+    lc_command_encoder *enc, uint32_t vertex_count, uint32_t instance_count,
+    uint32_t first_vertex, uint32_t first_instance);
+lc_result lc_worker_record_transition(
+    lc_command_encoder *enc, lc_image *image, uint32_t base_mip,
+    uint32_t level_count, uint32_t base_layer, uint32_t layer_count,
+    lc_resource_state new_state);
+/* Compute recording into worker lists (vulkan_worker.c). */
+lc_result lc_worker_record_bind_compute_pipeline(
+    lc_command_encoder *enc, const lc_compute_pipeline *pipeline);
+lc_result lc_worker_record_dispatch(lc_command_encoder *enc, uint32_t x,
+                                    uint32_t y, uint32_t z);
+lc_result lc_worker_record_draw_indirect(lc_command_encoder *enc,
+                                         const lc_buffer *buffer,
+                                         uint64_t offset,
+                                         uint32_t draw_count,
+                                         uint32_t stride);
+lc_result lc_worker_record_draw_indexed_indirect(
+    lc_command_encoder *enc, const lc_buffer *buffer, uint64_t offset,
+    uint32_t draw_count, uint32_t stride);
+lc_result lc_worker_record_push_compute(
+    lc_command_encoder *enc, const lc_compute_pipeline *pipeline,
+    uint32_t visibility, uint32_t offset, uint32_t size,
+    const void *data);
+lc_result lc_worker_record_transition_buffer(
+    lc_command_encoder *enc, lc_buffer *buffer,
+    lc_resource_state new_state);
+/* Compute worker-list lifecycle (vulkan_worker.c). */
+lc_result lc_vulkan_worker_begin_compute(lc_command_encoder *enc);
+lc_result lc_vulkan_worker_finish_compute(lc_command_encoder *enc,
+                                          lc_command_list **out_list);
+/* Frame compute/indirect entry points (vulkan_encoder.c). */
+lc_result lc_vulkan_encoder_bind_compute_pipeline(
+    lc_command_encoder *enc, const lc_compute_pipeline *pipeline);
+lc_result lc_vulkan_encoder_dispatch(lc_command_encoder *enc, uint32_t x,
+                                     uint32_t y, uint32_t z);
+lc_result lc_vulkan_encoder_push_compute(
+    lc_command_encoder *enc, const lc_compute_pipeline *pipeline,
+    uint32_t visibility, uint32_t offset, uint32_t size,
+    const void *data);
+lc_result lc_vk_indirect_batch_valid(const lc_buffer *buffer,
+                                     uint64_t offset, uint32_t draw_count,
+                                     uint32_t stride, uint32_t elem_size);
+lc_result lc_vulkan_encoder_draw_indirect(lc_command_encoder *enc,
+                                          lc_buffer *buffer, uint64_t offset,
+                                          uint32_t draw_count,
+                                          uint32_t stride);
+lc_result lc_vulkan_encoder_draw_indexed_indirect(
+    lc_command_encoder *enc, lc_buffer *buffer, uint64_t offset,
+    uint32_t draw_count, uint32_t stride);
+lc_result lc_vulkan_encoder_transition_buffer(lc_command_encoder *enc,
+                                              lc_buffer *buffer,
+                                              lc_resource_state new_state);
+lc_result lc_vulkan_encoder_bind_compute_set(
+    lc_command_encoder *enc, const lc_compute_pipeline *pipeline,
+    uint32_t slot, lc_binding_set *set);
+lc_result lc_worker_record_bind_compute_set(
+    lc_command_encoder *enc, const lc_compute_pipeline *pipeline,
+    uint32_t slot, lc_binding_set *set);
+/* Compute worker-list lifecycle (vulkan_worker.c). */
+lc_result lc_vulkan_worker_begin_compute(lc_command_encoder *enc);
+lc_result lc_vulkan_worker_finish_compute(lc_command_encoder *enc,
+                                          lc_command_list **out_list);
+
+/* Buffer state tracking (vulkan_sync.c, Phase 21 PART J):
+ * whole-resource semantic states for compute/indirect ordering.
+ * UNDEFINED is source-only (first use, like images). */
+int lc_vk_sync_state_valid_for_buffer(lc_resource_state state);
+int lc_vk_sync_buffer_barrier_params(lc_resource_state state,
+                                     VkPipelineStageFlags *out_stage,
+                                     VkAccessFlags *out_access);
+/* Record a buffer memory barrier with explicit families (transfer
+ * shard may pass a dedicated compute family later; graphics paths
+ * use IGNORED). */
+void lc_vk_sync_record_buffer(VkCommandBuffer cmd, const lc_buffer *buffer,
+                              uint64_t offset, uint64_t size,
+                              VkPipelineStageFlags src_stage,
+                              VkAccessFlags src_access,
+                              VkPipelineStageFlags dst_stage,
+                              VkAccessFlags dst_access,
+                              uint32_t src_family, uint32_t dst_family);
+/* Mark a buffer's tracked state (transfer shard, held by caller —
+ * buffer_state lives in the transfer-owned tracking domain with
+ * owners/xfer_value, never nested). */
+void lc_vk_sync_mark_buffer(lc_buffer *buffer, lc_resource_state state);
+/* Transition helper: barrier from tracked state into cmd + mark.
+ * Rejects INVALID states and dead handles loudly. Transfer shard
+ * held by the caller. */
+lc_result lc_vulkan_buffer_transition(VkCommandBuffer cmd, lc_buffer *buffer,
+                                      lc_resource_state new_state);
+/* Registry helpers for compute pipelines (compute_pipeline.c). */
+void lc_compute_pipeline_list_add(lc_compute_pipeline *pipeline);
+void lc_compute_pipeline_list_remove(lc_compute_pipeline *pipeline);
+void lc_compute_pipeline_destroy_all(void);
+void lc_compute_pipeline_destroy_for_device(const lc_device *device);
+int lc_compute_pipeline_is_live(const lc_compute_pipeline *pipeline);
+/* Isolated cross-queue compute submit, test path only
+ * (vulkan_compute.c). Fire-and-forget in timeline mode (returns
+ * the signaled value); synchronous in fallback (returns 0). */
+lc_result lc_vk_compute_dispatch_once(
+    lc_device *device, lc_compute_pipeline *pipeline,
+    lc_binding_set *const *sets, const uint32_t *slots,
+    uint32_t set_count, const void *push_data, uint32_t push_size,
+    uint32_t x, uint32_t y, uint32_t z, uint64_t *out_value);
+/* Drain once-submits + destroy the compute pool (shutdown path). */
+void lc_vk_compute_pool_shutdown(lc_device *device);
+/* Frame compute/indirect entry points (vulkan_encoder.c). */
 #endif /* LUMAC_GRAPHICS_INTERNAL_H */

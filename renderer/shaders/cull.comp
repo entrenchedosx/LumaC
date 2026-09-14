@@ -1,0 +1,76 @@
+/* Phase 21 GPU frustum culling (one group per dispatch).
+ *
+ * Instances carry a world transform, a LOCAL bounding sphere, and
+ * metadata. The shader transforms the sphere to world space
+ * (center by the matrix, radius by the maximum axis scale, so
+ * non-uniform and negative scales stay conservative), tests it
+ * against six inward-facing frustum planes, and appends visible
+ * instance indices with an atomic counter (PART AA).
+ *
+ * Bounds safety (PART AZ40): every invocation exits early for
+ * id >= instanceCount (never reads/writes out of range), and
+ * visible writes are capacity-guarded (overflow is detected via
+ * the counter, never written out of range).
+ */
+#version 450
+
+layout(local_size_x = 64) in;
+
+struct GpuInstance {
+    mat4 model;
+    vec4 bounds;
+    uint meshIndex;
+    uint objectId;
+    uint pad0;
+    uint pad1;
+};
+
+layout(set = 0, binding = 0) readonly buffer Instances {
+    GpuInstance items[];
+} instances;
+
+layout(set = 0, binding = 1) buffer Visible {
+    uint indices[];
+} visible;
+
+layout(set = 0, binding = 2) buffer Counter {
+    uint count;
+    uint capacity;
+} counter;
+
+layout(push_constant) uniform Params {
+    vec4 planes[6];
+    uint instanceCount;
+} params;
+
+bool sphereVisible(vec3 center, float radius) {
+    for (int i = 0; i < 6; i++) {
+        vec4 plane = params.planes[i];
+        if (dot(plane.xyz, center) + plane.w < -radius) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= params.instanceCount) {
+        return;
+    }
+    GpuInstance item = instances.items[id];
+    vec3 center = (item.model * vec4(item.bounds.xyz, 1.0)).xyz;
+    /* Maximum column magnitude: safe for non-uniform scale
+     * (enlarges) and negative scale (lengths are non-negative). */
+    float sx = length(item.model[0].xyz);
+    float sy = length(item.model[1].xyz);
+    float sz = length(item.model[2].xyz);
+    float maxScale = max(sx, max(sy, sz));
+    float radius = item.bounds.w * maxScale;
+    if (sphereVisible(center, radius)) {
+        uint slot = atomicAdd(counter.count, 1u);
+        if (slot < counter.capacity) {
+            visible.indices[slot] = id;
+        }
+    }
+}

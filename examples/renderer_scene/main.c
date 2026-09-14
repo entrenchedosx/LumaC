@@ -78,7 +78,7 @@ int main(void) {
     lr_camera camera;
     lc_window_desc window_desc;
     lc_device_desc device_desc = { 0 };
-    lc_swapchain_desc swapchain_desc;
+    lc_swapchain_desc swapchain_desc = { 0 };
     unsigned long frame = 0;
     int exit_code = 1;
     static const float y_axis[3] = { 0.0f, 1.0f, 0.0f };

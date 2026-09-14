@@ -1,8 +1,17 @@
-/* Backend-neutral monotonic clock (Phase 18 profiling foundation).
+/* Backend-neutral monotonic clock (Phase 18 profiling foundation,
+ * Phase 22 nanosecond contract).
  *
- * Win32: QueryPerformanceCounter (GetTickCount64 fallback).
- * POSIX: clock_gettime(CLOCK_MONOTONIC). Differences only; the epoch
- * is arbitrary. Callable from any thread; no LumaC init required.
+ * PUBLIC CONTRACT: lc_clock_now() returns NANOSECONDS on every
+ * platform (monotonic, differences only; the epoch is arbitrary),
+ * and lc_clock_frequency() returns 1,000,000,000 (ticks per
+ * second, where one tick is one nanosecond). Timeout APIs take
+ * nanoseconds and compare directly against lc_clock_now() with no
+ * platform conversion at the call site.
+ *
+ * Win32: QueryPerformanceCounter scaled overflow-safely to ns
+ * (GetTickCount64 fallback at millisecond granularity).
+ * POSIX: clock_gettime(CLOCK_MONOTONIC). Callable from any thread;
+ * no LumaC init required.
  */
 
 /* clock_gettime needs a POSIX feature macro under strict ISO C,
@@ -23,27 +32,32 @@
 #endif
 
 uint64_t lc_clock_frequency(void) {
-#if defined(_WIN32) || defined(_WIN64)
-    LARGE_INTEGER f;
-
-    if (QueryPerformanceFrequency(&f) && f.QuadPart > 0) {
-        return (uint64_t)f.QuadPart;
-    }
-    return 10000ull; /* GetTickCount64 milliseconds */
-#else
-    return 1000000000ull; /* nanoseconds */
-#endif
+    /* Nanoseconds per second, by the contract above, on every
+     * platform. Existing *1000/frequency converters keep working
+     * unchanged (they now convert nanoseconds). */
+    return 1000000000ull;
 }
 
 uint64_t lc_clock_now(void) {
 #if defined(_WIN32) || defined(_WIN64)
     LARGE_INTEGER t;
+    LARGE_INTEGER f;
 
-    if (QueryPerformanceCounter(&t)) {
-        return (uint64_t)t.QuadPart;
+    if (QueryPerformanceCounter(&t) &&
+        QueryPerformanceFrequency(&f) && f.QuadPart > 0) {
+        uint64_t ticks = (uint64_t)t.QuadPart;
+        uint64_t freq = (uint64_t)f.QuadPart;
+
+        /* Overflow-safe ticks -> ns: split seconds and remainder.
+         * (ticks % freq) * 1e9 cannot overflow for any realistic
+         * QPC rate; absurd rates fall back to millisecond time. */
+        if (freq > 0 && freq <= 1000000000000ull) {
+            return (ticks / freq) * 1000000000ull +
+                   ((ticks % freq) * 1000000000ull) / freq;
+        }
     }
-    /* Fallback scale is 10000 ticks/sec: milliseconds * 10. */
-    return (uint64_t)GetTickCount64() * 10ull;
+    /* Fallback: millisecond granularity, scaled to nanoseconds. */
+    return (uint64_t)GetTickCount64() * 1000000ull;
 #else
     struct timespec ts;
 

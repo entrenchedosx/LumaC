@@ -15,7 +15,7 @@ int main(void) {
     lc_swapchain *swapchain = NULL;
     lc_window_desc window_desc;
     lc_device_desc device_desc = { 0 };
-    lc_swapchain_desc swapchain_desc;
+    lc_swapchain_desc swapchain_desc = { 0 };
     lc_result res;
     uint32_t last_w = 0;
     uint32_t last_h = 0;

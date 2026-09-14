@@ -1,5 +1,10 @@
 # LumaC Architecture
 
+Phase 20 adds worker encoder → immutable command list → ordered batch execution
+→ queue submission → monotonic completion value. Worker state is recording-local
+and reconciled in execution order. Transfer staging and physical destruction are
+completion-keyed instead of device-idle operations.
+
 LumaC is a backend-neutral graphics abstraction layer in C11. The
 public API (`include/lumac/lumac.h`) exposes only opaque handles,
 plain enums, and explicit result codes. Every Vulkan, Win32, or X11
@@ -219,6 +224,13 @@ systems, render graphs with transient aliasing (explicitly
 distinct from normal suballocation), and a D3D12 backend (all
 public memory/sync concepts map: classes, states, stats,
 budget).
+
+Phase 21 status: multithreaded recording, async transfer
+queues, buffer-state tracking, compute dispatch, indirect
+drawing, and renderer GPU-driven culling are implemented
+(compute/indirect/GPU-driven docs); overlapping async compute,
+Hi-Z occlusion, GPU LOD, meshlets, and render graphs remain
+future layers over these boundaries.
 
 ## Renderer layering
 
