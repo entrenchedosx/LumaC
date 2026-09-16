@@ -170,6 +170,22 @@ changes are permitted with a changelog entry.
   untouched). New `le_result` codes follow the same switch-safety
   contract.
 
+## Editor foundation (Phase 31)
+
+- Luma Editor (`led_*`, `editor/`) sits above the engine
+  (`editor → engine → assets → renderer → LumaC`, audited at
+  configure time by `editor/CMakeLists.txt`). C11, no C++ in
+  library sources, no Lua spellings (script access via
+  `le_script_*` only), no engine/renderer internals.
+- New engine enumeration APIs are append-only and stale-safe:
+  `le_world_get_roots` / `le_world_get_all_objects` /
+  `le_world_get_live_count` / `le_object_info2` (v1). `le_object_info`
+  is unchanged.
+- Editor errors are `led_result` (1000+ range; engine failures
+  surface as `LED_ERROR_ENGINE` with the code preserved). Commands
+  are plain structs (MCP-ready); undo/redo is bounded with stats;
+  Euler storage stays quaternion with ZYX-degree inspector mirror.
+
 ## Phase 18 additions
 
 - Readback (`lc_image_query_readback` / `lc_image_readback`,

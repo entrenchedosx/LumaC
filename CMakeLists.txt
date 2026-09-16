@@ -343,6 +343,15 @@ if(LUMA_BUILD_ENGINE)
     add_subdirectory(engine)
 endif()
 
+# Luma Editor (Godot-like editor foundation on public Luma Engine).
+option(LUMA_BUILD_EDITOR "Build the Luma Editor library (led_*)" ON)
+if(LUMA_BUILD_EDITOR AND NOT LUMA_BUILD_ENGINE)
+    message(FATAL_ERROR "LUMA_BUILD_EDITOR requires LUMA_BUILD_ENGINE")
+endif()
+if(LUMA_BUILD_EDITOR)
+    add_subdirectory(editor)
+endif()
+
 # Tests
 if(LUMAC_BUILD_TESTS)
     enable_testing()

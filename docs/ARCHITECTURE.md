@@ -1,6 +1,16 @@
 # LumaC Architecture
 
-Phase 27 adds the engine-owned gameplay runtime foundation —
+Phase 31 adds the Godot-like editor foundation — headless
+`EditorCore` (session, selection, commands, undo/redo, dirty
+tracking, scene I/O, play-mode isolation) plus headless
+`EditorGUI` models (hierarchy, inspector, viewport math, gizmo
+intents, console, shortcuts) over new engine enumeration APIs
+(`le_world_get_roots`, `le_world_get_all_objects`,
+`le_object_info2`) — see `EDITOR_ARCHITECTURE.md`,
+`ENGINE_REFLECTION.md`, `EDITOR_COMMANDS.md`,
+`EDITOR_UNDO_REDO.md`, `EDITOR_PLAY_MODE.md`,
+`EDITOR_VIEWPORT.md`. Phase 27 adds the engine-owned gameplay
+runtime foundation —
 input, time, and frame lifecycle (see `INPUT_ARCHITECTURE.md`,
 `INPUT_ACTIONS.md`, `TIME_ARCHITECTURE.md`,
 `FRAME_LIFECYCLE.md`). Phase 26 adds the Lua gameplay scripting

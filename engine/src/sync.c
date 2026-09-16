@@ -1118,6 +1118,71 @@ void le_object_get_info(const le_world *world, const le_object *object,
     }
 }
 
+void le_object_get_info2(const le_world *world,
+                           const le_object *object,
+                           le_object_info2 *out_info) {
+    uint32_t slot;
+    le_result code = LE_SUCCESS;
+
+    if (out_info == NULL) {
+        return;
+    }
+    memset(out_info, 0, sizeof(*out_info));
+    out_info->name = "";
+    out_info->parent = LE_OBJECT_INVALID;
+    if (world == NULL || object == NULL) {
+        return;
+    }
+    if (!le_resolve_live(world, object, &slot, &code)) {
+        return;
+    }
+    {
+        le_object_slot *s = &world->slots[slot];
+        le_object handle = { slot, s->generation, world->tag };
+
+        out_info->version = LE_OBJECT_INFO2_VERSION;
+        out_info->alive = 1;
+        out_info->enabled = s->enabled;
+        out_info->effectively_enabled =
+            le_object_is_effectively_enabled(world, &handle);
+        if (s->parent != LE_NO_LINK && s->parent >= 0 &&
+            (uint32_t)s->parent < world->capacity &&
+            world->slots[s->parent].alive) {
+            out_info->has_parent = 1;
+            out_info->parent.index = (uint32_t)s->parent;
+            out_info->parent.generation =
+                world->slots[s->parent].generation;
+            out_info->parent.world_tag = world->tag;
+        }
+        out_info->child_count = le_object_get_child_count(world, &handle);
+        out_info->has_transform = 1;
+        out_info->has_renderable =
+            ((s->present & LE_PRESENT_RENDERABLE) != 0u) ||
+            ((s->present & LE_PRESENT_ASSET_RENDERABLE) != 0u);
+        out_info->has_asset_renderable =
+            (s->present & LE_PRESENT_ASSET_RENDERABLE) != 0u;
+        out_info->has_camera =
+            (s->present & LE_PRESENT_CAMERA) != 0u;
+        out_info->has_light = (s->present & LE_PRESENT_LIGHT) != 0u;
+        out_info->has_script =
+            (s->present & LE_PRESENT_SCRIPT) != 0u;
+        if (out_info->has_script) {
+            out_info->script_failed =
+                le_object_script_failed(world, &handle);
+        }
+        out_info->has_rigid_body =
+            (s->present & LE_PRESENT_RIGID_BODY) != 0u;
+        out_info->has_collider =
+            (s->present & LE_PRESENT_COLLIDER) != 0u;
+        out_info->has_animator =
+            (s->present & LE_PRESENT_ANIMATOR) != 0u;
+        out_info->has_character =
+            (s->present & LE_PRESENT_CHARACTER) != 0u;
+        out_info->name =
+            (s->name != NULL) ? (const char *)s->name : "";
+    }
+}
+
 void le_world_get_stats(const le_world *world, le_world_stats *out_stats) {
     uint32_t i;
 

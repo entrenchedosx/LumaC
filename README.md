@@ -1,5 +1,20 @@
 # LumaC
 
+Phase 31 adds the Godot-like editor foundation on top of the engine:
+headless `EditorCore` (session, selection, undoable commands with
+bounded history + coalescing, dirty tracking, scene new/open/save/
+revert, capture→instantiate play-mode isolation with canonical
+edit-equality proof) plus headless `EditorGUI` models (hierarchy,
+inspector over static reflection tables with ZYX-Euler policy,
+orbit viewport with unproject + physics picking + AABB framing,
+math-only gizmo intents, console ring, shortcuts). New append-only
+engine enumeration APIs (`le_world_get_roots`,
+`le_world_get_all_objects`, `le_object_info2`). No GUI framework,
+no renderer submission in the editor. See
+`docs/EDITOR_ARCHITECTURE.md`, `docs/ENGINE_REFLECTION.md`,
+`docs/EDITOR_COMMANDS.md`, `docs/EDITOR_UNDO_REDO.md`,
+`docs/EDITOR_PLAY_MODE.md`, `docs/EDITOR_VIEWPORT.md`.
+
 Phase 27 adds the engine-owned gameplay runtime foundation on top
 of the Phase 26 Lua scripting runtime: backend-neutral keyboard/
 mouse input with per-frame edges, named actions with

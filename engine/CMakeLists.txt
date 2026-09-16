@@ -352,6 +352,16 @@ if(UNIX AND NOT APPLE)
 endif()
 add_test(NAME test_capsule COMMAND test_capsule)
 
+# Phase 31: enumeration + extended info tests (headless).
+add_executable(test_enumeration tests/test_enumeration.c)
+target_link_libraries(test_enumeration PRIVATE luma_engine)
+target_include_directories(test_enumeration PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_enumeration PRIVATE m)
+endif()
+add_test(NAME test_enumeration COMMAND test_enumeration)
+
 # Phase 30: shape-cast / sweep tests (headless).
 add_executable(test_cast tests/test_cast.c)
 target_link_libraries(test_cast PRIVATE luma_engine)
@@ -449,6 +459,6 @@ add_test(NAME test_animation_vulkan COMMAND test_animation_vulkan)
 # engine tests live one directory deeper, so extend their DLL search
 # path explicitly (no-op for static builds).
 if(WIN32)
-    set_tests_properties(test_engine test_engine_stress test_engine_vulkan test_scene test_scene_vulkan test_script test_script_vulkan test_input test_input_script test_input_vulkan test_input_bench test_physics test_physics_script test_physics_vulkan test_physics_bench test_animation test_animation_script test_animation_vulkan test_capsule test_cast test_ccd test_character test_character_platform test_character_script PROPERTIES
+    set_tests_properties(test_engine test_engine_stress test_engine_vulkan test_scene test_scene_vulkan test_script test_script_vulkan test_input test_input_script test_input_vulkan test_input_bench test_physics test_physics_script test_physics_vulkan test_physics_bench test_animation test_animation_script test_animation_vulkan test_capsule test_cast test_ccd test_character test_character_platform test_character_script test_enumeration PROPERTIES
         ENVIRONMENT "PATH=$<TARGET_FILE_DIR:lumac>\;$ENV{PATH}")
 endif()

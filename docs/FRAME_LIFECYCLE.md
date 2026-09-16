@@ -139,6 +139,12 @@ Convenience and test spellings:
 - The per-engine snapshot means a future editor can attach
   one engine per viewport or share one engine across
   viewports with documented sharing semantics.
+- Phase 31 builds that editor foundation (`EDITOR_PLAY_MODE.md`):
+  play mode captures the edit world and instantiates a runtime
+  fork on the same engine; ticks step ONLY the runtime world via
+  `le_engine_step` while the edit world gets matrices-only
+  `le_world_update(edit, 0)` (scripts never run on edit). Per-world
+  pause + single-step compose as documented above.
 - Lua bindings stay thin over the C API so a future
   native or AOT backend implements the same contract:
   same snapshot visibility, same `update(dt)` value as

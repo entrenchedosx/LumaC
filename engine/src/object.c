@@ -672,6 +672,79 @@ uint32_t le_world_get_root_count(const le_world *world) {
     return n;
 }
 
+/* Root handles in deterministic ascending-slot order (editor
+ * outliner primitive; counting query when out_roots is NULL). */
+le_result le_world_get_roots(le_world *world, le_object *out_roots,
+                             uint32_t capacity, uint32_t *out_count) {
+    uint32_t i;
+    uint32_t n = 0;
+
+    if (out_count != NULL) {
+        *out_count = 0;
+    }
+    if (world == NULL) {
+        return LE_ERROR_INVALID_ARGUMENT;
+    }
+    for (i = 0; i < world->capacity; i++) {
+        if (world->slots[i].alive &&
+            world->slots[i].parent == LE_NO_LINK) {
+            n++;
+        }
+    }
+    if (out_count != NULL) {
+        *out_count = n;
+    }
+    if (out_roots != NULL && capacity > 0 && n > 0) {
+        uint32_t want = (n < capacity) ? n : capacity;
+        uint32_t filled = 0;
+
+        for (i = 0; i < world->capacity && filled < want; i++) {
+            if (world->slots[i].alive &&
+                world->slots[i].parent == LE_NO_LINK) {
+                out_roots[filled].index = i;
+                out_roots[filled].generation =
+                    world->slots[i].generation;
+                out_roots[filled].world_tag = world->tag;
+                filled++;
+            }
+        }
+    }
+    return LE_SUCCESS;
+}
+
+uint32_t le_world_get_live_count(const le_world *world) {
+    if (world == NULL) {
+        return 0;
+    }
+    return world->alive_count;
+}
+
+/* Full live-object census in ascending-slot order (editor bulk
+ * primitive; counting query when out_objects is NULL). */
+uint32_t le_world_get_all_objects(le_world *world,
+                                  le_object *out_objects,
+                                  uint32_t capacity) {
+    uint32_t i;
+    uint32_t filled = 0;
+
+    if (world == NULL) {
+        return 0;
+    }
+    if (out_objects == NULL || capacity == 0) {
+        return world->alive_count;
+    }
+    for (i = 0; i < world->capacity && filled < capacity; i++) {
+        if (world->slots[i].alive) {
+            out_objects[filled].index = i;
+            out_objects[filled].generation =
+                world->slots[i].generation;
+            out_objects[filled].world_tag = world->tag;
+            filled++;
+        }
+    }
+    return filled;
+}
+
 /* First live object with an exact name match (ascending slot
  * order — deterministic; names are convenience, NOT identity). */
 int le_world_find_by_name(le_world *world, const char *name,

@@ -1,4 +1,4 @@
-# Luma Engine Architecture (Phase 24; scripting Phase 26; input/time/lifecycle Phase 27; physics Phase 28; animation Phase 29)
+# Luma Engine Architecture (Phase 24; scripting Phase 26; input/time/lifecycle Phase 27; physics Phase 28; animation Phase 29; editor enumeration Phase 31)
 
 Luma Engine (`engine/`, `le_*`, static library) is the scene layer:
 generational objects, hierarchy, transforms, lightweight components,
@@ -176,7 +176,6 @@ minimize handling, per-world pause, `Input`/`Time` Lua bindings.
 Gamepad OS backends deferred (API real, reporting PARTIAL).
 
 ## Phase 26 additions
-
 Lua scripting runtime (`LUA_SCRIPTING.md`, `SCRIPT_RUNTIME.md`,
 `SCRIPT_BINDING_API.md`, `SCRIPT_AOT.md`): vendored Lua 5.4.8,
 one state per engine, `le_script_backend_ops` ABI, lifecycle
@@ -185,3 +184,17 @@ bindings over the Phase 25 public API, `export()` properties,
 `LE_COMPONENT_SCRIPT` / `LE_ASSET_SCRIPT`, `script` + `sprop`
 scene lines (never VM state), transactional reload, budgets. The
 native AOT compiler stays explicitly deferred.
+
+## Phase 31 additions
+
+Editor enumeration closes the outliner gap (`ENGINE_REFLECTION.md`,
+`EDITOR_ARCHITECTURE.md`): `le_world_get_roots` (ascending-slot
+root listing — the only root accessor beyond the count),
+`le_world_get_all_objects` + `le_world_get_live_count` (bulk
+census), `le_object_info2` v1 (full presence bits incl.
+script/physics/animator/character + asset-spelling flag +
+script-failed; `le_object_info` unchanged). `test_enumeration`
+(55 checks) pins counting/fill/truncation/determinism/stale-zero
+semantics. Consumers live one layer up in `editor/` (`led_*`),
+which uses only these public APIs — no internals cross the
+boundary.

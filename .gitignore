@@ -17,6 +17,8 @@ build-wsl/
 build-wsl-p26/
 build-wsl-asan/
 build-wsl-tsan/
+build-linux-p31/
+build-linux-asan/
 build_base/
 out/
 

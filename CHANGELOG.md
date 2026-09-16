@@ -1,5 +1,45 @@
 # Changelog
 
+## Phase 31
+
+- Added Luma Editor foundation (`editor/`, `led_*`, static C11
+  library on public engine APIs only; `editor → engine → assets →
+  renderer → LumaC`, configure-time backend/Lua-confinement audit):
+  headless `EditorCore` (session attach/detach/tick/stats,
+  liveness-filtered selection with stale/slot-reuse pruning,
+  subtree + by-name select), static reflection tables
+  (describe/list/find/read/write over validated engine getters,
+  ZYX-Euler-degree inspector mirror over quaternion storage,
+  script exports enumerated live), hierarchy + inspector models,
+  undoable commands (18 kinds incl. subtree-snapshot delete,
+  validate-then-apply, bounded history with eviction stats +
+  TRS-drag coalescing), dirty-tracked scene new/open/save/revert
+  (transactional open, failed save keeps dirty, canonical
+  save→load→save oracle), play-mode isolation (capture edit →
+  instantiate runtime fork → step runtime only → destroy on exit;
+  edit byte-identical oracle; runtime-only script-stepping proof),
+  orbit viewport (unproject round-trip, physics picking, AABB
+  compose/frame, math-only gizmo intents + line-soup preview),
+  console ring + script-error mirror, shortcut table + focus
+  policy, versioned project sidecar. No GUI framework, no editor
+  renderer submission (Phase 32 work explicitly deferred).
+- Added append-only engine enumeration APIs: `le_world_get_roots`
+  (ascending-slot root listing), `le_world_get_all_objects` +
+  `le_world_get_live_count` (bulk census), `le_object_info2` v1
+  (full presence bits incl. script/physics/animator/character +
+  asset-spelling flag + script-failed; `le_object_info` unchanged).
+- Tests: `test_enumeration` (55), `test_editor_core` (136),
+  `test_editor_history` (145), `test_editor_play` (121),
+  `test_editor_viewport` (69), `test_editor_reflect` (101);
+  10k-command undo/redo stress (byte-exact), 100k-object
+  enumeration (reported), ASan/UBSan clean (one real
+  strncpy-overlap fix in scene save), Linux + shared matrices.
+- Docs: `docs/{EDITOR_ARCHITECTURE,ENGINE_REFLECTION,
+  EDITOR_COMMANDS,EDITOR_UNDO_REDO,EDITOR_PLAY_MODE,
+  EDITOR_VIEWPORT,PHASE31_DESIGN}.md`; updated `ARCHITECTURE.md`,
+  `ENGINE_ARCHITECTURE.md`, `API_DESIGN.md`, `FRAME_LIFECYCLE.md`,
+  `README.md`.
+
 ## Phase 27
 
 - Added engine-owned input (per `le_engine`, worlds share one

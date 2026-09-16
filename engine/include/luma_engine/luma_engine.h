@@ -506,6 +506,40 @@ LE_API le_result le_object_get_children(const le_world *world,
 /** Count root objects (parentless live objects; 0 for NULL). */
 LE_API uint32_t le_world_get_root_count(const le_world *world);
 
+/** List root objects (parentless live objects) in deterministic
+ *  order (ascending slot index): writes up to `capacity` handles
+ *  into `out_roots`, always reports the full count in `out_count`
+ *  (either may be NULL for a counting query). Stale-free by
+ *  construction: handles are minted from live slots at call time.
+ *  Phase 31 editor-outliner primitive (roots seed hierarchy
+ *  traversal; per-object children come from le_object_get_children).
+ *
+ * @return LE_SUCCESS, LE_ERROR_INVALID_ARGUMENT (NULL world).
+ */
+LE_API le_result le_world_get_roots(le_world *world,
+                                    le_object *out_roots,
+                                    uint32_t capacity,
+                                    uint32_t *out_count);
+
+/** Count live objects with a full-handle census (0 for NULL).
+ *  Companion to le_world_get_object_count for editor enumeration
+ *  loops (count first, then le_world_get_all_objects). */
+LE_API uint32_t le_world_get_live_count(const le_world *world);
+
+/** List every live object in deterministic ascending-slot order:
+ *  writes up to `capacity` handles into `out_objects`, returns the
+ *  number written. Counting query when `out_objects` is NULL (or
+ *  capacity 0): returns the full live count. Handles are minted
+ *  from live slots at call time (never stale on return). Phase 31
+ *  editor/inspection primitive (100k-scale enumeration, selection
+ *  validation, hierarchy rebuilds).
+ *
+ * @return live-handle count written (or total when counting).
+ */
+LE_API uint32_t le_world_get_all_objects(le_world *world,
+                                         le_object *out_objects,
+                                         uint32_t capacity);
+
 /* ------------------------------------------------------------------
  * Minimal component model (transform is universal; the rest below
  * are optional per-object records keyed by stable handle).
@@ -915,6 +949,44 @@ typedef struct le_object_info {
 LE_API void le_object_get_info(const le_world *world,
                                const le_object *object,
                                le_object_info *out_info);
+
+/** Extended per-object snapshot (Phase 31: covers every component
+ *  including script/physics/animator/character, which predate
+ *  le_object_info). Plain data; names borrowed (same lifetime as
+ *  le_object_get_info). `version` is always LE_OBJECT_INFO2_VERSION
+ *  on success (0 when out is zeroed for NULL/stale input).
+ *  `has_asset_renderable` distinguishes the Phase 25 asset-backed
+ *  spelling from the Phase 24 pointer spelling (`has_renderable`
+ *  covers either, matching le_object_has_component(RENDERABLE)). */
+#define LE_OBJECT_INFO2_VERSION ((uint32_t)1)
+typedef struct le_object_info2 {
+    uint32_t version;
+    int alive;
+    int enabled;
+    int effectively_enabled;
+    le_object parent;
+    int has_parent;
+    uint32_t child_count;
+    int has_transform;
+    int has_renderable;
+    int has_asset_renderable;
+    int has_camera;
+    int has_light;
+    int has_script;
+    int script_failed;
+    int has_rigid_body;
+    int has_collider;
+    int has_animator;
+    int has_character;
+    const char *name;
+} le_object_info2;
+
+/** Copy out one object's extended snapshot (zeros/"" for NULL/
+ *  stale input with version 0; out may be NULL for a no-op).
+ *  Never crashes on stale/cross-world input. */
+LE_API void le_object_get_info2(const le_world *world,
+                                const le_object *object,
+                                le_object_info2 *out_info);
 
 /** World statistics snapshot (plain counts; zeros for NULL). */
 typedef struct le_world_stats {
