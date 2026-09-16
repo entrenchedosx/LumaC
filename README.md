@@ -1,18 +1,18 @@
 # LumaC
 
-Phase 26 adds the Lua gameplay scripting runtime on top of the
-Phase 25 engine assets/scenes/serialization: Lua 5.4.8 vendored
-unmodified in `third_party/lua/`, one `lua_State` per engine with
-sandboxed stdlibs, `World`/`Object`/`Assets` engine bindings,
-`start`/`update`/`fixed_update`/`destroy` lifecycle dispatch,
-`export()`-declared properties, script components on objects,
-scene `script`/`sprop` persistence (never VM state), transactional
-reload, memory + instruction budgets, and an AOT-compatible script
-ABI (`Script semantics ─┤├→ Engine operations`; native compiler
-explicitly NOT implemented). See `docs/LUA_SCRIPTING.md`,
-`docs/SCRIPT_RUNTIME.md`, `docs/SCRIPT_BINDING_API.md`,
-`docs/SCRIPT_AOT.md`, `docs/SCRIPTING_ARCHITECTURE.md`, and
-`examples/lua_scene/`.
+Phase 27 adds the engine-owned gameplay runtime foundation on top
+of the Phase 26 Lua scripting runtime: backend-neutral keyboard/
+mouse input with per-frame edges, named actions with
+multi-binding aggregates, digital/analog axes, prioritized input
+contexts, deterministic injection (same state machine as platform
+events), engine-owned time (scaled/unscaled delta/elapsed, frame
+index, scale/clamp/pause/single-step), an explicit frame lifecycle
+(`begin_frame`/`update`/`end_frame`/`frame`/`step`), quit/resize/
+minimize handling, per-world pause, and `Input`/`Time` Lua
+bindings with dt consistency. Gamepad reports honestly PARTIAL
+(API real, OS backends deferred). See `docs/INPUT_ARCHITECTURE.md`,
+`docs/INPUT_ACTIONS.md`, `docs/TIME_ARCHITECTURE.md`,
+`docs/FRAME_LIFECYCLE.md`, and `examples/lua_input/`.
 
 Lightweight cross-platform graphics API written in C11, with native Windows/Linux windowing and a Vulkan backend.
 
@@ -449,6 +449,13 @@ persistence, reload, budgets, AOT-compatible ABI (no compiler,
 no JIT, no physics — see `docs/LUA_SCRIPTING.md` and
 `examples/lua_scene/`).
 
+Gameplay runtime — done (Phase 27): engine-owned input (keys,
+mouse, edges, actions, axes, contexts, injection), engine-owned
+time (scale, clamp, pause, fixed schedule), explicit frame
+lifecycle with host-owned loop, Input/Time Lua bindings
+(gamepad OS backends deferred — see `docs/INPUT_ARCHITECTURE.md`
+and `examples/lua_input/`).
+
 Lighting — done (Phase 15/16): Cook-Torrance PBR (metallic workflow,
 normal mapping, emissive, occlusion), directional/point/spot lights,
 and PCF shadow mapping (fitted directional + cone spot, opt-in
@@ -476,14 +483,16 @@ LumaC/
 │                        # INTEGRATION/SCRIPTING_ARCHITECTURE.md,
 │                        # LUA_SCRIPTING/SCRIPT_RUNTIME/SCRIPT_BINDING_API/
 │                        # SCRIPT_AOT.md,
+│                        # INPUT_ARCHITECTURE/INPUT_ACTIONS/
+│                        # TIME_ARCHITECTURE/FRAME_LIFECYCLE.md,
 │                        # ENGINE_ASSET/SCENE/SERIALIZATION/
 │                        # PERSISTENT_IDENTITY_ARCHITECTURE.md,
 │                        # ASSET_ARCHITECTURE.md, PBR_ARCHITECTURE.md,
 │                        # SHADOW_ARCHITECTURE.md, images/
 ├── engine/              # luma_engine (le_*): generational objects,
 │                        # worlds, hierarchy, transforms, components,
-│                        # assets, scenes, serialization, Lua scripting
-│                        # + tests
+│                        # assets, scenes, serialization, Lua scripting,
+│                        # input/time/lifecycle + tests
 ├── renderer/            # luma_renderer (lr_*): renderer, mesh,
 │                        # material (unlit + PBR), lights, shadows,
 │                        # camera, draw list + shaders/tests
@@ -496,7 +505,7 @@ LumaC/
 │                        # cube_3d (+ shaders/), render_to_texture (+ shaders/),
 │                        # renderer_scene, model_viewer, pbr_scene,
 │                        # shadow_scene, visibility_scene, engine_scene,
-│                        # scene_roundtrip, lua_scene
+│                        # scene_roundtrip, lua_scene, lua_input
 ├── include/lumac/       # public lumac.h
 ├── src/                 # core, platform, graphics, vulkan backend
 ├── tests/               # headless unit tests + Vulkan integration tests

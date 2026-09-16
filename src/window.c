@@ -1,8 +1,15 @@
 #include <stdlib.h>
+#include <string.h>
 
 #include "lumac/lumac.h"
 #include "internal/lumac_internal.h"
 #include "platform/platform.h"
+
+/* Phase 27: bounded per-window event queue (ring buffer, geometric
+ * growth to a cap; oldest dropped when full so the OS pump never
+ * blocks on an unread queue). */
+#define LC_EVENT_INITIAL_CAP 64u
+#define LC_EVENT_MAX_CAP 4096u
 
 static void lc_window_list_add(lc_window *window) {
     lc_state *state = lc_get_internal_state();
@@ -83,6 +90,11 @@ void lc_window_destroy(lc_window *window) {
     lc_surface_destroy_for_window(window);
     lc_window_list_remove(window);
     lc_platform_destroy(window);
+    free(window->events);
+    window->events = NULL;
+    window->event_cap = 0;
+    window->event_head = 0;
+    window->event_count = 0;
     free(window);
 }
 
@@ -123,4 +135,100 @@ uint32_t lc_window_get_height(const lc_window *window) {
         return 0;
     }
     return window->height;
+}
+
+void lc_window_push_event(lc_window *window,
+                          const lc_window_event *event) {
+    uint32_t tail;
+
+    if (window == NULL || event == NULL) {
+        return;
+    }
+    if (event->type == LC_EVENT_NONE) {
+        return;
+    }
+    if (window->events == NULL || window->event_cap == 0) {
+        window->events = (lc_window_event *)calloc(
+            LC_EVENT_INITIAL_CAP, sizeof(lc_window_event));
+        if (window->events == NULL) {
+            return;
+        }
+        window->event_cap = LC_EVENT_INITIAL_CAP;
+        window->event_head = 0;
+        window->event_count = 0;
+    }
+    if (window->event_count >= window->event_cap) {
+        if (window->event_cap < LC_EVENT_MAX_CAP) {
+            uint32_t grown = window->event_cap * 2u;
+            lc_window_event *fresh;
+            uint32_t i;
+
+            if (grown > LC_EVENT_MAX_CAP) {
+                grown = LC_EVENT_MAX_CAP;
+            }
+            fresh = (lc_window_event *)calloc(
+                grown, sizeof(lc_window_event));
+            if (fresh != NULL) {
+                for (i = 0; i < window->event_count; i++) {
+                    fresh[i] = window->events[
+                        (window->event_head + i) %
+                        window->event_cap];
+                }
+                free(window->events);
+                window->events = fresh;
+                window->event_cap = grown;
+                window->event_head = 0;
+            } else {
+                /* OOM: drop the oldest, keep the pump live. */
+                window->event_head =
+                    (window->event_head + 1u) % window->event_cap;
+                window->event_count--;
+            }
+        } else {
+            /* Full at cap: drop the oldest, keep the newest. */
+            window->event_head =
+                (window->event_head + 1u) % window->event_cap;
+            window->event_count--;
+        }
+    }
+    tail = (window->event_head + window->event_count) %
+        window->event_cap;
+    window->events[tail] = *event;
+    window->events[tail].window = window;
+    window->event_count++;
+}
+
+lc_result lc_window_read_event(lc_window *window,
+                               lc_window_event *out) {
+    if (window == NULL || out == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    memset(out, 0, sizeof(*out));
+    out->type = LC_EVENT_NONE;
+    out->window = window;
+    if (window->events == NULL || window->event_count == 0) {
+        return LC_SUCCESS;
+    }
+    *out = window->events[window->event_head];
+    out->window = window;
+    window->event_head =
+        (window->event_head + 1u) % window->event_cap;
+    window->event_count--;
+    return LC_SUCCESS;
+}
+
+lc_result lc_window_drain_events(lc_window *window) {
+    if (window == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    window->event_head = 0;
+    window->event_count = 0;
+    return LC_SUCCESS;
+}
+
+uint32_t lc_window_pending_events(const lc_window *window) {
+    if (window == NULL) {
+        return 0;
+    }
+    return window->event_count;
 }

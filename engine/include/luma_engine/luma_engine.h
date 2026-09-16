@@ -1602,6 +1602,468 @@ LE_API int le_asset_id_equal(const le_asset_id *a,
 LE_API int le_asset_id_is_nil(const le_asset_id *id);
 
 /* ------------------------------------------------------------------
+ * Input, time, and frame lifecycle (Phase 27): engine-owned
+ * gameplay runtime services. Lua consumes them through bindings;
+ * future native/AOT scripts use these same C APIs directly.
+ *
+ * Input ownership: the ENGINE owns input state per le_engine.
+ * Platform backends (Win32/X11) translate OS events into the
+ * backend-neutral lc_window_event queue; the engine drains that
+ * queue into one finalized per-frame snapshot shared by every
+ * world on the engine. Worlds observe the same snapshot but keep
+ * independent object/script state. No gameplay input logic lives
+ * in Lua, the renderer, or any graphics backend.
+ *
+ * Threading: poll + advance + query on the owning thread only
+ * (same contract as scripts). No thread safety is claimed.
+ *
+ * Coordinate convention: mouse position is client-area pixels,
+ * origin top-left, +x right, +y down. Deltas are pixels of
+ * relative motion accumulated since the previous input frame.
+ * Wheel is detents (lines), up/right positive.
+ * ------------------------------------------------------------------ */
+
+/** Backend-neutral physical key identity (mirrors lc_keycode
+ *  ordering; Luma-owned values, never Win32 VK_* or X11 KeySym). */
+typedef enum le_key {
+    LE_KEY_UNKNOWN = 0,
+    LE_KEY_A = 1, LE_KEY_B, LE_KEY_C, LE_KEY_D, LE_KEY_E,
+    LE_KEY_F, LE_KEY_G, LE_KEY_H, LE_KEY_I, LE_KEY_J, LE_KEY_K,
+    LE_KEY_L, LE_KEY_M, LE_KEY_N, LE_KEY_O, LE_KEY_P, LE_KEY_Q,
+    LE_KEY_R, LE_KEY_S, LE_KEY_T, LE_KEY_U, LE_KEY_V, LE_KEY_W,
+    LE_KEY_X, LE_KEY_Y, LE_KEY_Z,
+    LE_KEY_0 = 30, LE_KEY_1, LE_KEY_2, LE_KEY_3, LE_KEY_4,
+    LE_KEY_5, LE_KEY_6, LE_KEY_7, LE_KEY_8, LE_KEY_9,
+    LE_KEY_ESCAPE = 50, LE_KEY_ENTER, LE_KEY_TAB, LE_KEY_SPACE,
+    LE_KEY_BACKSPACE,
+    LE_KEY_LEFT_SHIFT = 60, LE_KEY_RIGHT_SHIFT,
+    LE_KEY_LEFT_CONTROL, LE_KEY_RIGHT_CONTROL,
+    LE_KEY_LEFT_ALT, LE_KEY_RIGHT_ALT,
+    LE_KEY_LEFT_SUPER, LE_KEY_RIGHT_SUPER,
+    LE_KEY_LEFT = 70, LE_KEY_RIGHT, LE_KEY_UP, LE_KEY_DOWN,
+    LE_KEY_INSERT = 80, LE_KEY_DELETE, LE_KEY_HOME, LE_KEY_END,
+    LE_KEY_PAGE_UP, LE_KEY_PAGE_DOWN,
+    LE_KEY_F1 = 90, LE_KEY_F2, LE_KEY_F3, LE_KEY_F4, LE_KEY_F5,
+    LE_KEY_F6, LE_KEY_F7, LE_KEY_F8, LE_KEY_F9, LE_KEY_F10,
+    LE_KEY_F11, LE_KEY_F12,
+    LE_KEY_NUMPAD_0 = 110, LE_KEY_NUMPAD_1, LE_KEY_NUMPAD_2,
+    LE_KEY_NUMPAD_3, LE_KEY_NUMPAD_4, LE_KEY_NUMPAD_5,
+    LE_KEY_NUMPAD_6, LE_KEY_NUMPAD_7, LE_KEY_NUMPAD_8,
+    LE_KEY_NUMPAD_9, LE_KEY_NUMPAD_DECIMAL, LE_KEY_NUMPAD_DIVIDE,
+    LE_KEY_NUMPAD_MULTIPLY, LE_KEY_NUMPAD_SUBTRACT,
+    LE_KEY_NUMPAD_ADD, LE_KEY_NUMPAD_ENTER, LE_KEY_NUMPAD_EQUAL,
+    LE_KEY_MINUS = 130, LE_KEY_EQUAL, LE_KEY_LEFT_BRACKET,
+    LE_KEY_RIGHT_BRACKET, LE_KEY_BACKSLASH, LE_KEY_SEMICOLON,
+    LE_KEY_APOSTROPHE, LE_KEY_GRAVE, LE_KEY_COMMA, LE_KEY_PERIOD,
+    LE_KEY_SLASH, LE_KEY_CAPS_LOCK,
+    LE_KEY_COUNT = 143
+} le_key;
+
+/** Backend-neutral mouse buttons. */
+typedef enum le_mouse_button {
+    LE_MOUSE_LEFT = 0,
+    LE_MOUSE_RIGHT = 1,
+    LE_MOUSE_MIDDLE = 2,
+    LE_MOUSE_4 = 3,
+    LE_MOUSE_5 = 4,
+    LE_MOUSE_BUTTON_COUNT = 5
+} le_mouse_button;
+
+/** Backend-neutral gamepad buttons (engine API is real; platform
+ *  reporting is PARTIAL in Phase 27 — see le_gamepad_is_connected). */
+typedef enum le_gamepad_button {
+    LE_GAMEPAD_A = 0, LE_GAMEPAD_B, LE_GAMEPAD_X, LE_GAMEPAD_Y,
+    LE_GAMEPAD_LEFT_BUMPER, LE_GAMEPAD_RIGHT_BUMPER,
+    LE_GAMEPAD_BACK, LE_GAMEPAD_START,
+    LE_GAMEPAD_LEFT_STICK, LE_GAMEPAD_RIGHT_STICK,
+    LE_GAMEPAD_DPAD_UP, LE_GAMEPAD_DPAD_DOWN,
+    LE_GAMEPAD_DPAD_LEFT, LE_GAMEPAD_DPAD_RIGHT,
+    LE_GAMEPAD_BUTTON_COUNT = 14
+} le_gamepad_button;
+
+/** Backend-neutral gamepad axes (sticks [-1,+1], triggers [0,1]). */
+typedef enum le_gamepad_axis {
+    LE_GAMEPAD_AXIS_LEFT_X = 0, LE_GAMEPAD_AXIS_LEFT_Y,
+    LE_GAMEPAD_AXIS_RIGHT_X, LE_GAMEPAD_AXIS_RIGHT_Y,
+    LE_GAMEPAD_AXIS_LEFT_TRIGGER, LE_GAMEPAD_AXIS_RIGHT_TRIGGER,
+    LE_GAMEPAD_AXIS_COUNT = 6
+} le_gamepad_axis;
+
+/** Modifier snapshot (mirrors lc_key_mod). */
+typedef enum le_key_mod {
+    LE_MOD_NONE = 0,
+    LE_MOD_SHIFT = 1 << 0,
+    LE_MOD_CONTROL = 1 << 1,
+    LE_MOD_ALT = 1 << 2,
+    LE_MOD_SUPER = 1 << 3
+} le_key_mod;
+
+/** Cursor mode (request; the platform applies best-effort). */
+typedef enum le_cursor_mode {
+    LE_CURSOR_NORMAL = 0,
+    LE_CURSOR_HIDDEN = 1,
+    LE_CURSOR_CAPTURED = 2
+} le_cursor_mode;
+
+/** Opaque input action (index into the engine action registry;
+ *  resolve once via le_input_find_action, then pass by value). */
+typedef struct le_input_action {
+    uint32_t index;
+    uint32_t generation;
+} le_input_action;
+
+extern const le_input_action LE_INPUT_ACTION_INVALID;
+
+/** Opaque input axis (same registry discipline as actions). */
+typedef struct le_input_axis {
+    uint32_t index;
+    uint32_t generation;
+} le_input_axis;
+
+extern const le_input_axis LE_INPUT_AXIS_INVALID;
+
+/** Opaque input context (a named map of actions/axes). */
+typedef struct le_input_context {
+    uint32_t index;
+    uint32_t generation;
+} le_input_context;
+
+extern const le_input_context LE_INPUT_CONTEXT_INVALID;
+
+/* Binding source kinds (one action/axis binding each). */
+typedef enum le_binding_kind {
+    LE_BINDING_KEY = 0,
+    LE_BINDING_MOUSE_BUTTON = 1,
+    LE_BINDING_GAMEPAD_BUTTON = 2,
+    LE_BINDING_GAMEPAD_AXIS = 3, /* axis binding: full deflection */
+    LE_BINDING_MOUSE_DELTA_X = 4,/* axis binding: pixels/frame */
+    LE_BINDING_MOUSE_DELTA_Y = 5,
+    LE_BINDING_MOUSE_WHEEL_X = 6,/* axis binding: detents/frame */
+    LE_BINDING_MOUSE_WHEEL_Y = 7
+} le_binding_kind;
+
+typedef struct le_input_binding {
+    le_binding_kind kind;
+    /* Payload by kind: KEY -> key; MOUSE_BUTTON -> mouse_button;
+     * GAMEPAD_BUTTON -> gamepad_button + gamepad_slot;
+     * GAMEPAD_AXIS -> gamepad_axis + gamepad_slot. */
+    le_key key;
+    le_mouse_button mouse_button;
+    le_gamepad_button gamepad_button;
+    le_gamepad_axis gamepad_axis;
+    uint32_t gamepad_slot;
+    /* Axis bindings: which pole this binding drives (-1/+1) for
+     * digital sources, or full-range scale for analog/motion. */
+    float scale;
+} le_input_binding;
+
+/** Action consume mask: which contexts an event routes to. */
+typedef enum le_consume_mask {
+    LE_CONSUME_NONE = 0,
+    LE_CONSUME_KEYBOARD = 1 << 0,
+    LE_CONSUME_MOUSE = 1 << 1,
+    LE_CONSUME_ALL = 0x7FFFFFFF
+} le_consume_mask;
+
+/* ---- raw device state (finalized per-frame snapshot) ---- */
+
+/** Nonzero when the key is held (NULL engine or out-of-range ->
+ *  0). Raw state ignores contexts (see action queries). */
+LE_API int le_input_key_down(le_engine *engine, le_key key);
+/** Edge: key transitioned up->down during the last input frame
+ *  (auto-repeat never sets this — first press only). */
+LE_API int le_input_key_pressed(le_engine *engine, le_key key);
+/** Edge: key transitioned down->up during the last input frame. */
+LE_API int le_input_key_released(le_engine *engine, le_key key);
+LE_API int le_input_mouse_down(le_engine *engine,
+                               le_mouse_button button);
+LE_API int le_input_mouse_pressed(le_engine *engine,
+                                  le_mouse_button button);
+LE_API int le_input_mouse_released(le_engine *engine,
+                                   le_mouse_button button);
+/** Mouse position in client px of the focus window (out may be
+ *  NULL; zeros for NULL engine). */
+LE_API void le_input_mouse_position(le_engine *engine, float *out_x,
+                                    float *out_y);
+/** Motion accumulated since the previous input frame (zeros after
+ *  the frame boundary is crossed). */
+LE_API void le_input_mouse_delta(le_engine *engine, float *out_dx,
+                                 float *out_dy);
+/** Wheel detents accumulated since the previous input frame. */
+LE_API void le_input_scroll_delta(le_engine *engine, float *out_x,
+                                  float *out_y);
+/** Current modifier snapshot. */
+LE_API uint32_t le_input_mods(le_engine *engine);
+/** Nonzero while any window of this engine has focus. */
+LE_API int le_input_has_focus(le_engine *engine);
+/** Request a cursor mode (best-effort platform request; returns
+ *  the previous mode, NORMAL when unsupported). */
+LE_API le_cursor_mode le_input_set_cursor_mode(le_engine *engine,
+                                               le_cursor_mode mode);
+LE_API le_cursor_mode le_input_get_cursor_mode(le_engine *engine);
+
+/* UTF-8 text input (key identity stays physical; text arrives
+ * here for consoles/fields — no UI system is built on it yet).
+ * Reads one pending scalar per call (1) or 0 when empty; bytes
+ * exclude NUL, buf always NUL-terminated on success. */
+LE_API int le_input_read_text(le_engine *engine, char *buf,
+                              uint32_t buf_cap, uint32_t *out_len);
+LE_API uint32_t le_input_pending_text(le_engine *engine);
+
+/* ---- gamepad foundation (backend-neutral API; platform
+ * reporting PARTIAL in Phase 27: slots exist, injection drives
+ * them, OS gamepads report disconnected until a platform backend
+ * lands — never faked) ---- */
+#define LE_GAMEPAD_MAX_SLOTS 8u
+LE_API int le_gamepad_is_connected(le_engine *engine,
+                                   uint32_t slot);
+LE_API int le_gamepad_button_down(le_engine *engine, uint32_t slot,
+                                  le_gamepad_button button);
+LE_API int le_gamepad_button_pressed(le_engine *engine,
+                                     uint32_t slot,
+                                     le_gamepad_button button);
+LE_API int le_gamepad_button_released(le_engine *engine,
+                                      uint32_t slot,
+                                      le_gamepad_button button);
+/** Stick/trigger value after deadzone ([-1,+1] sticks, [0,1]
+ *  triggers; 0 for NULL engine / bad slot / disconnected). */
+LE_API float le_gamepad_axis_value(le_engine *engine, uint32_t slot,
+                                   le_gamepad_axis axis);
+
+/* ---- injection (tests/editor/MCP/replay foundation) ----
+ * Injection feeds the SAME pending-event list as platform events
+ * (identical state machine, identical edges). Deterministic: no
+ * clock, no devices needed. */
+LE_API le_result le_input_inject_key(le_engine *engine, le_key key,
+                                     int down);
+LE_API le_result le_input_inject_mouse_button(le_engine *engine,
+                                              le_mouse_button button,
+                                              int down);
+LE_API le_result le_input_inject_mouse_move(le_engine *engine,
+                                            float x, float y,
+                                            float dx, float dy);
+LE_API le_result le_input_inject_scroll(le_engine *engine, float dx,
+                                        float dy);
+LE_API le_result le_input_inject_text(le_engine *engine,
+                                      const char *utf8);
+LE_API le_result le_input_inject_focus(le_engine *engine,
+                                       int focused);
+LE_API le_result le_input_inject_gamepad_button(le_engine *engine,
+                                                uint32_t slot,
+                                                le_gamepad_button b,
+                                                int down);
+LE_API le_result le_input_inject_gamepad_axis(le_engine *engine,
+                                              uint32_t slot,
+                                              le_gamepad_axis axis,
+                                              float value);
+
+/* ---- actions (named, hashed, multi-binding aggregate) ---- */
+
+/** Create an action (name copied, 1..127 bytes, nonempty). Repeat
+ *  creation returns the SAME live action. */
+LE_API le_result le_input_create_action(le_engine *engine,
+                                        const char *name,
+                                        le_input_action *out_action);
+/** Resolve by name (1 + fill, 0 when absent; NULL-safe). */
+LE_API int le_input_find_action(le_engine *engine, const char *name,
+                                le_input_action *out_action);
+LE_API le_result le_input_add_action_binding(
+    le_engine *engine, const le_input_action *action,
+    const le_input_binding *binding);
+LE_API le_result le_input_remove_action_binding(
+    le_engine *engine, const le_input_action *action,
+    const le_input_binding *binding);
+LE_API le_result le_input_clear_action_bindings(
+    le_engine *engine, const le_input_action *action);
+/** Query binding count (counting query when out NULL). */
+LE_API le_result le_input_get_action_bindings(
+    le_engine *engine, const le_input_action *action,
+    le_input_binding *out, uint32_t cap, uint32_t *out_count);
+/** Aggregate state over all bindings in active contexts. */
+LE_API int le_input_action_down(le_engine *engine,
+                                const le_input_action *action);
+LE_API int le_input_action_pressed(le_engine *engine,
+                                   const le_input_action *action);
+LE_API int le_input_action_released(le_engine *engine,
+                                    const le_input_action *action);
+
+/* ---- axes (digital + analog, deadzone/scale/invert) ---- */
+
+typedef struct le_axis_desc {
+    /* Zero-init, then fill: name copied (1..127 bytes). */
+    const char *name;
+    float deadzone; /* |v| < deadzone -> 0 (default 0.15 gamepad) */
+    float scale;    /* output multiplier (default 1) */
+    int invert;     /* nonzero flips sign */
+} le_axis_desc;
+
+LE_API le_result le_input_create_axis(le_engine *engine,
+                                      const le_axis_desc *desc,
+                                      le_input_axis *out_axis);
+LE_API int le_input_find_axis(le_engine *engine, const char *name,
+                              le_input_axis *out_axis);
+LE_API le_result le_input_add_axis_binding(
+    le_engine *engine, const le_input_axis *axis,
+    const le_input_binding *binding);
+LE_API le_result le_input_remove_axis_binding(
+    le_engine *engine, const le_input_axis *axis,
+    const le_input_binding *binding);
+LE_API le_result le_input_clear_axis_bindings(
+    le_engine *engine, const le_input_axis *axis);
+/** Sampled value in active contexts (0 when none/unbound). */
+LE_API float le_input_axis_value(le_engine *engine,
+                                 const le_input_axis *axis);
+
+/* ---- contexts (lightweight named maps with priority) ---- */
+
+/** Create/lookup a context (name copied, 1..63 bytes). Higher
+ *  priority wins on overlap (default 0). */
+LE_API le_result le_input_create_context(le_engine *engine,
+                                         const char *name,
+                                         int priority,
+                                         le_input_context *out_ctx);
+LE_API int le_input_find_context(le_engine *engine, const char *name,
+                                 le_input_context *out_ctx);
+LE_API le_result le_input_activate_context(
+    le_engine *engine, const le_input_context *ctx);
+LE_API le_result le_input_deactivate_context(
+    le_engine *engine, const le_input_context *ctx);
+LE_API int le_input_context_active(le_engine *engine,
+                                   const le_input_context *ctx);
+/** Bind an action/axis into a context (inactive contexts are
+ *  skipped by queries). Actions/axes start GLOBAL (visible in
+ *  every context); first context-bind narrows them. */
+LE_API le_result le_input_context_bind_action(
+    le_engine *engine, const le_input_context *ctx,
+    const le_input_action *action);
+LE_API le_result le_input_context_bind_axis(
+    le_engine *engine, const le_input_context *ctx,
+    const le_input_axis *axis);
+/** Top active context may consume keyboard/mouse for the frame
+ *  (gameplay below sees consumed domains as released). */
+LE_API le_result le_input_context_set_consume(
+    le_engine *engine, const le_input_context *ctx,
+    uint32_t consume_mask);
+
+/** Structured input stats (zeros for NULL; out may be NULL). */
+typedef struct le_input_stats {
+    uint32_t keys_down;
+    uint32_t mouse_buttons_down;
+    uint64_t events_ingested;
+    uint32_t action_count;
+    uint32_t axis_count;
+    uint32_t active_contexts;
+    uint32_t connected_gamepads;
+    uint32_t pending_events;
+} le_input_stats;
+
+LE_API void le_input_get_stats(le_engine *engine,
+                               le_input_stats *out_stats);
+
+/* ---- engine/window attachment (multi-window policy) ----
+ * An engine observes ZERO or more windows. The host attaches each
+ * window whose queue feeds the engine (usually one; editors attach
+ * one engine per viewport or share one engine across viewports).
+ * The most-recently-gained focus wins for mouse position; close on
+ * ANY attached window raises the quit request; resize-zero on the
+ * focus window marks minimized. Detach on window destroy (the
+ * engine never destroys windows). */
+LE_API le_result le_engine_attach_window(le_engine *engine,
+                                         lc_window *window);
+LE_API le_result le_engine_detach_window(le_engine *engine,
+                                         lc_window *window);
+
+/* ------------------------------------------------------------------
+ * Engine time (Phase 27): monotonic, engine-owned, Lua-consumed.
+ *
+ * Source: real runtime advances from lc_clock_now (ns, monotonic);
+ * tests advance with explicit deltas (le_engine_step) through the
+ * SAME state machine. Elapsed accumulates in double; per-frame dt
+ * is float. NaN/Inf/negative time_scale is rejected (scale stays
+ * unchanged); negative deltas clamp to 0.
+ * ------------------------------------------------------------------ */
+
+typedef struct le_time_stats {
+    uint64_t frame_index;
+    double raw_delta;
+    double scaled_delta;
+    double elapsed;
+    double unscaled_elapsed;
+    float fixed_delta;
+    uint32_t fixed_steps;
+    uint32_t fixed_steps_dropped;
+    float time_scale;
+} le_time_stats;
+
+LE_API void le_time_get_stats(le_engine *engine,
+                              le_time_stats *out_stats);
+LE_API double le_time_delta(le_engine *engine);
+LE_API double le_time_unscaled_delta(le_engine *engine);
+LE_API double le_time_elapsed(le_engine *engine);
+LE_API double le_time_unscaled_elapsed(le_engine *engine);
+LE_API uint64_t le_time_frame_index(le_engine *engine);
+/** Set scale (1 normal, 0.5 slow, 0 paused). Rejects NaN/Inf/
+ *  negative (returns INVALID_ARGUMENT, scale unchanged). */
+LE_API le_result le_time_set_scale(le_engine *engine, float scale);
+LE_API float le_time_get_scale(le_engine *engine);
+/** Max simulation delta per frame (default 0.25 s; 0 disables the
+ *  clamp... raw measurement stays visible in stats). */
+LE_API le_result le_time_set_max_delta(le_engine *engine,
+                                       float max_delta);
+LE_API float le_time_get_max_delta(le_engine *engine);
+/** Fixed-step interval (default 1/60; 0 disables fixed_update;
+ *  >1.0 clamps to 1.0 like the Phase 26 contract). */
+LE_API le_result le_time_set_fixed_delta(le_engine *engine,
+                                         float fixed_delta);
+LE_API float le_time_get_fixed_delta(le_engine *engine);
+/** Queue one fixed step while paused (debug single-step). */
+LE_API le_result le_time_request_single_step(le_engine *engine);
+
+/* ------------------------------------------------------------------
+ * Frame + application + world lifecycle (Phase 27).
+ *
+ * Explicit contract (host owns the loop):
+ *   le_engine_begin_frame(engine)   // poll+ingest input, time
+ *   le_engine_update(engine, world) // sim + scripts (per world)
+ *   ... render trio (existing API) ...
+ *   le_engine_end_frame(engine)     // edge cleanup
+ * or one call: le_engine_frame(engine, worlds, count).
+ * le_world_update(world, dt) keeps its Phase 24-26 contract as a
+ * thin wrapper (explicit-dt stepping for tests).
+ * ------------------------------------------------------------------ */
+
+typedef enum le_app_state {
+    LE_APP_RUNNING = 0,
+    LE_APP_QUIT_REQUESTED = 1
+} le_app_state;
+
+LE_API le_result le_engine_begin_frame(le_engine *engine);
+LE_API le_result le_engine_update(le_engine *engine,
+                                  le_world *world);
+LE_API le_result le_engine_end_frame(le_engine *engine);
+/** Convenience over begin/update(each world)/end. worlds may be
+ *  NULL with count 0 (input+time still advance). */
+LE_API le_result le_engine_frame(le_engine *engine,
+                                 le_world **worlds,
+                                 uint32_t world_count);
+/** Explicit-delta stepping (deterministic tests): same state
+ *  machine as the clock path with caller-supplied dt. */
+LE_API le_result le_engine_step(le_engine *engine, le_world *world,
+                                float dt);
+/** Quit request (window close feeds this; host may set/clear).
+ *  The engine never calls exit(). */
+LE_API le_result le_engine_request_quit(le_engine *engine);
+LE_API le_result le_engine_cancel_quit(le_engine *engine);
+LE_API le_app_state le_engine_app_state(le_engine *engine);
+/** Focus/minimize observation (from window events). */
+LE_API int le_engine_has_focus(le_engine *engine);
+LE_API int le_engine_is_minimized(le_engine *engine);
+/** Per-world pause (independent of global time scale; editor can
+ *  hold the game world while its own world runs). */
+LE_API le_result le_world_set_paused(le_world *world, int paused);
+LE_API int le_world_is_paused(const le_world *world);
+
+/* ------------------------------------------------------------------
  * Lua scripting runtime (Phase 26): an interpreted backend over the
  * VM-independent script lifecycle. The vendored backend sources live
  * in third_party/lua and are built as a private static library; NO

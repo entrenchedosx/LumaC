@@ -1,4 +1,4 @@
-# Script AOT Contract (Phase 26)
+# Script AOT Contract (Phase 26; Input/Time Phase 27)
 
 Rule: **Script semantics ─┤├→ Engine operations.** The VM (or
 any future native backend) must not define gameplay semantics:
@@ -67,7 +67,18 @@ are skipped (forward compat).
 
 No Lua→C compiler, no JIT, no ahead-of-time codegen of any
 kind — Phase 26 ships the interpreted backend only. No physics,
-no animation, no input overhaul hooks. The ops table reserves
-the porting surface; nothing on the native side exists yet.
+no animation. Phase 27 input/time semantics live in ordinary
+engine C APIs (`le_input_*`, `le_time_*`), so a future native
+backend calls the same services with identical semantics:
+
+```c
+/* AOT-native gameplay (conceptual): same engine services. */
+if (le_input_action_pressed(engine, &jump_action)) {
+    /* ... */
+}
+double dt = le_time_delta(engine);
+float axis = le_input_axis_value(engine, &move_axis);
+```
+
 (AOT consumers also inherit the sandbox: no filesystem, no OS
 clocks, no dynamic code loading beyond the asset pipeline.)

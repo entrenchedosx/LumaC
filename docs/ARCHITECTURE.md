@@ -1,6 +1,10 @@
 # LumaC Architecture
 
-Phase 26 adds the Lua gameplay scripting runtime (interpreted
+Phase 27 adds the engine-owned gameplay runtime foundation —
+input, time, and frame lifecycle (see `INPUT_ARCHITECTURE.md`,
+`INPUT_ACTIONS.md`, `TIME_ARCHITECTURE.md`,
+`FRAME_LIFECYCLE.md`). Phase 26 adds the Lua gameplay scripting
+runtime (interpreted
 only) on top of Phase 25 assets/scenes/serialization (see
 `LUA_SCRIPTING.md`, `SCRIPT_RUNTIME.md`, `SCRIPT_BINDING_API.md`,
 `SCRIPT_AOT.md`, `SCRIPTING_ARCHITECTURE.md`). Phase 25 adds

@@ -1,4 +1,4 @@
-# Luma Engine Architecture (Phase 24; scripting Phase 26)
+# Luma Engine Architecture (Phase 24; scripting Phase 26; input/time/lifecycle Phase 27)
 
 Luma Engine (`engine/`, `le_*`, static library) is the scene layer:
 generational objects, hierarchy, transforms, lightweight components,
@@ -117,7 +117,7 @@ counts (objects, capacity, roots, enabled/disabled, renderables,
 cameras, lights, named, time; slot/transform/link/component/name
 bytes) — editor/MCP/Lua-ready, no native handles.
 
-## Futures (explicitly NOT Phase 24/25/26)
+## Futures (explicitly NOT Phase 24/25/26/27)
 
 Full ECS/archetypes, Lua→C/AOT compiler, physics, audio,
 animation, input overhaul, editor, MCP, networking, full prefabs,
@@ -135,6 +135,17 @@ handles → renderer backing per frame), glTF bridge (adopt, dedup).
 Reparent now takes an explicit mode (`LE_REPARENT_KEEP_LOCAL` /
 `LE_REPARENT_KEEP_WORLD`); the modeless Phase 24 spelling keeps
 local.
+
+## Phase 27 additions
+
+Engine-owned input/time/lifecycle (`INPUT_ARCHITECTURE.md`,
+`INPUT_ACTIONS.md`, `TIME_ARCHITECTURE.md`,
+`FRAME_LIFECYCLE.md`): per-engine input snapshot (keys, mouse,
+edges, actions, axes, contexts, injection), monotonic engine
+time (scale/clamp/pause/fixed schedule), explicit frame contract
+(`begin_frame`/`update`/`end_frame`/`frame`/`step`), quit/resize/
+minimize handling, per-world pause, `Input`/`Time` Lua bindings.
+Gamepad OS backends deferred (API real, reporting PARTIAL).
 
 ## Phase 26 additions
 

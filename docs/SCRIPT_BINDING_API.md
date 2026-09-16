@@ -1,11 +1,12 @@
-# Script Binding API (Phase 26)
+# Script Binding API (Phase 26; Input/Time Phase 27)
 
 Lua-visible surface registered at runtime creation
-(`script_bind_world.c`, `script_bind_object.c`). All bindings
+(`script_bind_world.c`, `script_bind_object.c`,
+`script_bind_input.c`). All bindings
 are thin over `le_*`; failures raise catchable script errors
 (caught by dispatch per the error policy), never crashes.
-`World.*` / `Assets.*` require dispatch context
-(`firing_world`); calling them outside a callback errors.
+`World.*` / `Assets.*` / `Input.*` / `Time.*` require dispatch
+context (`firing_world`); calling them outside a callback errors.
 
 ## World.*
 
@@ -63,6 +64,29 @@ are thin over `le_*`; failures raise catchable script errors
 
 (For exact numeric semantics — e.g. rotation premultiplication
 order — verify against `engine/src/script/script_bind_*.c`.)
+
+## Input.* (Phase 27; `script_bind_input.c`, thin over `le_input_*`)
+
+- `Input.key_down/pressed/released(key) -> bool` — raw edges
+  from the finalized snapshot (repeat never presses).
+- `Input.mouse_down/pressed/released(btn) -> bool`
+- `Input.mouse_position() -> x, y` /
+  `Input.mouse_delta() -> dx, dy` /
+  `Input.scroll_delta() -> dx, dy` (two returns each).
+- `Input.action_down/pressed/released("name") -> bool` —
+  aggregate over bindings (unknown action errors).
+- `Input.axis("name") -> number` (unknown axis errors).
+- `Key.*` constants (`Key.W`, `Key.Space`, `Key.Escape`, …) and
+  `Mouse.*` (`Mouse.Left`, …) — readable, no magic integers.
+
+## Time.* (Phase 27; thin over `le_time_*`)
+
+- `Time.delta()` (== `update` dt, exactly) /
+  `Time.unscaled_delta()` / `Time.elapsed()` /
+  `Time.unscaled_elapsed()` / `Time.frame()` /
+  `Time.scale()` / `Time.fixed_delta()`.
+- `Time.set_scale(s)` — invalid scales error; permission is
+  gameplay-controlled (example scripts toggle pause with it).
 
 ## Identity userdata model
 

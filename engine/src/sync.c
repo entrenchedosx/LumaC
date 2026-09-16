@@ -55,10 +55,30 @@ le_result le_world_update(le_world *world, float dt) {
         le_refresh_world_matrices(world);
     } else {
         /* NaN/Inf/dt<=0 drive matrices only: render_scene's
-         * update(0) never runs scripts. */
+         * update(0) never runs scripts. (The engine frame path
+         * uses le_world_simulate_engine below for paused dt=0
+         * dispatch — different contract, explicit opt-in.) */
         le_refresh_world_matrices(world);
     }
     return LE_SUCCESS;
+}
+
+/* Engine frame simulation (Phase 27): like the dt>0 path above
+ * but ALWAYS dispatches scripts, even for dt==0 (pause semantics:
+ * update runs with dt=0, fixed steps naturally take none since
+ * the accumulator grows by 0). NaN/Inf still mean matrices-only
+ * (never feed the VM non-finite time). */
+void le_world_simulate_engine(le_world *world, float dt) {
+    if (world == NULL) {
+        return;
+    }
+    if (!isfinite(dt) || dt < 0.0f) {
+        le_refresh_world_matrices(world);
+        return;
+    }
+    le_refresh_world_matrices(world);
+    le_script_step_world(world, dt);
+    le_refresh_world_matrices(world);
 }
 
 /* Count what extraction would submit (shared by the counts query

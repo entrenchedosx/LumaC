@@ -104,10 +104,15 @@ add_library(luma_engine STATIC
     src/scene.c
     src/serialize.c
     src/gltf_bridge.c
+    src/lifecycle.c
+    src/input/input.c
+    src/input/actions.c
+    src/time/time.c
     src/script/script_runtime.c
     src/script/script_lua.c
     src/script/script_bind_world.c
     src/script/script_bind_object.c
+    src/script/script_bind_input.c
     src/script/script_asset.c
     src/script/script_step.c
 )
@@ -222,10 +227,55 @@ if(UNIX AND NOT APPLE)
 endif()
 add_test(NAME test_script_vulkan COMMAND test_script_vulkan)
 
+# Phase 27: headless input/time/lifecycle tests (no GPU/window;
+# injection + explicit-delta stepping only).
+add_executable(test_input tests/test_input.c)
+target_link_libraries(test_input PRIVATE luma_engine)
+target_include_directories(test_input PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_input PRIVATE m)
+endif()
+add_test(NAME test_input COMMAND test_input)
+
+# Phase 27: input/time -> Lua -> transform integration (headless).
+add_executable(test_input_script tests/test_input_script.c)
+target_link_libraries(test_input_script PRIVATE luma_engine)
+target_include_directories(test_input_script PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_input_script PRIVATE m)
+endif()
+add_test(NAME test_input_script COMMAND test_input_script)
+
+# Phase 27: input-driven scripts through the render path
+# (inject -> Lua -> transform -> GPU -> readback pixel proof).
+add_executable(test_input_vulkan tests/test_input_vulkan.c)
+target_link_libraries(test_input_vulkan PRIVATE luma_engine luma_renderer lumac Vulkan::Vulkan)
+target_include_directories(test_input_vulkan PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../renderer/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_input_vulkan PRIVATE m)
+endif()
+add_test(NAME test_input_vulkan COMMAND test_input_vulkan)
+
+# Phase 27 micro-benchmarks (informative; always exits 0).
+add_executable(test_input_bench tests/test_input_bench.c)
+target_link_libraries(test_input_bench PRIVATE luma_engine)
+target_include_directories(test_input_bench PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_input_bench PRIVATE m)
+endif()
+add_test(NAME test_input_bench COMMAND test_input_bench)
+
 # Shared Windows builds place lumac.dll beside the top-level tests;
 # engine tests live one directory deeper, so extend their DLL search
 # path explicitly (no-op for static builds).
 if(WIN32)
-    set_tests_properties(test_engine test_engine_stress test_engine_vulkan test_scene test_scene_vulkan test_script test_script_vulkan PROPERTIES
+    set_tests_properties(test_engine test_engine_stress test_engine_vulkan test_scene test_scene_vulkan test_script test_script_vulkan test_input test_input_script test_input_vulkan test_input_bench PROPERTIES
         ENVIRONMENT "PATH=$<TARGET_FILE_DIR:lumac>\;$ENV{PATH}")
 endif()

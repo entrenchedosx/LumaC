@@ -142,6 +142,22 @@ changes are permitted with a changelog entry.
 - Persistence carries script asset IDs + exported values (`script`
   / `sprop` scene lines) — never VM state.
 
+## Engine input/time/lifecycle (Phase 27)
+
+- Input is engine-owned per `le_engine` (worlds share one
+  finalized snapshot); the LumaC layer contributes only the
+  backend-neutral `lc_window_event` queue (Win32/X11 translate,
+  never gameplay). No `VK_*`/`WM_*`/`XKeyEvent` outside
+  `src/platform/`.
+- Time is engine-owned (monotonic ns source, explicit-delta test
+  path through the same state machine); fixed-step is an engine
+  schedule mirrored into world accumulators. `le_world_update`
+  keeps its legacy contract; the engine path dispatches paused
+  dt=0 via `le_world_simulate_engine`.
+- Lua `Input.*`/`Time.*` are thin over `le_input_*`/`le_time_*`
+  (no VM-side state), so future native scripts use the same
+  services with identical semantics.
+
 ## Engine assets & scenes (Phase 25)
 
 - Gameplay references assets by generational `le_asset` handles

@@ -36,6 +36,17 @@ struct lc_window {
     lc_window *next;
     lc_window *prev;
     HWND hwnd;
+    /* Phase 27: per-window input event queue (ring; platform
+     * backends push, lc_window_read_event pops). */
+    lc_window_event *events;
+    uint32_t event_cap;
+    uint32_t event_head;
+    uint32_t event_count;
+    /* Last mouse client position for relative deltas (Win32
+     * WM_MOUSEMOVE carries absolute position only). */
+    int last_mouse_x;
+    int last_mouse_y;
+    int have_mouse_pos;
 };
 
 #else /* Linux/X11 - platform_x11.c defines native behavior */
@@ -50,6 +61,16 @@ struct lc_window {
     lc_window *next;
     lc_window *prev;
     unsigned long xwindow; /* Window id (0 = none) */
+    /* Phase 27: per-window input event queue (ring; platform
+     * backends push, lc_window_read_event pops). */
+    lc_window_event *events;
+    uint32_t event_cap;
+    uint32_t event_head;
+    uint32_t event_count;
+    /* Last mouse client position for relative deltas. */
+    int last_mouse_x;
+    int last_mouse_y;
+    int have_mouse_pos;
 };
 
 #endif
@@ -92,5 +113,12 @@ void lc_platform_destroy(lc_window *window);
 
 /* Pump pending OS events for all windows (non-blocking). */
 void lc_platform_poll(void);
+
+/* Push one event onto a window's queue (drops the oldest when the
+ * bounded queue is full — input stays live, never blocks the pump).
+ * No-op for NULL window/event. Defined once in src/window.c so both
+ * backends share queue discipline. */
+void lc_window_push_event(lc_window *window,
+                          const lc_window_event *event);
 
 #endif /* LUMAC_PLATFORM_H */

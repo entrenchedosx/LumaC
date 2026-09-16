@@ -1,5 +1,58 @@
 # Changelog
 
+## Phase 27
+
+- Added engine-owned input (per `le_engine`, worlds share one
+  finalized snapshot): backend-neutral `le_key` (A–Z, 0–9,
+  control, modifiers L/R, arrows, nav, F1–F12, numpad,
+  punctuation), mouse buttons/position/delta/wheel, per-frame
+  pressed/released edges (auto-repeat never edges; same-frame
+  press+release yields both edges, held clear), UTF-8 text queue,
+  focus-loss held-state clearing, cursor-mode requests
+  (best-effort), injection feeding the SAME pending list as
+  platform events (`le_input_inject_*`).
+- Added LumaC event queue (`lc_keycode`, `lc_window_event`,
+  `lc_window_read_event`/`drain`/`pending`, bounded ring): Win32
+  (VK/scan translation, repeat bit, WM_CHAR UTF-8, XBUTTON,
+  wheel H+V, focus) + X11 (KeySym map, buttons 4–7 as wheel,
+  motion, FocusIn/Out, widened masks) backends translate; engine
+  drains attached windows (`le_engine_attach/detach_window`).
+- Added actions (FNV-1a names, multi-binding aggregates with
+  aggregate edges), axes (digital cancel-to-0, analog
+  deadzone/scale/invert, trigger handling), contexts (priority,
+  consume masks), full rebind/query APIs; input-map disk format
+  deferred (data model documented).
+- Added engine-owned time (`lc_clock_now` ns monotonic source;
+  explicit-delta test path, same state machine): scaled/unscaled
+  delta + elapsed (double), uint64 frame index, validated scale
+  (NaN/Inf/negative rejected), max-delta clamp (raw visible),
+  fixed_delta schedule, pause (dt 0, fixed stops, frame+unscaled
+  run), single-step, first-frame 0, suspend clamping.
+- Added explicit frame lifecycle (`begin_frame`/`update`/
+  `end_frame`/`frame`/`step`; host owns the loop, no
+  run-forever); quit requests (never `exit()`); resize/minimize
+  observation; per-world pause; fixed-step ownership moved to
+  the engine schedule (world fields mirrored;
+  `le_world_update` legacy contract preserved via the
+  `le_world_simulate_engine` seam for paused dt=0 dispatch).
+- Added `Input`/`Time`/`Key`/`Mouse` Lua bindings (thin over C;
+  no Lua-side state): update dt == `Time.delta()`,
+  fixed_update dt == `Time.fixed_delta()` (tested); same-frame
+  snapshot shared across scripts.
+- Added `examples/lua_input` (WASD + mouse-look camera rig, jump
+  action, Escape pause, fixed counter, default map, explicit
+  lifecycle loop) and
+  `docs/{INPUT_ARCHITECTURE,INPUT_ACTIONS,TIME_ARCHITECTURE,
+  FRAME_LIFECYCLE}.md`.
+- Tests: `test_input` (118), `test_input_script` (31),
+  `test_input_vulkan` (25 incl. inject→Lua→GPU pixel proof).
+  Gamepad: backend-neutral API real, OS backends honestly
+  PARTIAL (slots driven by injection; no faked devices).
+- Fixed: aggregate action latch must update lazily at advance
+  start (end-of-advance latching killed just-computed edges
+  before script/test reads); `le_engine_step` leaves the
+  snapshot readable (edges die at next advance/end_frame).
+
 ## Phase 26
 
 - Added Lua gameplay scripting runtime (interpreted only; native

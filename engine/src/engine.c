@@ -9,6 +9,8 @@
 #include "luma_engine/luma_engine.h"
 #include "internal/engine_internal.h"
 #include "luma_assets/luma_assets.h"
+#include "input/input_internal.h"
+#include "time/time_internal.h"
 
 le_result le_engine_create(const le_engine_desc *desc,
                            le_engine **out_engine) {
@@ -26,6 +28,28 @@ le_result le_engine_create(const le_engine_desc *desc,
         engine->renderer = desc->renderer;
     }
     engine->worlds = NULL;
+    /* Phase 27: engine-owned input + time state. Either may fail
+     * (OOM) — unwind cleanly, registry untouched. */
+    engine->input = le_input_create();
+    if (engine->input == NULL) {
+        free(engine);
+        return LE_ERROR_OUT_OF_MEMORY;
+    }
+    engine->time = le_time_create();
+    if (engine->time == NULL) {
+        le_input_destroy(engine->input);
+        engine->input = NULL;
+        free(engine);
+        return LE_ERROR_OUT_OF_MEMORY;
+    }
+    engine->quit_requested = 0;
+    engine->has_focus = 1;
+    engine->minimized = 0;
+    engine->focus_window = NULL;
+    engine->cursor_mode = LE_CURSOR_NORMAL;
+    engine->windows = NULL;
+    engine->window_count = 0;
+    engine->window_cap = 0;
     *out_engine = engine;
     return LE_SUCCESS;
 }
@@ -84,6 +108,14 @@ void le_engine_destroy(le_engine *engine) {
     la_asset_manager_destroy(engine->gltf_manager);
     engine->gltf_manager = NULL;
     le_script_runtime_destroy(engine);
+    le_input_destroy(engine->input);
+    engine->input = NULL;
+    le_time_destroy(engine->time);
+    engine->time = NULL;
+    free(engine->windows);
+    engine->windows = NULL;
+    engine->window_count = 0;
+    engine->window_cap = 0;
     free(engine);
 }
 

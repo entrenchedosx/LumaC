@@ -16,6 +16,7 @@ build_wsl_tsan/
 build-wsl/
 build-wsl-p26/
 build-wsl-asan/
+build-wsl-tsan/
 build_base/
 out/
 

@@ -1,4 +1,4 @@
-# Lua Scripting (Phase 26)
+# Lua Scripting (Phase 26; Input/Time Phase 27)
 
 Lua 5.4.8 (vendored in `third_party/lua/`) is the gameplay
 scripting language. Scripts are engine assets
@@ -115,11 +115,51 @@ creation with `LE_ERROR_PARSE` and create nothing
 
 ## Fixed-step config
 
-`le_script_set_fixed_step(world, fixed_dt, max_steps)`:
-`fixed_update` runs on an accumulator; `fixed_dt == 0` disables
-it (default) while `update()` still runs; `max_steps` caps
-catch-up (default 4, spiral-of-death guard; backlog is dropped).
-`fixed_dt` is clamped to `<= 1.0`. See `orbiter.lua`.
+`le_time_set_fixed_delta(engine, fixed_dt)` owns the schedule
+(Phase 27; the per-world `le_script_set_fixed_step` mirror is
+kept for compatibility): `fixed_update` runs on an accumulator;
+`fixed_dt == 0` disables it while `update()` still runs;
+catch-up is capped (spiral-of-death guard; backlog is dropped).
+`fixed_dt` is clamped to `<= 1.0`. `fixed_update(self, dt)`
+receives exactly `Time.fixed_delta()`. See `orbiter.lua`.
+
+## Input (Phase 27)
+
+```lua
+function update(self, dt)
+    local x = Input.axis("move_x")
+    local y = Input.axis("move_z")
+    self:translate(x * dt, 0, y * dt)
+    if Input.action_pressed("pause") then
+        if Time.scale() == 0 then
+            Time.set_scale(1)
+        else
+            Time.set_scale(0)
+        end
+    end
+end
+```
+
+Raw: `Input.key_down/pressed/released(Key.W)`,
+`Input.mouse_down/pressed/released(Mouse.Left)`,
+`Input.mouse_position()`, `Input.mouse_delta()`,
+`Input.scroll_delta()` (each delta returns two numbers).
+Actions: `Input.action_down/pressed/released("jump")`.
+Axes: `Input.axis("move_x")`. Keys are readable `Key.*`
+constants (`Key.Space`, `Key.W`, `Key.Escape` — never magic
+integers); mouse buttons are `Mouse.*`. All scripts in one
+frame see the same finalized snapshot; Lua holds no input
+state. See `examples/lua_input/scripts/player.lua`.
+
+## Time (Phase 27)
+
+`Time.delta()` (== the `update(self, dt)` argument, exactly),
+`Time.unscaled_delta()`, `Time.elapsed()`,
+`Time.unscaled_elapsed()`, `Time.frame()`, `Time.scale()`,
+`Time.set_scale(s)` (NaN/Inf/negative rejected),
+`Time.fixed_delta()`. Pause (`scale 0`) yields `dt == 0` in
+`update` and stops `fixed_update`; rendering and input
+continue. See `docs/TIME_ARCHITECTURE.md`.
 
 ## Reload semantics
 

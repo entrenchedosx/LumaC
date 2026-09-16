@@ -164,6 +164,142 @@ LC_API uint32_t lc_window_get_width(const lc_window *window);
 LC_API uint32_t lc_window_get_height(const lc_window *window);
 
 /* -------------------------------------------------------------------------
+ * Window input events (Phase 27: backend-neutral event queue)
+ *
+ * Threading: pump on the application's main thread (same thread that
+ * calls lc_poll_events). Read queued events with lc_window_read_event
+ * any time after the pump; the queue is drained, never implicitly
+ * cleared — unread events persist until read or window destruction.
+ *
+ * Key identity is PHYSICAL (position), not text: LC_KEY_W is the key
+ * in the W position of a US layout, regardless of keyboard layout or
+ * modifiers. Text entry arrives separately as LC_EVENT_CHAR (UTF-8).
+ * Mouse position is in client-area pixels: origin top-left, +x right,
+ * +y down. Deltas and wheel accumulate per engine input frame.
+ * ------------------------------------------------------------------------- */
+
+/* Backend-neutral physical key identity (USB-HID-usage-inspired
+ * ordering, Luma-owned values — never Win32 VK_* or X11 KeySym). */
+typedef enum lc_keycode {
+    LC_KEY_UNKNOWN = 0,
+    /* A-Z (physical positions). */
+    LC_KEY_A = 1, LC_KEY_B, LC_KEY_C, LC_KEY_D, LC_KEY_E, LC_KEY_F,
+    LC_KEY_G, LC_KEY_H, LC_KEY_I, LC_KEY_J, LC_KEY_K, LC_KEY_L,
+    LC_KEY_M, LC_KEY_N, LC_KEY_O, LC_KEY_P, LC_KEY_Q, LC_KEY_R,
+    LC_KEY_S, LC_KEY_T, LC_KEY_U, LC_KEY_V, LC_KEY_W, LC_KEY_X,
+    LC_KEY_Y, LC_KEY_Z,
+    /* 0-9 (top row). */
+    LC_KEY_0 = 30, LC_KEY_1, LC_KEY_2, LC_KEY_3, LC_KEY_4,
+    LC_KEY_5, LC_KEY_6, LC_KEY_7, LC_KEY_8, LC_KEY_9,
+    /* Control / whitespace. */
+    LC_KEY_ESCAPE = 50, LC_KEY_ENTER, LC_KEY_TAB, LC_KEY_SPACE,
+    LC_KEY_BACKSPACE,
+    /* Modifiers (left/right distinguished where the OS reports it). */
+    LC_KEY_LEFT_SHIFT = 60, LC_KEY_RIGHT_SHIFT,
+    LC_KEY_LEFT_CONTROL, LC_KEY_RIGHT_CONTROL,
+    LC_KEY_LEFT_ALT, LC_KEY_RIGHT_ALT,
+    LC_KEY_LEFT_SUPER, LC_KEY_RIGHT_SUPER,
+    /* Arrows. */
+    LC_KEY_LEFT = 70, LC_KEY_RIGHT, LC_KEY_UP, LC_KEY_DOWN,
+    /* Navigation. */
+    LC_KEY_INSERT = 80, LC_KEY_DELETE, LC_KEY_HOME, LC_KEY_END,
+    LC_KEY_PAGE_UP, LC_KEY_PAGE_DOWN,
+    /* F1-F12. */
+    LC_KEY_F1 = 90, LC_KEY_F2, LC_KEY_F3, LC_KEY_F4, LC_KEY_F5,
+    LC_KEY_F6, LC_KEY_F7, LC_KEY_F8, LC_KEY_F9, LC_KEY_F10,
+    LC_KEY_F11, LC_KEY_F12,
+    /* Numpad. */
+    LC_KEY_NUMPAD_0 = 110, LC_KEY_NUMPAD_1, LC_KEY_NUMPAD_2,
+    LC_KEY_NUMPAD_3, LC_KEY_NUMPAD_4, LC_KEY_NUMPAD_5,
+    LC_KEY_NUMPAD_6, LC_KEY_NUMPAD_7, LC_KEY_NUMPAD_8,
+    LC_KEY_NUMPAD_9, LC_KEY_NUMPAD_DECIMAL, LC_KEY_NUMPAD_DIVIDE,
+    LC_KEY_NUMPAD_MULTIPLY, LC_KEY_NUMPAD_SUBTRACT,
+    LC_KEY_NUMPAD_ADD, LC_KEY_NUMPAD_ENTER, LC_KEY_NUMPAD_EQUAL,
+    /* Punctuation (US positions). */
+    LC_KEY_MINUS = 130, LC_KEY_EQUAL, LC_KEY_LEFT_BRACKET,
+    LC_KEY_RIGHT_BRACKET, LC_KEY_BACKSLASH, LC_KEY_SEMICOLON,
+    LC_KEY_APOSTROPHE, LC_KEY_GRAVE, LC_KEY_COMMA, LC_KEY_PERIOD,
+    LC_KEY_SLASH, LC_KEY_CAPS_LOCK,
+    LC_KEY_COUNT = 143
+} lc_keycode;
+
+/* Mouse buttons (backend-neutral; 4/5 = side buttons where present). */
+typedef enum lc_mouse_button {
+    LC_MOUSE_LEFT = 0,
+    LC_MOUSE_RIGHT = 1,
+    LC_MOUSE_MIDDLE = 2,
+    LC_MOUSE_4 = 3,
+    LC_MOUSE_5 = 4,
+    LC_MOUSE_BUTTON_COUNT = 5
+} lc_mouse_button;
+
+/* Event kinds in the per-window queue. */
+typedef enum lc_event_type {
+    LC_EVENT_NONE = 0,
+    LC_EVENT_KEY_DOWN = 1,   /* key field; repeat != 0 iff OS auto-repeat */
+    LC_EVENT_KEY_UP = 2,     /* key field */
+    LC_EVENT_CHAR = 3,       /* utf8[0..utf8_len) holds one UTF-8 scalar */
+    LC_EVENT_MOUSE_DOWN = 4, /* button + position fields */
+    LC_EVENT_MOUSE_UP = 5,   /* button + position fields */
+    LC_EVENT_MOUSE_MOVE = 6, /* position; delta holds relative motion */
+    LC_EVENT_MOUSE_WHEEL = 7,/* wheel_x/wheel_y in detents (lines) */
+    LC_EVENT_FOCUS_GAINED = 8,
+    LC_EVENT_FOCUS_LOST = 9,
+    LC_EVENT_RESIZE = 10,    /* width/height fields */
+    LC_EVENT_CLOSE = 11      /* mirrors should_close for queue readers */
+} lc_event_type;
+
+/* Key modifier snapshot carried on key/char/mouse events. */
+typedef enum lc_key_mod {
+    LC_MOD_NONE = 0,
+    LC_MOD_SHIFT = 1 << 0,
+    LC_MOD_CONTROL = 1 << 1,
+    LC_MOD_ALT = 1 << 2,
+    LC_MOD_SUPER = 1 << 3
+} lc_key_mod;
+
+/* One queued window event (plain data, no pointers). */
+typedef struct lc_window_event {
+    lc_event_type type;
+    lc_window *window;      /* source window (borrowed, never NULL) */
+    lc_keycode key;         /* KEY_DOWN/UP */
+    int repeat;             /* KEY_DOWN: nonzero iff OS auto-repeat */
+    uint32_t mods;          /* lc_key_mod bitmask */
+    lc_mouse_button button; /* MOUSE_DOWN/UP */
+    float mouse_x;          /* client px: origin top-left, +x right */
+    float mouse_y;          /* client px: +y down */
+    float delta_x;          /* MOUSE_MOVE relative motion (px) */
+    float delta_y;
+    float wheel_x;          /* WHEEL: horizontal detents */
+    float wheel_y;          /* WHEEL: vertical detents (up positive) */
+    uint32_t width;         /* RESIZE client px */
+    uint32_t height;
+    char utf8[8];           /* CHAR: NUL-terminated UTF-8 scalar */
+    uint32_t utf8_len;      /* CHAR: bytes excluding NUL (1..4) */
+} lc_window_event;
+
+/**
+ * Read (and remove) the oldest pending event for a window.
+ *
+ * @param window Window to read from (NULL fails).
+ * @param out Receives the event; LC_EVENT_NONE when the queue is empty.
+ * @return LC_SUCCESS (type NONE included) or LC_ERROR_INVALID_ARGUMENT.
+ */
+LC_API lc_result lc_window_read_event(lc_window *window,
+                                      lc_window_event *out);
+
+/**
+ * Drop all pending events for a window. Safe with NULL (no-op... returns
+ * INVALID_ARGUMENT to match read_event; NULL window has no queue).
+ */
+LC_API lc_result lc_window_drain_events(lc_window *window);
+
+/**
+ * Query the number of pending events for a window (0 for NULL).
+ */
+LC_API uint32_t lc_window_pending_events(const lc_window *window);
+
+/* -------------------------------------------------------------------------
  * Graphics device API (Phase 3: Vulkan device foundation, no rendering)
  *
  * Threading: use only from the application's main thread.

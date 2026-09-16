@@ -178,6 +178,22 @@ struct le_engine {
      * created lazily on first script use. Opaque to the rest of
      * the engine (defined in src/script/script_internal.h). */
     struct le_script_runtime *script_runtime;
+    /* Input state (Phase 27): engine-owned, defined in
+     * src/input/input_internal.h. Created with the engine. */
+    struct le_input_state *input;
+    /* Time + lifecycle state (Phase 27): engine-owned, defined in
+     * src/time/time_internal.h. */
+    struct le_time_state *time;
+    int quit_requested;
+    int has_focus;
+    int minimized;
+    lc_window *focus_window;
+    le_cursor_mode cursor_mode;
+    /* Phase 27: attached windows (borrowed; host-owned). The
+     * engine drains their event queues each frame. */
+    lc_window **windows;
+    uint32_t window_count;
+    uint32_t window_cap;
 };
 
 struct le_world {
@@ -218,6 +234,9 @@ struct le_world {
     double script_accum;
     int scripts_firing;
     int scripts_tearing_down;
+    /* Phase 27: per-world pause (independent of global time scale;
+     * paused worlds skip simulation but still render). */
+    int paused;
 };
 
 /* ---- shared helpers (defined per-TU where used) ---- */
@@ -249,6 +268,13 @@ void le_compose_slot_world(le_world *world, uint32_t slot);
  * root-first order, dirty-driven ancestors-first; O(alive) worst
  * case, O(1) when clean). */
 void le_refresh_world_matrices(le_world *world);
+
+/* Engine frame simulation (sync.c): matrices + unconditional
+ * script dispatch (dt==0 allowed for pause; NaN/Inf still
+ * matrices-only). The engine lifecycle path uses this;
+ * le_world_update keeps its legacy dt<=0-skips-scripts contract
+ * for direct/test callers. */
+void le_world_simulate_engine(le_world *world, float dt);
 
 /* Ensure object capacity for one more live object (geometric
  * growth x2 with overflow + cap checks; preserves all storage on

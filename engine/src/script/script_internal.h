@@ -184,6 +184,7 @@ extern const le_script_backend_ops le_lua_backend_ops;
 /* bindings (each TU registers one surface; all share helpers). */
 void le_lua_register_world(lua_State *L);
 void le_lua_register_object(lua_State *L);
+void le_lua_register_input(lua_State *L);
 void le_lua_push_object(lua_State *L, le_world *world,
                         const le_object *obj);
 int le_lua_check_object(lua_State *L, int idx, le_world **out_world,
