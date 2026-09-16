@@ -154,10 +154,30 @@ if(UNIX AND NOT APPLE)
 endif()
 add_test(NAME test_import COMMAND test_import)
 
+# Phase 32 asset-database (determinism/conflicts/isolation).
+add_executable(test_assetdb tests/test_assetdb.c)
+target_link_libraries(test_assetdb PRIVATE luma_editor)
+target_include_directories(test_assetdb PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_assetdb PRIVATE m)
+endif()
+add_test(NAME test_assetdb COMMAND test_assetdb)
+
+# Phase 32 project<->editor integration (drops/assign/play/E2E).
+add_executable(test_project_editor tests/test_project_editor.c)
+target_link_libraries(test_project_editor PRIVATE luma_editor)
+target_include_directories(test_project_editor PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_project_editor PRIVATE m)
+endif()
+add_test(NAME test_project_editor COMMAND test_project_editor)
+
 # Shared Windows builds place lumac.dll beside the top-level tests;
 # editor tests live deeper, so extend their DLL search path
 # explicitly (no-op for static builds).
 if(WIN32)
-    set_tests_properties(test_editor_core test_editor_history test_editor_play test_editor_viewport test_editor_reflect test_prefab_smoke test_project test_import PROPERTIES
+    set_tests_properties(test_editor_core test_editor_history test_editor_play test_editor_viewport test_editor_reflect test_prefab_smoke test_project test_import test_assetdb test_project_editor PROPERTIES
         ENVIRONMENT "PATH=$<TARGET_FILE_DIR:lumac>\;$ENV{PATH}")
 endif()

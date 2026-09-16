@@ -1174,68 +1174,175 @@ led_result led_execute(led_session *session,
     /* Validate-then-apply: engine failure pushes NOTHING. */
     if (command->kind == LED_CMD_CREATE ||
         command->kind == LED_CMD_INSTANTIATE_PREFAB) {
-        /* CREATE needs post-handle capture: apply manually. */
-        uint32_t before = le_world_get_object_count(
+        /* CREATE needs post-handle capture: apply manually. Both
+         * kinds snapshot the census BEFORE apply (ascending slot
+         * order) so the newborn set diffs EXACTLY (slot recycling
+         * defeats tail rules when the world has other roots). */
+        uint32_t live_before = le_world_get_object_count(
             session->edit_world);
+        le_object *census_before = NULL;
 
-        (void)before;
-        rc = led_apply(session, command);
-        if (rc != LED_SUCCESS) {
-            led_entry_free(&entry);
-            return rc;
-        }
-        /* Find the newborn: last live object matching the name
-         * (names may duplicate; creation appends — scan tail).
-         * INSTANTIATE appends too: same tail rule captures the
-         * instance's last object; undo destroys the recorded
-         * ROOT (entry.created set below by root resolution). */
-        {
-            uint32_t live = le_world_get_object_count(
-                session->edit_world);
+        if (live_before > 0) {
+            census_before = (le_object *)malloc(
+                live_before * sizeof(*census_before));
+            if (census_before != NULL) {
+                uint32_t got = le_world_get_all_objects(
+                    session->edit_world, census_before,
+                    live_before);
 
-            if (live > 0) {
-                le_object *all = (le_object *)malloc(
-                    live * sizeof(*all));
-
-                if (all != NULL) {
-                    uint32_t got = le_world_get_all_objects(
-                        session->edit_world, all, live);
-
-                    if (got > 0) {
-                        entry.created = all[got - 1];
-                        entry.has_created = 1;
-                    }
-                    free(all);
+                if (got != live_before) {
+                    /* Census shifted mid-command (should not
+                     * happen single-threaded): fall back to an
+                     * empty before-set (every live object after
+                     * is treated as new — safe direction for
+                     * root resolution, which then picks the
+                     * parentless newcomer). */
+                    live_before = 0;
                 }
             }
         }
-        if (command->kind == LED_CMD_INSTANTIATE_PREFAB) {
-            /* Resolve the TRUE instance root: re-instantiate
-             * tracking is unavailable post-apply (the direct API
-             * freed its map), so walk up from the tail object to
-             * the subtree root created by this command. The
-             * tail belongs to the instance; its topmost ancestor
-             * that is NOT an ancestor of any pre-existing object
-             * is the instance root. Simpler exact rule: the
-             * instance root is the highest ancestor of the tail
-             * whose parent is either absent or an object that
-             * existed before (count `before`). Parent handles
-             * from before the command are all within [0,before)
-             * census — but handles recycle, so instead: climb to
-             * the topmost ancestor; instantiation appends roots,
-             * and prefab payload roots attach as scene roots, so
-             * the topmost ancestor of the tail IS the instance
-             * root. */
-            le_object walk = entry.created;
-            le_object p = LE_OBJECT_INVALID;
-
-            while (le_object_get_parent(session->edit_world,
-                                        &walk, &p)) {
-                walk = p;
-            }
-            entry.created = walk;
-            entry.has_created = 1;
+        rc = led_apply(session, command);
+        if (rc != LED_SUCCESS) {
+            free(census_before);
+            led_entry_free(&entry);
+            return rc;
         }
+        {
+            uint32_t live = le_world_get_object_count(
+                session->edit_world);
+            le_object *all = NULL;
+            uint32_t got = 0;
+
+            if (live > 0) {
+                all = (le_object *)malloc(
+                    live * sizeof(*all));
+                if (all != NULL) {
+                    got = le_world_get_all_objects(
+                        session->edit_world, all, live);
+                }
+            }
+            if (command->kind == LED_CMD_CREATE) {
+                /* Exactly one newborn: the census diff. Fall
+                 * back to the old tail rule only when the diff
+                 * is ambiguous (OOM before-snapshot). */
+                if (all != NULL && got == live) {
+                    uint32_t i;
+                    uint32_t nnew = 0;
+                    le_object newborn = LE_OBJECT_INVALID;
+
+                    for (i = 0; i < got; i++) {
+                        uint32_t j;
+                        int was_live = 0;
+
+                        for (j = 0;
+                             j < live_before && census_before !=
+                                                    NULL;
+                             j++) {
+                            if (all[i].index ==
+                                    census_before[j].index &&
+                                all[i].generation ==
+                                    census_before[j]
+                                        .generation &&
+                                all[i].world_tag ==
+                                    census_before[j]
+                                        .world_tag) {
+                                was_live = 1;
+                                break;
+                            }
+                        }
+                        if (!was_live) {
+                            nnew++;
+                            newborn = all[i];
+                        }
+                    }
+                    if (nnew == 1) {
+                        entry.created = newborn;
+                        entry.has_created = 1;
+                    } else if (got > 0 &&
+                               census_before == NULL) {
+                        entry.created = all[got - 1];
+                        entry.has_created = 1;
+                    }
+                }
+                free(all);
+            } else {
+                /* INSTANTIATE: the instance root is the NEW
+                 * object with no live parent (payload roots
+                 * attach as scene roots). Never a pre-existing
+                 * root: only post-apply newcomers qualify. */
+                if (all != NULL && got == live) {
+                    uint32_t i;
+                    int found = 0;
+
+                    for (i = 0; i < got && !found; i++) {
+                        uint32_t j;
+                        int was_live = 0;
+                        le_object p = LE_OBJECT_INVALID;
+
+                        for (j = 0;
+                             j < live_before && census_before !=
+                                                    NULL;
+                             j++) {
+                            if (all[i].index ==
+                                    census_before[j].index &&
+                                all[i].generation ==
+                                    census_before[j]
+                                        .generation &&
+                                all[i].world_tag ==
+                                    census_before[j]
+                                        .world_tag) {
+                                was_live = 1;
+                                break;
+                            }
+                        }
+                        if (was_live) {
+                            continue;
+                        }
+                        if (!le_object_get_parent(
+                                session->edit_world, &all[i],
+                                &p)) {
+                            entry.created = all[i];
+                            entry.has_created = 1;
+                            found = 1;
+                        }
+                    }
+                    /* Degenerate (all newcomers parented — should
+                     * not happen for prefab payloads): first
+                     * newcomer, still within the new set. */
+                    if (!found) {
+                        for (i = 0; i < got && !found; i++) {
+                            uint32_t j;
+                            int was_live = 0;
+
+                            for (j = 0;
+                                 j < live_before &&
+                                 census_before != NULL;
+                                 j++) {
+                                if (all[i].index ==
+                                        census_before[j]
+                                            .index &&
+                                    all[i].generation ==
+                                        census_before[j]
+                                            .generation &&
+                                    all[i].world_tag ==
+                                        census_before[j]
+                                            .world_tag) {
+                                    was_live = 1;
+                                    break;
+                                }
+                            }
+                            if (!was_live) {
+                                entry.created = all[i];
+                                entry.has_created = 1;
+                                found = 1;
+                            }
+                        }
+                    }
+                }
+                free(all);
+            }
+        }
+        free(census_before);
     } else {
         rc = led_apply(session, command);
         if (rc != LED_SUCCESS) {
@@ -1527,43 +1634,150 @@ static led_result led_apply_after(led_session *s,
     }
     case LED_CMD_CREATE:
     case LED_CMD_INSTANTIATE_PREFAB: {
-        /* Recreate (fresh handle) and refresh the entry. */
-        led_result rc = led_apply(s, &e->command);
+        /* Recreate (fresh handle) and refresh the entry. Same
+         * census-diff discipline as execute (slot recycling
+         * defeats tail rules). */
+        uint32_t live_before = le_world_get_object_count(
+            s->edit_world);
+        le_object *census_before = NULL;
+        led_result rc;
 
+        if (live_before > 0) {
+            census_before = (le_object *)malloc(
+                live_before * sizeof(*census_before));
+            if (census_before != NULL) {
+                uint32_t got = le_world_get_all_objects(
+                    s->edit_world, census_before, live_before);
+
+                if (got != live_before) {
+                    live_before = 0;
+                }
+            }
+        }
+        rc = led_apply(s, &e->command);
         if (rc == LED_SUCCESS) {
             uint32_t live = le_world_get_object_count(
                 s->edit_world);
+            le_object *all = NULL;
+            uint32_t got = 0;
 
             if (live > 0) {
-                le_object *all = (le_object *)malloc(
+                all = (le_object *)malloc(
                     live * sizeof(*all));
-
                 if (all != NULL) {
-                    uint32_t got = le_world_get_all_objects(
+                    got = le_world_get_all_objects(
                         s->edit_world, all, live);
+                }
+            }
+            if (all != NULL && got == live) {
+                uint32_t i;
 
-                    if (got > 0) {
+                if (e->command.kind ==
+                    LED_CMD_INSTANTIATE_PREFAB) {
+                    int found = 0;
+
+                    for (i = 0; i < got && !found; i++) {
+                        uint32_t j;
+                        int was_live = 0;
+                        le_object p = LE_OBJECT_INVALID;
+
+                        for (j = 0;
+                             j < live_before &&
+                             census_before != NULL;
+                             j++) {
+                            if (all[i].index ==
+                                    census_before[j].index &&
+                                all[i].generation ==
+                                    census_before[j]
+                                        .generation &&
+                                all[i].world_tag ==
+                                    census_before[j]
+                                        .world_tag) {
+                                was_live = 1;
+                                break;
+                            }
+                        }
+                        if (was_live) {
+                            continue;
+                        }
+                        if (!le_object_get_parent(
+                                s->edit_world, &all[i], &p)) {
+                            e->created = all[i];
+                            e->has_created = 1;
+                            found = 1;
+                        }
+                    }
+                    if (!found) {
+                        for (i = 0; i < got && !found; i++) {
+                            uint32_t j;
+                            int was_live = 0;
+
+                            for (j = 0;
+                                 j < live_before &&
+                                 census_before != NULL;
+                                 j++) {
+                                if (all[i].index ==
+                                        census_before[j]
+                                            .index &&
+                                    all[i].generation ==
+                                        census_before[j]
+                                            .generation &&
+                                    all[i].world_tag ==
+                                        census_before[j]
+                                            .world_tag) {
+                                    was_live = 1;
+                                    break;
+                                }
+                            }
+                            if (!was_live) {
+                                e->created = all[i];
+                                e->has_created = 1;
+                                found = 1;
+                            }
+                        }
+                    }
+                } else {
+                    uint32_t nnew = 0;
+                    le_object newborn = LE_OBJECT_INVALID;
+
+                    for (i = 0; i < got; i++) {
+                        uint32_t j;
+                        int was_live = 0;
+
+                        for (j = 0;
+                             j < live_before &&
+                             census_before != NULL;
+                             j++) {
+                            if (all[i].index ==
+                                    census_before[j].index &&
+                                all[i].generation ==
+                                    census_before[j]
+                                        .generation &&
+                                all[i].world_tag ==
+                                    census_before[j]
+                                        .world_tag) {
+                                was_live = 1;
+                                break;
+                            }
+                        }
+                        if (!was_live) {
+                            nnew++;
+                            newborn = all[i];
+                        }
+                    }
+                    if (nnew == 1) {
+                        e->created = newborn;
+                        e->has_created = 1;
+                    } else if (got > 0 &&
+                               census_before == NULL) {
                         e->created = all[got - 1];
                         e->has_created = 1;
                     }
-                    free(all);
                 }
             }
-            if (e->command.kind ==
-                    LED_CMD_INSTANTIATE_PREFAB &&
-                e->has_created) {
-                /* Same root resolution as execute: climb to the
-                 * topmost ancestor of the tail. */
-                le_object walk = e->created;
-                le_object p = LE_OBJECT_INVALID;
-
-                while (le_object_get_parent(s->edit_world, &walk,
-                                            &p)) {
-                    walk = p;
-                }
-                e->created = walk;
-            }
+            free(all);
         }
+        free(census_before);
         return rc;
     }
     case LED_CMD_CREATE_PREFAB: {
