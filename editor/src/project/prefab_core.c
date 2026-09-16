@@ -988,7 +988,12 @@ led_result led_prefab_create(led_session *session,
                     }
                 }
                 if (!b.oom && b.data != NULL) {
-                    FILE *f = fopen(abs, "w");
+                    /* Binary mode (like le_scene_save_file):
+                     * canonical bytes must not gain \r on
+                     * Windows — load tolerates \r, but
+                     * byte-stability across platforms needs
+                     * exact LF. */
+                    FILE *f = fopen(abs, "wb");
 
                     if (f == NULL) {
                         free(b.data);

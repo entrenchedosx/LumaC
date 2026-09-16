@@ -151,6 +151,149 @@ static int is_id_line(const char *p, size_t ll) {
     return 0;
 }
 
+/* Order-insensitive shape compare: records emit ID-sorted
+ * (fresh random UUIDs per creation, so two creates may list
+ * sibling objects in different relative order — same property
+ * as scene capture). Split the stripped text into per-object
+ * blocks at `end` lines, sort blocks, compare. */
+static int cmp_str(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a,
+                  *(const char *const *)b);
+}
+
+static char *without_id_lines(const char *text);
+
+static char *canonical_shape(const char *text) {
+    char *stripped = without_id_lines(text);
+    char *sorted = NULL;
+    /* Block split (bounded: editor-scale payloads). */
+    char **blocks = NULL;
+    uint32_t nblocks = 0;
+    uint32_t cblocks = 0;
+    char *p;
+    char *start;
+
+    if (stripped == NULL) {
+        return NULL;
+    }
+    /* Peel the header line as its own block (otherwise it glues
+     * to whichever object the ID-sort emitted first, defeating
+     * the sort). */
+    {
+        char *eol = strchr(stripped, '\n');
+
+        if (eol != NULL) {
+            size_t hl = (size_t)(eol + 1 - stripped);
+            char *h = (char *)malloc(hl + 1u);
+
+            if (h != NULL) {
+                memcpy(h, stripped, hl);
+                h[hl] = '\0';
+                blocks = (char **)malloc(sizeof(*blocks));
+                if (blocks != NULL) {
+                    blocks[0] = h;
+                    nblocks = 1;
+                    cblocks = 1;
+                } else {
+                    free(h);
+                }
+            }
+            p = (eol != NULL) ? eol + 1 : stripped;
+            start = p;
+        } else {
+            p = stripped;
+            start = stripped;
+        }
+    }
+    if (blocks == NULL) {
+        p = stripped;
+        start = stripped;
+    }
+    while (*p != '\0') {
+        if (strncmp(p, "end\n", 4) == 0) {
+            size_t bl = (size_t)(p + 4 - start);
+            char *b = (char *)malloc(bl + 1u);
+
+            if (b == NULL) {
+                break;
+            }
+            memcpy(b, start, bl);
+            b[bl] = '\0';
+            if (nblocks >= cblocks) {
+                uint32_t grown =
+                    (cblocks == 0) ? 16u : cblocks * 2u;
+                char **fresh = (char **)realloc(
+                    blocks, grown * sizeof(*fresh));
+
+                if (fresh == NULL) {
+                    free(b);
+                    break;
+                }
+                blocks = fresh;
+                cblocks = grown;
+            }
+            blocks[nblocks++] = b;
+            p += 4;
+            start = p;
+            continue;
+        }
+        p++;
+    }
+    /* Trailing header text (magic + prefab_root) forms one last
+     * block so header shapes compare too. */
+    if (*start != '\0') {
+        size_t bl = strlen(start);
+        char *b = (char *)malloc(bl + 1u);
+
+        if (b != NULL) {
+            memcpy(b, start, bl + 1u);
+            if (nblocks >= cblocks) {
+                uint32_t grown =
+                    (cblocks == 0) ? 16u : cblocks * 2u;
+                char **fresh = (char **)realloc(
+                    blocks, grown * sizeof(*fresh));
+
+                if (fresh != NULL) {
+                    blocks = fresh;
+                    cblocks = grown;
+                } else {
+                    free(b);
+                    b = NULL;
+                }
+            }
+            if (b != NULL) {
+                blocks[nblocks++] = b;
+            }
+        }
+    }
+    if (nblocks > 1) {
+        qsort(blocks, nblocks, sizeof(*blocks), cmp_str);
+    }
+    {
+        size_t total = 1;
+        uint32_t i;
+
+        for (i = 0; i < nblocks; i++) {
+            total += strlen(blocks[i]);
+        }
+        sorted = (char *)malloc(total);
+        if (sorted != NULL) {
+            sorted[0] = '\0';
+            for (i = 0; i < nblocks; i++) {
+                strcat(sorted, blocks[i]);
+                free(blocks[i]);
+            }
+        } else {
+            for (i = 0; i < nblocks; i++) {
+                free(blocks[i]);
+            }
+        }
+    }
+    free(blocks);
+    free(stripped);
+    return sorted;
+}
+
 static char *without_id_lines(const char *text) {
     size_t n = strlen(text);
     char *out = (char *)malloc(n + 1u);
@@ -166,6 +309,11 @@ static char *without_id_lines(const char *text) {
         size_t ll = (eol != NULL) ? (size_t)(eol - p)
                                   : strlen(p);
 
+        /* Tolerate CRLF payloads (files written in text mode
+         * before the binary-mode fix, or foreign tools). */
+        while (ll > 0 && p[ll - 1] == '\r') {
+            ll--;
+        }
         if (!is_id_line(p, ll)) {
             memcpy(q, p, ll);
             q += ll;
@@ -173,7 +321,7 @@ static char *without_id_lines(const char *text) {
                 *q++ = '\n';
             }
         }
-        p = (eol != NULL) ? eol + 1 : p + ll;
+        p = (eol != NULL) ? eol + 1 : p + strlen(p);
     }
     *q = '\0';
     return out;
@@ -303,8 +451,8 @@ int main(void) {
             TEST_CHECK(t1 != NULL && t2 != NULL,
                        "read both payloads");
             if (t1 != NULL && t2 != NULL) {
-                c1 = without_id_lines(t1);
-                c2 = without_id_lines(t2);
+                c1 = canonical_shape(t1);
+                c2 = canonical_shape(t2);
                 TEST_CHECK(c1 != NULL && c2 != NULL &&
                                strcmp(c1, c2) == 0,
                            "canonical shapes deterministic");
