@@ -47,6 +47,14 @@ add_library(luma_editor STATIC
     src/editor_console.c
     src/editor_shortcuts.c
     src/editor_serialize.c
+    src/project/project_core.c
+    src/project/asset_db.c
+    src/project/project_scan.c
+    src/project/import_impl.c
+    src/project/reimport.c
+    src/project/browser.c
+    src/project/project_files.c
+    src/project/prefab_core.c
 )
 
 target_include_directories(luma_editor PUBLIC
@@ -116,10 +124,30 @@ if(UNIX AND NOT APPLE)
 endif()
 add_test(NAME test_editor_reflect COMMAND test_editor_reflect)
 
+# Phase 32 prefab smoke (headless, TEMP-backed project dir).
+add_executable(test_prefab_smoke tests/test_prefab_smoke.c)
+target_link_libraries(test_prefab_smoke PRIVATE luma_editor)
+target_include_directories(test_prefab_smoke PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_prefab_smoke PRIVATE m)
+endif()
+add_test(NAME test_prefab_smoke COMMAND test_prefab_smoke)
+
+# Phase 32 project system (manifest/paths/scan/identity/portability).
+add_executable(test_project tests/test_project.c)
+target_link_libraries(test_project PRIVATE luma_editor)
+target_include_directories(test_project PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_project PRIVATE m)
+endif()
+add_test(NAME test_project COMMAND test_project)
+
 # Shared Windows builds place lumac.dll beside the top-level tests;
 # editor tests live deeper, so extend their DLL search path
 # explicitly (no-op for static builds).
 if(WIN32)
-    set_tests_properties(test_editor_core test_editor_history test_editor_play test_editor_viewport test_editor_reflect PROPERTIES
+    set_tests_properties(test_editor_core test_editor_history test_editor_play test_editor_viewport test_editor_reflect test_prefab_smoke test_project PROPERTIES
         ENVIRONMENT "PATH=$<TARGET_FILE_DIR:lumac>\;$ENV{PATH}")
 endif()

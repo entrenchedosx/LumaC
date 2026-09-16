@@ -171,6 +171,10 @@ typedef struct le_asset_slot {
      * for the layouts. */
     struct le_skeleton_data *skeleton;
     struct le_clip_data *clip;
+    /* Phase 32: prefab payload (owned canonical text bytes + size;
+     * exactly one kind live per prefab slot; no renderer backing). */
+    char *prefab_text;
+    size_t prefab_size;
 } le_asset_slot;
 
 struct le_engine {
@@ -187,6 +191,8 @@ struct le_engine {
     uint32_t asset_scripts;
     uint32_t asset_skeletons;
     uint32_t asset_clips;
+    /* Phase 32: prefab census. */
+    uint32_t asset_prefabs;
     uint32_t asset_ready;
     uint32_t asset_failed;
     int32_t asset_free_head;

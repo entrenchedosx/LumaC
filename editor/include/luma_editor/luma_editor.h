@@ -318,7 +318,48 @@ LED_API uint32_t led_inspector_count(const led_session *session);
  * Every mutation flows UI -> led_command -> engine -> history -> dirty.
  * ------------------------------------------------------------------ */
 
-/** Command kinds (stable contract; safe to persist in macros). */
+/** Project manifest format version (1 in Phase 32; open rejects
+ *  anything else with LED_ERROR_PARSE). */
+#define LED_PROJECT_FORMAT_VERSION ((uint32_t)1)
+
+/** Project asset types (stable contract; append-only). */
+typedef enum led_project_asset_type {
+    LED_PROJECT_ASSET_UNKNOWN = 0,
+    LED_PROJECT_ASSET_MODEL = 1,   /* .glb/.gltf source */
+    LED_PROJECT_ASSET_TEXTURE = 2, /* .png/.jpg/.jpeg source */
+    LED_PROJECT_ASSET_SCRIPT = 3,  /* .lua source */
+    LED_PROJECT_ASSET_SCENE = 4,   /* .luma_scene source */
+    LED_PROJECT_ASSET_PREFAB = 5,  /* .luprefab source */
+    LED_PROJECT_ASSET_MESH = 6,    /* glTF sub-asset */
+    LED_PROJECT_ASSET_MATERIAL = 7,/* glTF sub-asset */
+    LED_PROJECT_ASSET_SKELETON = 8,/* glTF sub-asset */
+    LED_PROJECT_ASSET_CLIP = 9,    /* glTF sub-asset */
+    LED_PROJECT_ASSET_TYPE_COUNT = 10
+} led_project_asset_type;
+
+/** Import status (explicit state, never inferred from UI). */
+typedef enum led_import_status {
+    LED_IMPORT_UNIMPORTED = 0,
+    LED_IMPORT_READY = 1,
+    LED_IMPORT_STALE = 2,
+    LED_IMPORT_FAILED = 3,
+    LED_IMPORT_MISSING = 4,
+    LED_IMPORT_UNSUPPORTED = 5
+} led_import_status;
+
+/** Project asset UUID (authoring identity; printed/persisted as 32
+ *  lowercase hex digits, same spelling as le_asset_id). */
+typedef struct led_project_asset_id {
+    uint64_t hi;
+    uint64_t lo;
+} led_project_asset_id;
+
+/** Opaque project handle. Never dereference; use the API below.
+ *  At most one project is open per led_session (singleton policy);
+ *  open/close/switch in the same process is supported. */
+typedef struct led_project led_project;
+/** Command kinds (stable contract; safe to persist in macros).
+ *  Phase 32 appends prefab kinds (values stable, never reordered). */
 typedef enum led_command_kind {
     LED_CMD_CREATE = 0,
     LED_CMD_DELETE = 1,
@@ -338,8 +379,24 @@ typedef enum led_command_kind {
     LED_CMD_SET_COLLIDER = 15,
     LED_CMD_SET_ANIMATOR = 16,
     LED_CMD_SET_CHARACTER = 17,
-    LED_CMD_KIND_COUNT = 18
+    /* Phase 32: prefab + typed asset assignment (appended). */
+    LED_CMD_INSTANTIATE_PREFAB = 18,
+    LED_CMD_CREATE_PREFAB = 19,
+    LED_CMD_ASSIGN_ASSET = 20,
+    LED_CMD_KIND_COUNT = 21
 } led_command_kind;
+
+/** Prefab payload on led_command (valid when kind is a prefab
+ *  kind): prefab registry handle + project UUID + instance root
+ *  (for undo) + assign target/role. */
+typedef struct led_prefab_command {
+    le_asset prefab_asset;
+    led_project_asset_id project_id;
+    le_object instance_root;
+    int has_instance_root;
+    le_object assign_target;
+    led_project_asset_type assign_role; /* MATERIAL or SCRIPT */
+} led_prefab_command;
 
 /** Command payload (plain values; strings copied into fixed buffers;
  *  component bytes are full le_*_desc snapshots). */
@@ -357,6 +414,7 @@ typedef struct led_command {
     uint8_t comp_bytes[512];     /* component desc snapshot (validated size) */
     uint32_t comp_size;
     le_script_property script_prop; /* SET_SCRIPT_PROPERTY (after value) */
+    led_prefab_command prefab; /* prefab kinds (INSTANTIATE/CREATE/ASSIGN) */
     uint32_t create_index_hint;     /* CREATE: reserved, must be 0 */
 } led_command;
 
@@ -654,12 +712,403 @@ LED_API int led_dispatch_action(led_session *session, led_action action,
 LED_API led_result led_project_save_sidecar(
     led_session *session, const led_viewport *viewport,
     const char *path);
+/* ------------------------------------------------------------------
+ * Editor project sidecar (self-contained versioned text; editor
+ * state only — the scene itself travels via le_scene_* text).
+ * ------------------------------------------------------------------ */
+
+/** Save editor sidecar (scene path, history tuning, viewport).
+ *  viewport may be NULL (skips the viewport line). */
+LED_API led_result led_project_save_sidecar(
+    led_session *session, const led_viewport *viewport,
+    const char *path);
 /** Load editor sidecar (validates magic; unknown fields tolerated;
  *  applies tuning + viewport + remembered path, never opens the
  *  scene). viewport may be NULL (viewport line still parsed). */
 LED_API led_result led_project_load_sidecar(led_session *session,
                                             led_viewport *viewport,
                                             const char *path);
+
+/* ------------------------------------------------------------------
+ * Luma Project system (Phase 32): portable project roots with a
+ * small versioned manifest, a project asset database over
+ * sidecar metadata, transactional import/reimport over existing
+ * runtime pipelines, a headless asset browser model, and prefab
+ * authoring. GUI-independent: every workflow below runs headless
+ * (future MCP drives these same APIs; no protocol here).
+ *
+ * Identity stack (four concepts, never conflated):
+ * - project asset ID (led_project_asset_id UUID): authoring
+ *   identity, minted at discovery, stored in the sidecar. Stable
+ *   across rename/move/reimport/cache-delete. Two copies of
+ *   identical bytes get DISTINCT IDs.
+ * - content fingerprint {size, FNV-1a-64}: change detection only.
+ * - runtime le_asset handle: engine registry; reimport publishes a
+ *   NEW handle (old one detectably stale), project ID unchanged.
+ * - le_asset_id persistent ID: what scene/prefab files store; the
+ *   DB bridges project-ID <-> le_asset_id <-> runtime handle.
+ * ------------------------------------------------------------------ */
+
+
+/* ---- project lifetime ---- */
+
+/** Create a minimal project on disk (manifest + Assets/ + Scenes/).
+ *  Fails when the directory exists and is nonempty (use open).
+ *  @return LED_SUCCESS, LED_ERROR_INVALID_ARGUMENT (NULL args),
+ *          LED_ERROR_IO, LED_ERROR_OUT_OF_MEMORY. */
+LED_API led_result led_project_create(const char *root_dir,
+                                      const char *project_name);
+
+/** Open a project (parse manifest -> scan sidecars -> build DB ->
+ *  resolve startup scene). The project borrows the session's
+ *  engine for imports (session must be attached). Reimport policy
+ *  is lazy: open discovers + validates, imports on demand.
+ *  @return LED_SUCCESS, LED_ERROR_INVALID_ARGUMENT,
+ *          LED_ERROR_NOT_ATTACHED, LED_ERROR_IO (missing
+ *          manifest/unreadable root), LED_ERROR_PARSE (bad
+ *          manifest/version/corrupt), LED_ERROR_OUT_OF_MEMORY. */
+LED_API led_result led_project_open(led_session *session,
+                                    const char *root_dir);
+
+/** Close the open project (releases DB + project state; engine
+ *  assets obey Phase 25 ownership — runtime handles stay live
+ *  until unloaded). NULL-safe no-op. */
+LED_API void led_project_close(led_session *session);
+
+/** Nonzero while a project is open on this session. */
+LED_API int led_project_is_open(const led_session *session);
+
+/** Borrow the open project (NULL when none). */
+LED_API led_project *led_project_get(led_session *session);
+
+/** Plain-data project info (zeros/"" for NULL/closed). */
+typedef struct led_project_info {
+    char name[128];
+    char root[1024];
+    uint32_t format_version;
+    char startup_scene[1024];
+    int has_startup_scene;
+    uint32_t asset_count;
+    uint32_t ready_count;
+    uint32_t stale_count;
+    uint32_t failed_count;
+    uint32_t missing_count;
+} led_project_info;
+
+LED_API void led_project_get_info(const led_session *session,
+                                  led_project_info *out_info);
+
+/* ---- paths (authoritative normalization + escape rejection) ---- */
+
+/** Normalize a project-relative path in place discipline (out may
+ *  alias nothing; out must hold 1024 bytes): `/` separators,
+ *  collapsed duplicates, resolved `.`/`..`, no trailing slash,
+ *  backslashes folded. Returns 1 on success, 0 for NULL/empty/
+ *  overlong/unrepresentable input. Lexical only (no filesystem,
+ *  no CWD dependence). */
+LED_API int led_project_normalize(const char *path, char out[1024]);
+
+/** Resolve a project-relative path against the open project root
+ *  into an absolute OS path (out must hold 2048 bytes). Rejects
+ *  escapes above the root (`..` breakout, absolute external
+ *  paths, drive-absolute paths on Windows) with 0. Returns 1 on
+ *  success. Never depends on the process CWD. */
+LED_API int led_project_resolve(const led_session *session,
+                                const char *rel_path,
+                                char out_absolute[2048]);
+
+/* ---- scan (explicit; no file watcher) ---- */
+
+/** Scan the project (discover sources -> read sidecars -> update
+ *  DB -> fingerprint compare -> mark STALE/MISSING; does NOT
+ *  import). Incremental: unchanged projects import nothing and
+ *  complete fast. Returns counts via out stats when non-NULL.
+ *  @return LED_SUCCESS / NOT_ATTACHED / IO / OUT_OF_MEMORY. */
+typedef struct led_scan_stats {
+    uint32_t discovered;
+    uint32_t added;
+    uint32_t removed;
+    uint32_t stale_marked;
+    uint32_t missing_marked;
+    uint32_t restored;
+    uint32_t errors;
+} led_scan_stats;
+
+LED_API led_result led_project_scan(led_session *session,
+                                    led_scan_stats *out_stats);
+
+/** Reimport every STALE record (transactional per record; failed
+ *  records keep last-known-good + FAILED diagnostics). Returns the
+ *  number reimported-ok in out_ok when non-NULL. */
+LED_API led_result led_project_reimport_all(led_session *session,
+                                            uint32_t *out_ok);
+
+/* ---- project filesystem operations (NOT scene undo) ---- */
+
+/** Rename/move an asset within the project (source + sidecar move
+ *  together; project ID preserved, references intact). Fails when
+ *  the destination exists or escapes the root.
+ *  @return LED_SUCCESS / INVALID_ARGUMENT / NOT_ATTACHED / IO /
+ *          PARSE (DB conflict) / OUT_OF_MEMORY. */
+LED_API led_result led_project_rename(led_session *session,
+                                      const char *old_rel,
+                                      const char *new_rel);
+
+/** Delete a project asset (source + sidecar removed). Fails with
+ *  LED_ERROR_VALIDATION + dependency listing in the console when
+ *  referenced by scenes/prefabs/other assets (no force-delete in
+ *  Phase 32). */
+LED_API led_result led_project_delete(led_session *session,
+                                      const char *rel_path);
+
+/* ---- project asset database (GUI-independent) ---- */
+
+/** One database record snapshot (plain data; strings copied into
+ *  fixed buffers — no lifetime hazards). */
+typedef struct led_asset_record {
+    led_project_asset_id id;
+    char id_hex[33];
+    led_project_asset_type type;
+    char source_path[1024]; /* project-relative, normalized */
+    led_import_status status;
+    uint64_t fingerprint_size;
+    uint64_t fingerprint_hash;
+    char importer[32]; /* "luma.gltf" etc; "" when undiscovered */
+    uint32_t importer_version;
+    uint64_t settings_digest;
+    uint32_t dependency_count;
+    uint32_t sub_asset_count;
+    le_asset runtime_asset; /* INVALID when not imported */
+    int has_runtime_asset;
+    le_asset_id runtime_id; /* persistent engine ID; nil when none */
+    int has_runtime_id;
+    char diagnostic[256];
+} led_asset_record;
+
+/** Record count (0 for NULL/closed). */
+LED_API uint32_t led_assetdb_count(const led_session *session);
+
+/** Snapshot record i in deterministic (path-sorted) order (1 on
+ *  success, 0 for out-of-range/NULL). */
+LED_API int led_assetdb_get(const led_session *session, uint32_t index,
+                            led_asset_record *out_record);
+
+/** Look up by project UUID (1 + fill, 0 when absent). */
+LED_API int led_assetdb_find_by_id(
+    const led_session *session, const led_project_asset_id *id,
+    led_asset_record *out_record);
+
+/** Look up by project-relative path (normalized internally; 1/0). */
+LED_API int led_assetdb_find_by_path(const led_session *session,
+                                     const char *rel_path,
+                                     led_asset_record *out_record);
+
+/** Count records of one type (TYPE_COUNT counts all). */
+LED_API uint32_t led_assetdb_filter(const led_session *session,
+                                    led_project_asset_type type);
+
+/** Search by name/path substring + optional type filter (writes up
+ *  to capacity UUIDs in deterministic order; always reports the
+ *  full count in out_count; either out pointer may be NULL).
+ *  Case-insensitive substring; empty query matches all of the
+ *  type. Returns full match count. */
+LED_API uint32_t led_assetdb_search(
+    const led_session *session, const char *query,
+    led_project_asset_type type, led_project_asset_id *out_ids,
+    uint32_t capacity, uint32_t *out_count);
+
+/** Dependency list for one record (up to capacity UUIDs;
+ *  counting query when out NULL). Returns full count. */
+LED_API uint32_t led_assetdb_dependencies(
+    const led_session *session, const led_project_asset_id *id,
+    led_project_asset_id *out_ids, uint32_t capacity);
+
+/** Reverse dependencies: records depending on id (same contract). */
+LED_API uint32_t led_assetdb_dependents(
+    const led_session *session, const led_project_asset_id *id,
+    led_project_asset_id *out_ids, uint32_t capacity);
+
+/** Plain-data DB stats (zeros for NULL; out may be NULL). */
+typedef struct led_assetdb_stats {
+    uint32_t records;
+    uint32_t by_type[LED_PROJECT_ASSET_TYPE_COUNT];
+    uint32_t by_status[6];
+    uint64_t bytes_estimate;
+} led_assetdb_stats;
+
+LED_API void led_assetdb_get_stats(const led_session *session,
+                                   led_assetdb_stats *out_stats);
+
+/* ---- import / reimport (over existing runtime pipelines) ---- */
+
+/** Importer identity + version table entry (static storage). */
+typedef struct led_importer_info {
+    char id[32]; /* "luma.gltf" */
+    uint32_t version;
+    const char *extensions; /* "; "-separated ("glb;gltf") */
+} led_importer_info;
+
+/** Importer count + lookup (pure; no session needed). */
+LED_API uint32_t led_importer_count(void);
+LED_API const led_importer_info *led_importer_at(uint32_t index);
+LED_API const led_importer_info *led_importer_for_extension(
+    const char *extension);
+
+/** Import one source asset (discover -> import -> DB READY).
+ *  Transactional: failure leaves any prior good state + FAILED
+ *  diagnostics (never half-imported). Reimport while PLAY is
+ *  rejected (conservative policy). */
+LED_API led_result led_import_asset(led_session *session,
+                                    const char *rel_path);
+
+/** Reimport one record by project UUID (stale check: fingerprint
+ *  OR settings OR importer-version change; forced when
+ *  force != 0). Candidate-then-swap: new runtime handle published
+ *  only after full validation; failure keeps the old asset live. */
+LED_API led_result led_reimport_asset(
+    led_session *session, const led_project_asset_id *id, int force);
+
+/** Import queue state (synchronous execution in Phase 32;
+ *  worker-ready shape for the future). */
+typedef struct led_import_queue_stats {
+    uint32_t pending;
+    uint32_t running;
+    uint32_t completed;
+    uint32_t failed;
+} led_import_queue_stats;
+
+LED_API void led_import_queue_get_stats(
+    const led_session *session, led_import_queue_stats *out_stats);
+
+/* ---- asset browser model (headless; selection by UUID) ---- */
+
+/** One folder-tree node (borrowed path storage, session-owned). */
+typedef struct led_browser_folder {
+    char path[1024]; /* project-relative; "" = root */
+    uint32_t asset_count; /* assets directly inside */
+    uint32_t folder_count; /* subfolders directly inside */
+} led_browser_folder;
+
+/** Refresh the browser model (rebuild folder tree + sorted asset
+ *  list; 0 when no project). Returns asset count. */
+LED_API uint32_t led_browser_refresh(led_session *session);
+
+/** Folder / asset counts + borrowing (valid until next refresh /
+ *  scan / close / detach / destroy). */
+LED_API uint32_t led_browser_folder_count(
+    const led_session *session);
+LED_API const led_browser_folder *led_browser_folders(
+    const led_session *session);
+LED_API uint32_t led_browser_asset_count(
+    const led_session *session);
+LED_API int led_browser_asset_at(const led_session *session,
+                                 uint32_t index,
+                                 led_asset_record *out_record);
+
+/** Browser filter + search (sessions-owned view; refresh rebuilds
+ *  then applies). Type filter COUNT = all. Search is the same
+ *  case-insensitive substring as the DB. Sort modes: 0 = path,
+ *  1 = name, 2 = type-then-path (deterministic). */
+LED_API led_result led_browser_set_filter(
+    led_session *session, led_project_asset_type type,
+    const char *search, int sort_mode);
+
+/** Browser selection by project UUID (ordered unique, cap 256). */
+LED_API led_result led_browser_select(led_session *session,
+                                      const led_project_asset_id *id);
+LED_API led_result led_browser_deselect(
+    led_session *session, const led_project_asset_id *id);
+LED_API led_result led_browser_clear_selection(
+    led_session *session);
+LED_API uint32_t led_browser_get_selection(
+    const led_session *session, led_project_asset_id *out_ids,
+    uint32_t capacity);
+
+/** Headless asset inspector: metadata rows for one record (ID,
+ *  type, path, status, importer, fingerprint, deps, diagnostics).
+ *  Reuses led_inspector_row shape with LED_DATA_* types. Returns
+ *  row count (rows session-owned). */
+LED_API uint32_t led_browser_inspect(
+    led_session *session, const led_project_asset_id *id);
+
+/* ---- drag / drop (GUI-independent payloads, never raw paths) ---- */
+
+/** Drag payload (project UUID + type; resolved via the DB). */
+typedef struct led_drag_payload {
+    led_project_asset_id asset;
+    led_project_asset_type type;
+} led_drag_payload;
+
+/** Begin a drag for the current single browser selection (1/0). */
+LED_API int led_drag_begin(led_session *session,
+                           led_drag_payload *out_payload);
+
+/** Drop a model/mesh asset into the scene: CREATE + assign via
+ *  normal editor commands (undoable). Returns 1 on success. */
+LED_API int led_drop_model_into_scene(
+    led_session *session, const led_drag_payload *payload,
+    const float position[3]);
+
+/** Drop a material onto a renderable object: typed assign through
+ *  a normal command (rejects type mismatches). Returns 1. */
+LED_API int led_drop_material_onto_object(
+    led_session *session, const led_drag_payload *payload,
+    const le_object *target);
+
+/** Drop a script onto an object: add/configure Script component
+ *  through a normal command. Returns 1. */
+LED_API int led_drop_script_onto_object(
+    led_session *session, const led_drag_payload *payload,
+    const le_object *target);
+
+/** Open a scene payload (maps to led_scene_open; never accidental
+ *  instantiate). Returns led_result. */
+LED_API led_result led_open_scene_payload(
+    led_session *session, const led_drag_payload *payload);
+
+/* ---- prefabs (reusable subtree assets, .luprefab) ---- */
+
+/** Prefab file format version (1 in Phase 32; load rejects
+ *  anything else with LED_ERROR_PARSE). */
+#define LED_PREFAB_FORMAT_VERSION ((uint32_t)1)
+
+/** Create a prefab from a subtree (selected object + descendants):
+ *  mints prefab-local UUIDs, captures authoring state (no runtime
+ *  state), writes the .luprefab file + sidecar + DB record
+ *  transactionally (failed write leaves no partial asset).
+ *  Nested-prefab references inside the subtree are rejected. */
+LED_API led_result led_prefab_create(led_session *session,
+                                     const le_object *root,
+                                     const char *rel_path);
+
+/** Load + validate a prefab file into a registry prefab asset
+ *  (transactional parse; malformed -> PARSE, world untouched).
+ *  Returns the registry handle when out != NULL. */
+LED_API led_result led_prefab_load(led_session *session,
+                                   const char *rel_path,
+                                   le_asset *out_asset);
+
+/** Instantiate a prefab into the edit world (fresh scene IDs +
+ *  engine commit path; returns the instance root + local->runtime
+ *  map for editor tracking). Direct API (the undoable path is
+ *  LED_CMD_INSTANTIATE_PREFAB via led_execute). */
+typedef struct led_prefab_instance {
+    le_object root;
+    le_scene_object_id *local_ids;
+    le_object *objects;
+    uint32_t count;
+    le_asset prefab_asset;
+    led_project_asset_id project_id;
+} led_prefab_instance;
+
+LED_API led_result led_prefab_instantiate(
+    led_session *session, const le_asset *prefab_asset,
+    led_prefab_instance *out_instance);
+
+/** Release an instance record (mapping arrays only; world objects
+ *  stay live). NULL-safe no-op. */
+LED_API void led_prefab_instance_free(
+    led_prefab_instance *instance);
 
 #ifdef __cplusplus
 }

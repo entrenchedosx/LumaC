@@ -93,6 +93,9 @@ void led_session_destroy(led_session *session) {
         session->play_world = NULL;
         session->playing = 0;
     }
+    /* Phase 32: close any open project first (DB + state freed;
+     * engine assets obey Phase 25 ownership). */
+    led_project_close(session);
     /* Borrowed engine/world handles are untouched by contract. */
     led_free_stacks(session);
     free(session->hier_nodes);
@@ -142,6 +145,9 @@ led_result led_session_attach(led_session *session, le_engine *engine,
     session->console_start = 0;
     session->console_dropped = 0;
     session->text_field_focused = 0;
+    /* Phase 32: re-attach closes any open project (no cross-bind
+     * leakage between engine/world generations). */
+    led_project_close(session);
     return LED_SUCCESS;
 }
 
@@ -156,6 +162,7 @@ void led_session_detach(led_session *session) {
         session->play_world = NULL;
         session->playing = 0;
     }
+    led_project_close(session);
     for (i = 0; i < session->undo_count; i++) {
         led_entry_free(&session->undo_stack[i]);
     }

@@ -445,6 +445,9 @@ int32_t le_asset_alloc(le_engine *engine, le_asset_type type,
     case LE_ASSET_ANIMATION_CLIP:
         engine->asset_clips++;
         break;
+    case LE_ASSET_PREFAB:
+        engine->asset_prefabs++;
+        break;
     default:
         break;
     }
@@ -477,6 +480,9 @@ static void le_asset_abandon(le_engine *engine, int32_t idx) {
     s->source = NULL;
     free(s->script_source);
     s->script_source = NULL;
+    free(s->prefab_text);
+    s->prefab_text = NULL;
+    s->prefab_size = 0;
     /* Phase 29 animation backing frees via
      * le_anim_free_slot_backing (declared at the top; defined
      * in src/animation/ — asset.c must not learn the struct
@@ -524,6 +530,11 @@ static void le_asset_abandon(le_engine *engine, int32_t idx) {
     case LE_ASSET_ANIMATION_CLIP:
         if (engine->asset_clips > 0) {
             engine->asset_clips--;
+        }
+        break;
+    case LE_ASSET_PREFAB:
+        if (engine->asset_prefabs > 0) {
+            engine->asset_prefabs--;
         }
         break;
     default:
@@ -632,6 +643,75 @@ uint32_t le_asset_refcount(const le_engine *engine, uint32_t slot) {
 /* ------------------------------------------------------------------
  * Procedural asset creation.
  * ------------------------------------------------------------------ */
+
+#define LE_PREFAB_MAX_TEXT (64u * 1024u * 1024u)
+
+/* Create a READY prefab asset from canonical prefab text (Phase
+ * 32). Bytes are copied in; the format is validated by the editor
+ * layer (the engine stores the payload opaquely). Empty/overlong
+ * input creates nothing. */
+le_result le_asset_create_prefab(le_engine *engine, const char *text,
+                                 size_t size, le_asset *out_asset) {
+    le_result code = LE_SUCCESS;
+    int32_t idx;
+    le_asset handle = LE_ASSET_INVALID;
+    le_asset_id id;
+    char *copy = NULL;
+
+    if (engine == NULL || text == NULL || out_asset == NULL) {
+        return LE_ERROR_INVALID_ARGUMENT;
+    }
+    *out_asset = LE_ASSET_INVALID;
+    if (size == 0 || size >= LE_PREFAB_MAX_TEXT) {
+        return LE_ERROR_INVALID_ARGUMENT;
+    }
+    copy = (char *)malloc(size + 1u);
+    if (copy == NULL) {
+        return LE_ERROR_OUT_OF_MEMORY;
+    }
+    memcpy(copy, text, size);
+    copy[size] = '\0';
+    /* Persistent ID: UUID per creation (authoring identity — two
+     * copies of identical bytes are intentionally distinct; the
+     * project layer assigns stable project IDs on top). */
+    le_uuid_mint(engine, &id.hi, &id.lo);
+    idx = le_asset_alloc(engine, LE_ASSET_PREFAB, LE_ASSET_READY,
+                         &id, NULL, &code, &handle);
+    if (idx < 0) {
+        free(copy);
+        return code;
+    }
+    engine->assets[idx].prefab_text = copy;
+    engine->assets[idx].prefab_size = size;
+    *out_asset = handle;
+    return LE_SUCCESS;
+}
+
+const char *le_asset_get_prefab_text(const le_engine *engine,
+                                     const le_asset *asset,
+                                     size_t *out_size) {
+    uint32_t slot;
+    le_result code = LE_SUCCESS;
+
+    if (out_size != NULL) {
+        *out_size = 0;
+    }
+    if (engine == NULL || asset == NULL) {
+        return "";
+    }
+    if (!le_resolve_asset_live(engine, asset, &slot, &code)) {
+        return "";
+    }
+    if (engine->assets[slot].type != LE_ASSET_PREFAB ||
+        engine->assets[slot].state != LE_ASSET_READY ||
+        engine->assets[slot].prefab_text == NULL) {
+        return "";
+    }
+    if (out_size != NULL) {
+        *out_size = engine->assets[slot].prefab_size;
+    }
+    return engine->assets[slot].prefab_text;
+}
 
 le_result le_asset_create_mesh(le_engine *engine,
                               const le_mesh_asset_desc *desc,
@@ -943,6 +1023,11 @@ le_result le_asset_unload(le_engine *engine, const le_asset *asset) {
         le_anim_free_slot_backing(s->skeleton, s->clip);
         s->skeleton = NULL;
         s->clip = NULL;
+    } else if (s->type == LE_ASSET_PREFAB) {
+        /* Phase 32: prefab payload is owned text (no backing). */
+        free(s->prefab_text);
+        s->prefab_text = NULL;
+        s->prefab_size = 0;
     }
     if (s->source != NULL) {
         engine->name_bytes_assets -= strlen(s->source) + 1u;
@@ -989,6 +1074,11 @@ le_result le_asset_unload(le_engine *engine, const le_asset *asset) {
     case LE_ASSET_ANIMATION_CLIP:
         if (engine->asset_clips > 0) {
             engine->asset_clips--;
+        }
+        break;
+    case LE_ASSET_PREFAB:
+        if (engine->asset_prefabs > 0) {
+            engine->asset_prefabs--;
         }
         break;
     default:
@@ -1090,6 +1180,7 @@ void le_engine_get_asset_stats(const le_engine *engine,
     out_stats->scene_count = engine->asset_scenes;
     out_stats->skeleton_count = engine->asset_skeletons;
     out_stats->clip_count = engine->asset_clips;
+    out_stats->prefab_count = engine->asset_prefabs;
     out_stats->ready_count = engine->asset_ready;
     out_stats->failed_count = engine->asset_failed;
     out_stats->name_bytes = engine->name_bytes_assets;

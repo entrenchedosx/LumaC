@@ -1184,7 +1184,13 @@ typedef enum le_asset_type {
      * over joints and/or plain object transforms. */
     LE_ASSET_SKELETON = 5,
     LE_ASSET_ANIMATION_CLIP = 6,
-    LE_ASSET_COUNT = 7
+    /* Phase 32: prefab assets (appended; earlier values unchanged).
+     * Prefab = reusable authored object-subtree payload (canonical
+     * text over the scene record vocabulary, engine-agnostic
+     * bytes owned by the registry). Instantiation reuses the scene
+     * commit path with fresh runtime handles per instance. */
+    LE_ASSET_PREFAB = 7,
+    LE_ASSET_COUNT = 8
 } le_asset_type;
 
 /** Asset load state (synchronous loads only in Phase 25; the model
@@ -1460,6 +1466,8 @@ typedef struct le_asset_stats {
      * unchanged). */
     uint32_t skeleton_count;
     uint32_t clip_count;
+    /* Phase 32: prefab census (appended; earlier fields unchanged). */
+    uint32_t prefab_count;
     uint32_t ready_count;
     uint32_t failed_count;
     uint64_t name_bytes;
@@ -1497,6 +1505,32 @@ LE_API lr_mesh *le_asset_get_mesh(const le_engine *engine,
  *  contract). */
 LE_API lr_material *le_asset_get_material(const le_engine *engine,
                                           const le_asset *asset);
+
+/* Prefabs (Phase 32): reusable authored object-subtree payloads.
+ * The registry owns canonical prefab TEXT (engine-agnostic bytes;
+ * the `LUMA_PREFAB 1` format is defined in PREFAB_ARCHITECTURE.md
+ * and validated by the editor layer). The engine stores, IDs, and
+ * unloads the payload; instantiation reuses the scene commit path
+ * (fresh runtime handles per instance, transactional). Prefab
+ * slots carry no renderer backing and no world state. */
+
+/** Create a READY prefab asset from canonical prefab text (bytes
+ *  copied in; empty/overlong input creates nothing).
+ *
+ * @return LE_SUCCESS, LE_ERROR_INVALID_ARGUMENT (NULL args, empty
+ *         text, text >= 64MB), LE_ERROR_OUT_OF_MEMORY.
+ */
+LE_API le_result le_asset_create_prefab(le_engine *engine,
+                                        const char *text,
+                                        size_t size,
+                                        le_asset *out_asset);
+
+/** Borrow a prefab asset's canonical text ("" for NULL/stale/
+ *  wrong-type; out_size receives the byte count, may be NULL).
+ *  Borrowed: valid until unload or engine shutdown. */
+LE_API const char *le_asset_get_prefab_text(
+    const le_engine *engine, const le_asset *asset,
+    size_t *out_size);
 
 /* ------------------------------------------------------------------
  * Scenes (Phase 25): serialized project content vs runtime worlds.

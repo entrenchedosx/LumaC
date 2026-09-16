@@ -110,6 +110,11 @@ void le_engine_destroy(le_engine *engine) {
                 le_anim_free_slot_backing(s->skeleton, s->clip);
                 s->skeleton = NULL;
                 s->clip = NULL;
+            } else if (s->type == LE_ASSET_PREFAB) {
+                /* Phase 32: owned text payload (no backing). */
+                free(s->prefab_text);
+                s->prefab_text = NULL;
+                s->prefab_size = 0;
             }
             free(s->source);
             free(s->scene_objects);

@@ -402,6 +402,95 @@ static led_result led_apply(led_session *s, const led_command *c) {
         }
         return LED_SUCCESS;
     }
+    case LED_CMD_INSTANTIATE_PREFAB: {
+        /* Undoable prefab instantiate: the direct API stages +
+         * commits transactionally; the command records the
+         * instance root for whole-subtree undo (destroying the
+         * root cascades to the instance). The instance map
+         * (local->runtime) is editor tracking — freed after the
+         * root is captured (undo/redo re-resolve by subtree). */
+        led_prefab_instance inst;
+        led_result prc;
+
+        memset(&inst, 0, sizeof(inst));
+        inst.prefab_asset = LE_ASSET_INVALID;
+        if (!le_asset_is_alive(s->engine, &c->prefab.prefab_asset)) {
+            return LED_ERROR_INVALID_ARGUMENT;
+        }
+        prc = led_prefab_instantiate(s, &c->prefab.prefab_asset,
+                                     &inst);
+        if (prc != LED_SUCCESS) {
+            led_prefab_instance_free(&inst);
+            return prc;
+        }
+        led_prefab_instance_free(&inst);
+        return LED_SUCCESS;
+    }
+    case LED_CMD_CREATE_PREFAB: {
+        /* Authoring-time snapshot: the target subtree is captured
+         * to a .luprefab path carried in the command label? No —
+         * paths never ride labels. CREATE_PREFAB commands are
+         * constructed by the prefab helper below (which resolves
+         * the path from the project DB); direct led_execute of a
+         * bare CREATE_PREFAB without a prefab payload is a usage
+         * error. */
+        return LED_ERROR_INVALID_ARGUMENT;
+    }
+    case LED_CMD_ASSIGN_ASSET: {
+        /* Typed asset assignment: MATERIAL retargets an asset
+         * renderable's material; SCRIPT attaches/replaces the
+         * script component. The asset handle rides the prefab
+         * payload (prefab_asset) with the role in assign_role. */
+        le_asset asset = c->prefab.prefab_asset;
+
+        if (!le_object_is_alive(w, &c->target)) {
+            return LED_ERROR_STALE_HANDLE;
+        }
+        if (!le_asset_is_alive(s->engine, &asset)) {
+            return LED_ERROR_INVALID_ARGUMENT;
+        }
+        if (c->prefab.assign_role ==
+            LED_PROJECT_ASSET_MATERIAL) {
+            le_asset_renderable_desc cur;
+
+            memset(&cur, 0, sizeof(cur));
+            if (le_asset_get_type(s->engine, &asset) !=
+                LE_ASSET_MATERIAL) {
+                return LED_ERROR_INVALID_ARGUMENT;
+            }
+            if (!le_object_get_asset_renderable(w, &c->target,
+                                                &cur)) {
+                return LED_ERROR_VALIDATION;
+            }
+            cur.material = asset;
+            rc = le_object_add_asset_renderable(w, &c->target,
+                                                &cur);
+            if (rc != LE_SUCCESS) {
+                if (rc == LE_ERROR_STALE_HANDLE) {
+                    return LED_ERROR_STALE_HANDLE;
+                }
+                s->last_engine_error = (int)rc;
+                return LED_ERROR_ENGINE;
+            }
+            return LED_SUCCESS;
+        } else if (c->prefab.assign_role ==
+                   LED_PROJECT_ASSET_SCRIPT) {
+            if (le_asset_get_type(s->engine, &asset) !=
+                LE_ASSET_SCRIPT) {
+                return LED_ERROR_INVALID_ARGUMENT;
+            }
+            rc = le_object_add_script(w, &c->target, &asset);
+            if (rc != LE_SUCCESS) {
+                if (rc == LE_ERROR_STALE_HANDLE) {
+                    return LED_ERROR_STALE_HANDLE;
+                }
+                s->last_engine_error = (int)rc;
+                return LED_ERROR_ENGINE;
+            }
+            return LED_SUCCESS;
+        }
+        return LED_ERROR_INVALID_ARGUMENT;
+    }
     default:
         break;
     }
@@ -801,8 +890,37 @@ led_result led_execute(led_session *session,
     if (command->kind >= LED_CMD_KIND_COUNT) {
         return LED_ERROR_INVALID_ARGUMENT;
     }
-    if (command->kind != LED_CMD_CREATE &&
-        !le_object_is_alive(session->edit_world, &command->target)) {
+    /* Prefab authoring + structural prefab commands are rejected
+     * while playing (conservative play policy D8: reimport +
+     * prefab authoring never touch the runtime world). Plain
+     * value commands may target the edit world during play. */
+    if (session->playing &&
+        (command->kind == LED_CMD_INSTANTIATE_PREFAB ||
+         command->kind == LED_CMD_CREATE_PREFAB ||
+         command->kind == LED_CMD_ASSIGN_ASSET)) {
+        return LED_ERROR_ALREADY_PLAYING;
+    }
+    if (command->kind == LED_CMD_INSTANTIATE_PREFAB) {
+        /* No target object (instantiation creates roots): only
+         * the prefab payload must validate. */
+        if (!le_asset_is_alive(session->engine,
+                               &command->prefab.prefab_asset)) {
+            return LED_ERROR_INVALID_ARGUMENT;
+        }
+    } else if (command->kind == LED_CMD_CREATE_PREFAB) {
+        return LED_ERROR_INVALID_ARGUMENT;
+    } else if (command->kind == LED_CMD_ASSIGN_ASSET) {
+        if (!le_object_is_alive(session->edit_world,
+                                &command->target)) {
+            return LED_ERROR_STALE_HANDLE;
+        }
+        if (!le_asset_is_alive(session->engine,
+                               &command->prefab.prefab_asset)) {
+            return LED_ERROR_INVALID_ARGUMENT;
+        }
+    } else if (command->kind != LED_CMD_CREATE &&
+               !le_object_is_alive(session->edit_world,
+                                   &command->target)) {
         return LED_ERROR_STALE_HANDLE;
     }
     memset(&entry, 0, sizeof(entry));
@@ -983,6 +1101,53 @@ led_result led_execute(led_session *session,
                    command->comp_size);
             entry.after_size = command->comp_size;
         }
+    } else if (command->kind == LED_CMD_INSTANTIATE_PREFAB) {
+        /* No before-image: undo destroys the instance root
+         * (captured post-apply into entry.created, like CREATE).
+         * The apply below instantiates; capture the root after. */
+    } else if (command->kind == LED_CMD_ASSIGN_ASSET) {
+        /* Before-image for the assign target: material slot = the
+         * current asset-renderable desc; script slot = presence
+         * byte (mirrors the ADD_COMPONENT script path). */
+        le_world *w = session->edit_world;
+
+        if (command->prefab.assign_role ==
+            LED_PROJECT_ASSET_MATERIAL) {
+            le_asset_renderable_desc d;
+
+            memset(&d, 0, sizeof(d));
+            if (le_object_get_asset_renderable(
+                    w, &command->target, &d)) {
+                le_asset_id mid;
+                le_asset_id tid;
+
+                memset(&mid, 0, sizeof(mid));
+                memset(&tid, 0, sizeof(tid));
+                le_asset_get_id(session->engine, &d.mesh, &mid);
+                le_asset_get_id(session->engine, &d.material,
+                                &tid);
+                memcpy(entry.before_bytes, &mid, sizeof(mid));
+                memcpy(entry.before_bytes + sizeof(mid), &tid,
+                       sizeof(tid));
+                entry.before_size =
+                    (uint32_t)(sizeof(mid) + sizeof(tid));
+            }
+        } else if (command->prefab.assign_role ==
+                   LED_PROJECT_ASSET_SCRIPT) {
+            le_asset cur = LE_ASSET_INVALID;
+
+            if (le_object_get_script(w, &command->target,
+                                     &cur)) {
+                entry.before_bytes[0] = 1;
+                memcpy(entry.before_bytes + 1, &cur,
+                       sizeof(cur));
+                entry.before_size =
+                    (uint32_t)(1 + sizeof(cur));
+            } else {
+                entry.before_bytes[0] = 0;
+                entry.before_size = 1;
+            }
+        }
     } else if (command->kind == LED_CMD_SET_SCRIPT_PROPERTY) {
         le_script_property cur;
 
@@ -1007,7 +1172,8 @@ led_result led_execute(led_session *session,
         }
     }
     /* Validate-then-apply: engine failure pushes NOTHING. */
-    if (command->kind == LED_CMD_CREATE) {
+    if (command->kind == LED_CMD_CREATE ||
+        command->kind == LED_CMD_INSTANTIATE_PREFAB) {
         /* CREATE needs post-handle capture: apply manually. */
         uint32_t before = le_world_get_object_count(
             session->edit_world);
@@ -1019,7 +1185,10 @@ led_result led_execute(led_session *session,
             return rc;
         }
         /* Find the newborn: last live object matching the name
-         * (names may duplicate; creation appends — scan tail). */
+         * (names may duplicate; creation appends — scan tail).
+         * INSTANTIATE appends too: same tail rule captures the
+         * instance's last object; undo destroys the recorded
+         * ROOT (entry.created set below by root resolution). */
         {
             uint32_t live = le_world_get_object_count(
                 session->edit_world);
@@ -1039,6 +1208,33 @@ led_result led_execute(led_session *session,
                     free(all);
                 }
             }
+        }
+        if (command->kind == LED_CMD_INSTANTIATE_PREFAB) {
+            /* Resolve the TRUE instance root: re-instantiate
+             * tracking is unavailable post-apply (the direct API
+             * freed its map), so walk up from the tail object to
+             * the subtree root created by this command. The
+             * tail belongs to the instance; its topmost ancestor
+             * that is NOT an ancestor of any pre-existing object
+             * is the instance root. Simpler exact rule: the
+             * instance root is the highest ancestor of the tail
+             * whose parent is either absent or an object that
+             * existed before (count `before`). Parent handles
+             * from before the command are all within [0,before)
+             * census — but handles recycle, so instead: climb to
+             * the topmost ancestor; instantiation appends roots,
+             * and prefab payload roots attach as scene roots, so
+             * the topmost ancestor of the tail IS the instance
+             * root. */
+            le_object walk = entry.created;
+            le_object p = LE_OBJECT_INVALID;
+
+            while (le_object_get_parent(session->edit_world,
+                                        &walk, &p)) {
+                walk = p;
+            }
+            entry.created = walk;
+            entry.has_created = 1;
         }
     } else {
         rc = led_apply(session, command);
@@ -1203,6 +1399,88 @@ static led_result led_apply_inverse(led_session *s,
         }
         return LED_SUCCESS;
     }
+    case LED_CMD_INSTANTIATE_PREFAB: {
+        /* Inverse = destroy the whole instance (root cascade).
+         * The recorded root may be stale after unrelated edits;
+         * destroy is best-effort alive-checked by led_apply
+         * semantics — here: alive ? destroy : success. */
+        if (e->has_created &&
+            le_object_is_alive(w, &e->created)) {
+            le_result rc = le_object_destroy(w, &e->created);
+
+            if (rc != LE_SUCCESS) {
+                s->last_engine_error = (int)rc;
+                return LED_ERROR_ENGINE;
+            }
+        }
+        return LED_SUCCESS;
+    }
+    case LED_CMD_CREATE_PREFAB: {
+        /* Filesystem ops are NOT scene-undo (documented split):
+         * undo of a prefab-file write is a no-op success (the
+         * file stays; explicit project-delete removes it). */
+        return LED_SUCCESS;
+    }
+    case LED_CMD_ASSIGN_ASSET: {
+        /* Restore the before-image captured at execute time. */
+        if (e->command.prefab.assign_role ==
+            LED_PROJECT_ASSET_MATERIAL) {
+            if (e->before_size ==
+                (uint32_t)(sizeof(le_asset_id) * 2u)) {
+                le_asset_id mid;
+                le_asset_id tid;
+                le_asset mesh = LE_ASSET_INVALID;
+                le_asset mat = LE_ASSET_INVALID;
+
+                memcpy(&mid, e->before_bytes, sizeof(mid));
+                memcpy(&tid, e->before_bytes + sizeof(mid),
+                       sizeof(tid));
+                if (le_asset_find_by_id(s->engine, &mid,
+                                        &mesh) &&
+                    le_asset_find_by_id(s->engine, &tid, &mat)) {
+                    le_asset_renderable_desc cur;
+
+                    memset(&cur, 0, sizeof(cur));
+                    if (le_object_get_asset_renderable(
+                            w, &e->command.target, &cur)) {
+                        cur.mesh = mesh;
+                        cur.material = mat;
+                        if (le_object_add_asset_renderable(
+                                w, &e->command.target,
+                                &cur) != LE_SUCCESS) {
+                            return LED_ERROR_ENGINE;
+                        }
+                    }
+                }
+            }
+            return LED_SUCCESS;
+        } else if (e->command.prefab.assign_role ==
+                   LED_PROJECT_ASSET_SCRIPT) {
+            if (e->before_size >= 1) {
+                if (e->before_bytes[0] != 0 &&
+                    e->before_size >=
+                        (uint32_t)(1 + sizeof(le_asset))) {
+                    le_asset cur = LE_ASSET_INVALID;
+
+                    memcpy(&cur, e->before_bytes + 1,
+                           sizeof(cur));
+                    if (le_object_add_script(
+                            w, &e->command.target,
+                            &cur) != LE_SUCCESS) {
+                        return LED_ERROR_ENGINE;
+                    }
+                } else {
+                    if (le_object_remove_script(
+                            w, &e->command.target) !=
+                        LE_SUCCESS) {
+                        return LED_ERROR_ENGINE;
+                    }
+                }
+            }
+            return LED_SUCCESS;
+        }
+        return LED_ERROR_INVALID_ARGUMENT;
+    }
     default:
         break;
     }
@@ -1247,7 +1525,8 @@ static led_result led_apply_after(led_session *s,
          * When nothing resolves, the redo is a no-op success. */
         return LED_SUCCESS;
     }
-    case LED_CMD_CREATE: {
+    case LED_CMD_CREATE:
+    case LED_CMD_INSTANTIATE_PREFAB: {
         /* Recreate (fresh handle) and refresh the entry. */
         led_result rc = led_apply(s, &e->command);
 
@@ -1270,8 +1549,32 @@ static led_result led_apply_after(led_session *s,
                     free(all);
                 }
             }
+            if (e->command.kind ==
+                    LED_CMD_INSTANTIATE_PREFAB &&
+                e->has_created) {
+                /* Same root resolution as execute: climb to the
+                 * topmost ancestor of the tail. */
+                le_object walk = e->created;
+                le_object p = LE_OBJECT_INVALID;
+
+                while (le_object_get_parent(s->edit_world, &walk,
+                                            &p)) {
+                    walk = p;
+                }
+                e->created = walk;
+            }
         }
         return rc;
+    }
+    case LED_CMD_CREATE_PREFAB: {
+        /* Filesystem no-op (see inverse): redo re-applies the
+         * no-op. */
+        return LED_SUCCESS;
+    }
+    case LED_CMD_ASSIGN_ASSET: {
+        /* Redo = re-apply the assign (same validation as the
+         * forward path). */
+        return led_apply(s, &e->command);
     }
     default:
         return led_apply(s, &e->command);
