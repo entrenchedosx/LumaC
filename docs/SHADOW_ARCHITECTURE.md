@@ -87,8 +87,10 @@ Per-draw opt-in: `casts_shadow` / `receives_shadow` (assets set
 both). The receive flag rides the PBR push block (bit 0, 116
 bytes total). Unlit casters throw identical footprints (depth
 pass is material-agnostic). Mirrored (negative-scale) casters
-match in the map but render inside-out in main (documented debt:
-winding vs cull state, pinned at the silhouette top).
+match in the map and render correctly in main (per-item
+front-face flip; the old inside-out debt was fixed in the
+pre-Phase-24 audit and is pinned lit by the mirrored shadow
+test).
 
 ## Stats, introspection, example
 

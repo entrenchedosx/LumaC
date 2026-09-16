@@ -33,3 +33,5 @@ render-pass inheritance) execute outside passes, never mixed in
 one batch. Indirect draws record in graphics lists and on frame
 encoders. Render-graph scheduling remains a future layer over
 the same encoder/list boundary.
+
+Phase 23: the visibility render graph records through the same encoder/list boundary (graph callbacks own their transitions); independent passes remain parallel-recordable.

@@ -20,6 +20,7 @@
  * model or callers.
  */
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "graphics/graphics_internal.h"
@@ -121,6 +122,7 @@ int lc_vk_sync_state_valid_for_buffer(lc_resource_state state) {
     case LC_RESOURCE_STATE_UNIFORM_READ:
     case LC_RESOURCE_STATE_STORAGE_READ:
     case LC_RESOURCE_STATE_STORAGE_WRITE:
+    case LC_RESOURCE_STATE_STORAGE_READ_WRITE:
     case LC_RESOURCE_STATE_INDIRECT_READ:
         return 1;
     default:
@@ -172,6 +174,14 @@ int lc_vk_sync_buffer_barrier_params(lc_resource_state state,
     case LC_RESOURCE_STATE_STORAGE_WRITE:
         *out_stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
         *out_access = VK_ACCESS_SHADER_WRITE_BIT;
+        return 1;
+    case LC_RESOURCE_STATE_STORAGE_READ_WRITE:
+        /* Phase 23: read-modify-write storage (e.g. LOD history):
+         * compute-stage ordered with both read and write access
+         * (the D3D12 UAV-barrier equivalent). */
+        *out_stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        *out_access = (VkAccessFlags)(
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
         return 1;
     case LC_RESOURCE_STATE_INDIRECT_READ:
         *out_stage = VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
@@ -575,27 +585,61 @@ lc_result lc_vulkan_encoder_transition_image(    VkCommandBuffer cmd, lc_image *
         return LC_ERROR_INVALID_ARGUMENT;
     }
     aspect = lc_vk_aspect_for(image->format);
-    for (layer = base_layer; layer < base_layer + layer_count;
-         layer++) {
-        for (mip = base_mip; mip < base_mip + level_count; mip++) {
-            lc_resource_state old =
-                image->states[lc_vk_state_index(image, mip, layer)];
-            VkImageLayout old_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-            VkPipelineStageFlags src_stage = 0;
-            VkAccessFlags src_access = 0;
+    /* Snapshot old states under the state shard (P1 audit fix): the
+     * previous code read image->states[] unlocked, racing transfer
+     * completion marks and worker reconcile snapshots, so the emitted
+     * oldLayout could disagree with the marked new state. */
+    {
+        uint64_t count =
+            (uint64_t)level_count * (uint64_t)layer_count;
+        lc_resource_state *olds = NULL;
 
-            if (!lc_vk_state_map(old, &old_layout, &src_stage,
-                                 &src_access)) {
-                return LC_ERROR_INVALID_ARGUMENT;
-            }
-            if (old_layout == new_layout) {
-                continue;
-            }
-            lc_vk_sync_record(cmd, image->vk_image, aspect, mip, 1,
-                              layer, 1, src_stage, src_access,
-                              dst_stage, dst_access, old_layout,
-                              new_layout);
+        if (count == 0 || count > 65536u) {
+            return LC_ERROR_INVALID_ARGUMENT;
         }
+        olds = (lc_resource_state *)malloc(sizeof(*olds) *
+                                           (size_t)count);
+        if (olds == NULL) {
+            return LC_ERROR_OUT_OF_MEMORY;
+        }
+        lc_device_lock_state(image->device);
+        for (layer = base_layer; layer < base_layer + layer_count;
+             layer++) {
+            for (mip = base_mip; mip < base_mip + level_count; mip++) {
+                olds[(uint64_t)(layer - base_layer) *
+                         (uint64_t)level_count +
+                     (uint64_t)(mip - base_mip)] =
+                    image->states[lc_vk_state_index(image, mip,
+                                                    layer)];
+            }
+        }
+        lc_device_unlock_state(image->device);
+        for (layer = base_layer; layer < base_layer + layer_count;
+             layer++) {
+            for (mip = base_mip; mip < base_mip + level_count; mip++) {
+                lc_resource_state old =
+                    olds[(uint64_t)(layer - base_layer) *
+                             (uint64_t)level_count +
+                         (uint64_t)(mip - base_mip)];
+                VkImageLayout old_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+                VkPipelineStageFlags src_stage = 0;
+                VkAccessFlags src_access = 0;
+
+                if (!lc_vk_state_map(old, &old_layout, &src_stage,
+                                     &src_access)) {
+                    free(olds);
+                    return LC_ERROR_INVALID_ARGUMENT;
+                }
+                if (old_layout == new_layout) {
+                    continue;
+                }
+                lc_vk_sync_record(cmd, image->vk_image, aspect, mip,
+                                  1, layer, 1, src_stage, src_access,
+                                  dst_stage, dst_access, old_layout,
+                                  new_layout);
+            }
+        }
+        free(olds);
     }
     lc_vk_sync_mark(image, base_mip, level_count, base_layer,
                     layer_count, new_state);

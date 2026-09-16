@@ -43,3 +43,5 @@ GPU LOD (per-instance level in the instance record), GPU
 material sorting (richer batch keys), meshlets (denser
 compaction output), and overlapping async compute (queue model
 already exposes the class; scheduler deferred).
+
+Phase 23: extended visibility (renderer/src/visibility.c) runs frustum -> Hi-Z occlusion -> GPU LOD -> per-LOD compaction -> indirect finalize per group; draws consume GPU-written counts; proofs in test_hiz/occlusion/lod_vulkan and examples/visibility_scene.

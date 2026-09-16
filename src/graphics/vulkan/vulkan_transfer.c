@@ -1085,7 +1085,8 @@ void lc_vk_retire_flush_all(lc_device *device) {
         device->transfers = NULL;
         device->staging_used = 0;
         device->stat_uploads_in_flight = 0;
-        lc_device_unlock_transfer(device);
+        /* Transfer shard already released above (shutdown path is
+         * idle and uncontended); the submit section follows. */
         lc_device_lock_submit(device);
         while (doomed != NULL) {
             tr = doomed;
@@ -2037,16 +2038,20 @@ lc_result lc_vk_transfer_upload_buffer(lc_device *device, lc_buffer *dst,
             res = lc_vk_transfer_cmd_begin(device, rel_cmd);
         }
         if (res == LC_SUCCESS) {
-            /* Release graphics ownership; prior graphics use
-             * drains by submit order, availability by src. */
+            /* Release graphics visibility; prior graphics use
+             * drains by submit order, availability by src. Buffers
+             * are CONCURRENT-shared whenever a dedicated transfer
+             * family exists (and same-family otherwise), so no
+             * queue ownership moves: families stay IGNORED and the
+             * release/acquire semaphores carry the ordering. */
             lc_vk_xfer_buffer_barrier(
                 rel_cmd, dst, dst_offset, size,
                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                 VK_ACCESS_MEMORY_READ_BIT |
                     VK_ACCESS_MEMORY_WRITE_BIT,
                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                device->graphics_queue_family,
-                device->transfer_queue_family);
+                VK_QUEUE_FAMILY_IGNORED,
+                VK_QUEUE_FAMILY_IGNORED);
             res = (vkEndCommandBuffer(rel_cmd) == VK_SUCCESS)
                       ? LC_SUCCESS
                       : LC_ERROR_UNKNOWN;
@@ -2821,6 +2826,9 @@ static lc_result lc_vk_xfer_record_acquire(lc_device *device,
     if (tr->buffer == NULL) {
         return LC_ERROR_INVALID_ARGUMENT;
     }
+    /* Same CONCURRENT-sharing rule as the release above: the
+     * acquire semaphore orders the copy, the barrier only needs
+     * execution + memory scope (families IGNORED). */
     lc_vk_xfer_buffer_barrier(cmd, tr->buffer, tr->buf_offset,
                               tr->buf_size,
                               VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -2828,7 +2836,8 @@ static lc_result lc_vk_xfer_record_acquire(lc_device *device,
                               VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                               VK_ACCESS_MEMORY_READ_BIT |
                                   VK_ACCESS_MEMORY_WRITE_BIT,
-                              xfer, gfx);
+                              VK_QUEUE_FAMILY_IGNORED,
+                              VK_QUEUE_FAMILY_IGNORED);
     return LC_SUCCESS;
 }
 

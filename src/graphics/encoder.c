@@ -1050,6 +1050,72 @@ lc_result lc_encoder_draw_indexed_indirect(lc_command_encoder *enc,
                                                    draw_count, stride);
 }
 
+static lc_result lc_encoder_draw_count_common(
+    lc_command_encoder *enc, lc_buffer *buffer, lc_buffer *count_buffer) {
+    lc_state *state = lc_get_internal_state();
+    lc_swapchain *swapchain;
+
+    if (enc == NULL || buffer == NULL || count_buffer == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (state == NULL || !state->initialized) {
+        return LC_ERROR_NOT_INITIALIZED;
+    }
+    if (enc->worker_mode) {
+        if (!lc_vk_worker_live(enc) || enc->worker_list == NULL) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        if (!lc_is_live_buffer(buffer) ||
+            !lc_is_live_buffer(count_buffer)) {
+            return LC_ERROR_INVALID_ARGUMENT;
+        }
+        return LC_SUCCESS;
+    }
+    swapchain = lc_enc_lookup(enc);
+    if (swapchain == NULL || !swapchain->frame_active) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!enc->in_pass || !lc_is_live_buffer(buffer) ||
+        !lc_is_live_buffer(count_buffer)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (buffer->device != swapchain->device ||
+        count_buffer->device != swapchain->device) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    return LC_SUCCESS;
+}
+
+lc_result lc_encoder_draw_indirect_count(
+    lc_command_encoder *enc, lc_buffer *buffer, uint64_t offset,
+    lc_buffer *count_buffer, uint64_t count_offset,
+    uint32_t max_draw_count, uint32_t stride) {
+    lc_result res =
+        lc_encoder_draw_count_common(enc, buffer, count_buffer);
+
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+    return lc_vulkan_encoder_draw_indirect_count(
+        enc, buffer, offset, count_buffer, count_offset,
+        max_draw_count, stride);
+}
+
+lc_result lc_encoder_draw_indexed_indirect_count(
+    lc_command_encoder *enc, lc_buffer *buffer, uint64_t offset,
+    lc_buffer *count_buffer, uint64_t count_offset,
+    uint32_t max_draw_count, uint32_t stride) {
+    lc_result res =
+        lc_encoder_draw_count_common(enc, buffer, count_buffer);
+
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+    return lc_vulkan_encoder_draw_indexed_indirect_count(
+        enc, buffer, offset, count_buffer, count_offset,
+        max_draw_count, stride);
+}
+
 lc_result lc_encoder_transition_buffer(lc_command_encoder *enc,
                                        lc_buffer *buffer,
                                        lc_resource_state new_state) {

@@ -1,16 +1,18 @@
 # Luma Renderer Architecture
 
-The renderer remains behaviorally unchanged in Phase 20. It may incrementally
-adopt worker command lists and async asset upload without becoming responsible
-for native queues, synchronization primitives, or resource retirement.
+Phase 24: the renderer is unchanged except for the stable temporal
+key (`lr_draw_item.instance_id` → per-slot LOD-hysteresis owner
+tags; see `OBJECT_IDENTITY_ARCHITECTURE.md` and the Phase 24
+addendum in `GPU_LOD_ARCHITECTURE.md`). Luma Engine (`le_*`)
+orchestrates this layer; the renderer stays usable without it.
 
 Luma Renderer (`lr_*`, Phase 13) is a small scene renderer on top of
 **public LumaC only**. It owns no GPU backend code, includes no
 LumaC internals, and LumaC never depends on it:
 
 ```
-Luma Engine                  (future, le_*)
-    |  scenes, entities, scripting, physics, audio, gameplay
+Luma Engine                  (le_*, Phase 24 — engine/ library)
+    |  scenes, entities, hierarchy, extraction (no GPU ownership)
     v
 Luma Renderer                (this layer, lr_*)
     |  cameras, meshes, materials, draw lists, culling
@@ -223,3 +225,5 @@ instanced pipeline. Shadows stay CPU, unlit items stay per-draw,
 CPU fallback is always available. Proofs live in
 `test_gpu_driven_vulkan` (oracle agreement, pixel equivalence,
 edge cases, multi-draw) and `examples/gpu_driven_scene`.
+
+Phase 23: renderer adds Hi-Z pyramid, occlusion culling, mesh LODs (LR_MESH_MAX_LODS), visibility settings/stats, and a minimal render graph; see HIZ/OCCLUSION_CULLING/GPU_LOD/RENDER_GRAPH_ARCHITECTURE.md.

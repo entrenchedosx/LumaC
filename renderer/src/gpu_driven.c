@@ -37,6 +37,10 @@ _Static_assert(sizeof(((lr_gpu_instance *)0)->model) == 64,
                "model must be a 4x4 float matrix");
 _Static_assert(sizeof(((lr_gpu_instance *)0)->bounds) == 16,
                "bounds must be center.xyz + radius");
+_Static_assert(sizeof(((lr_gpu_instance *)0)->stable_id) == 8,
+               "stable_id must be 64-bit");
+_Static_assert(offsetof(lr_gpu_instance, stable_id) == 88,
+               "stable_id must sit at offset 88 (std430 u64)");
 
 /* Cull push block: 6 planes + count = 100 bytes (<= 128 minimum). */
 typedef struct lr_cull_push {
@@ -284,7 +288,7 @@ void lr_gpu_destroy_shared(lr_renderer *renderer) {
 lr_result lr_renderer_instanced_pipeline_for(
     lr_renderer *renderer, const lc_render_target_desc *signature,
     lr_material_type material_type, lc_cull_mode cull_mode,
-    lc_pipeline **out_pipeline) {
+    lc_front_face front_face, lc_pipeline **out_pipeline) {
     uint32_t i;
 
     if (renderer == NULL || signature == NULL ||
@@ -293,6 +297,9 @@ lr_result lr_renderer_instanced_pipeline_for(
     }
     if (material_type != LR_MATERIAL_PBR_METALLIC_ROUGHNESS) {
         return LR_ERROR_INVALID_ARGUMENT;
+    }
+    if (cull_mode == LC_CULL_NONE) {
+        front_face = LC_FRONT_FACE_COUNTER_CLOCKWISE;
     }
     for (i = 0; i < renderer->instanced_pipeline_count; i++) {
         const lc_render_target_desc *cached =
@@ -303,6 +310,8 @@ lr_result lr_renderer_instanced_pipeline_for(
         if (renderer->instanced_pipelines[i].material_type ==
                 material_type &&
             renderer->instanced_pipelines[i].cull_mode == cull_mode &&
+            renderer->instanced_pipelines[i].front_face ==
+                front_face &&
             cached->color_attachment_count ==
                 signature->color_attachment_count &&
             cached->depth_stencil_format ==
@@ -373,7 +382,7 @@ lr_result lr_renderer_instanced_pipeline_for(
         pd.binding_layouts = slots;
         pd.binding_layout_count = 4;
         pd.cull_mode = cull_mode;
-        pd.front_face = LC_FRONT_FACE_COUNTER_CLOCKWISE;
+        pd.front_face = front_face;
         pd.depth_test_enable =
             (signature->depth_stencil_format == LC_FORMAT_UNDEFINED)
                 ? 0
@@ -393,6 +402,8 @@ lr_result lr_renderer_instanced_pipeline_for(
             .material_type = material_type;
         renderer->instanced_pipelines[renderer->instanced_pipeline_count]
             .cull_mode = cull_mode;
+        renderer->instanced_pipelines[renderer->instanced_pipeline_count]
+            .front_face = front_face;
         renderer->instanced_pipelines[renderer->instanced_pipeline_count]
             .pipeline = pipeline;
         renderer->instanced_pipeline_count++;
@@ -482,12 +493,14 @@ void lr_gpu_destroy_groups(lr_renderer *renderer) {
     renderer->group_capacity = 0;
 }
 
-/* Find or create the group for (mesh, material, shadow-flag).
- * Grows capacity (doubling) with full resource recreation
- * (retirement keeps in-flight frames safe, PART 48). */
+/* Find or create the group for (mesh, material, shadow-flag,
+ * winding parity). Mirrored items group apart so their draws can
+ * flip the raster front face (Stage 40 audit fix). Grows capacity
+ * (doubling) with full resource recreation (retirement keeps
+ * in-flight frames safe, PART 48). */
 static lr_gpu_group *lr_gpu_group_for(lr_renderer *renderer,
                                       lr_mesh *mesh, lr_material *material,
-                                      int receives_shadow,
+                                      int receives_shadow, int mirrored,
                                       uint32_t need) {
     uint32_t i;
 
@@ -495,7 +508,8 @@ static lr_gpu_group *lr_gpu_group_for(lr_renderer *renderer,
         lr_gpu_group *group = &renderer->groups[i];
 
         if (group->mesh == mesh && group->material == material &&
-            group->receives_shadow == receives_shadow) {
+            group->receives_shadow == receives_shadow &&
+            group->mirrored == mirrored) {
             if (group->count + need > group->capacity) {
                 uint32_t grown = (group->capacity == 0)
                                      ? 64u
@@ -584,6 +598,7 @@ static lr_gpu_group *lr_gpu_group_for(lr_renderer *renderer,
         group->mesh = mesh;
         group->material = material;
         group->receives_shadow = receives_shadow;
+        group->mirrored = mirrored;
         group->cpu = (lr_gpu_instance *)calloc(grown,
                                               sizeof(lr_gpu_instance));
         if (group->cpu == NULL) {
@@ -743,7 +758,8 @@ lr_result lr_gpu_prepare(lr_renderer *renderer,
             continue;
         }
         group = lr_gpu_group_for(renderer, item->mesh, item->material,
-                                 item->receives_shadow, 1);
+                                 item->receives_shadow,
+                                 item->mirrored, 1);
         if (group == NULL) {
             return LR_ERROR_RENDER;
         }
@@ -757,8 +773,7 @@ lr_result lr_gpu_prepare(lr_renderer *renderer,
         dst->bounds[3] = item->mesh->bounds.radius;
         dst->mesh_index = 0;
         dst->object_id = i;
-        dst->pad[0] = 0;
-        dst->pad[1] = 0;
+        dst->stable_id = item->instance_id;
         group->count++;
         renderer->gpu_stats.instances_submitted++;
     }
@@ -959,7 +974,10 @@ lr_result lr_gpu_record_draws(lr_renderer *renderer,
                                                   : LC_CULL_BACK;
         res = lr_renderer_instanced_pipeline_for(
             renderer, signature, LR_MATERIAL_PBR_METALLIC_ROUGHNESS,
-            want_cull, &pipeline);
+            want_cull,
+            group->mirrored ? LC_FRONT_FACE_CLOCKWISE
+                            : LC_FRONT_FACE_COUNTER_CLOCKWISE,
+            &pipeline);
         if (res != LR_SUCCESS) {
             fprintf(stderr, "[dbg] gpu draws: pipeline_for failed\n");
             return res;
@@ -1084,13 +1102,20 @@ lr_result lr_renderer_update_gpu_visibility_stats(lr_renderer *renderer) {
     }
     /* TEST-ONLY visibility download (stalls by design). Reads the
      * last prepared flight slot only (deterministic: other slots
-     * hold other frames' counters). */
+     * hold other frames' counters). Groups with count == 0 submitted
+     * nothing this frame: their counter buffers still hold a
+     * previous frame's value, so they contribute zero without a
+     * read (audit fix: parity-split groups made empty groups
+     * common; reading stale counters inflated visible). */
     for (i = 0; i < renderer->group_count; i++) {
         lr_gpu_group *group = &renderer->groups[i];
         lr_gpu_flight_res *fl = NULL;
         uint32_t words[2] = { 0, 0 };
         uint32_t got = 0;
 
+        if (group->count == 0) {
+            continue;
+        }
         if (renderer->gpu_last_flight >= group->flights_owned) {
             continue;
         }
@@ -1176,9 +1201,16 @@ void lr_renderer_get_gpu_driven_stats(
 }
 
 lr_result lr_renderer_prepare_gpu(lr_renderer *renderer,
-                                  lc_command_encoder *encoder) {
+                                   lc_command_encoder *encoder) {
     if (renderer == NULL || encoder == NULL) {
         return LR_ERROR_INVALID_ARGUMENT;
+    }
+    /* Extended visibility (Hi-Z + LOD) replaces the legacy
+     * grouping/culling when enabled; legacy stays byte-identical
+     * otherwise. */
+    if (renderer->render_mode == LR_RENDER_MODE_GPU_DRIVEN &&
+        renderer->vis_settings.enabled) {
+        return lr_vis_prepare(renderer, encoder);
     }
     return lr_gpu_prepare(renderer, encoder);
 }

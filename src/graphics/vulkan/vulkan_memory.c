@@ -391,10 +391,19 @@ static int lc_vk_mem_block_alloc(lc_vk_mem_block *block, uint64_t size,
         return 0;
     }
     {
-        uint64_t node_end = best->offset + best->size;
-        uint64_t alloc_end = best_start + size;
-        uint64_t prefix = best_start - best->offset;
-        uint64_t suffix = node_end - alloc_end;
+        lc_vk_live_node *rec = (lc_vk_live_node *)malloc(
+            sizeof(lc_vk_live_node));
+        uint64_t node_end;
+        uint64_t alloc_end;
+        uint64_t prefix;
+        uint64_t suffix;
+        if (rec == NULL) {
+            return 0; /* host OOM before any mutation: clean failure */
+        }
+        node_end = best->offset + best->size;
+        alloc_end = best_start + size;
+        prefix = best_start - best->offset;
+        suffix = node_end - alloc_end;
 
         if (prefix > 0 && suffix > 0) {
             /* Shrink in place to the prefix; new node for suffix. */
@@ -404,6 +413,7 @@ static int lc_vk_mem_block_alloc(lc_vk_mem_block *block, uint64_t size,
             tail = (lc_vk_free_node *)malloc(sizeof(lc_vk_free_node));
             if (tail == NULL) {
                 best->size = node_end - best->offset; /* restore */
+                free(rec);
                 return 0;
             }
             tail->offset = alloc_end;
@@ -424,16 +434,26 @@ static int lc_vk_mem_block_alloc(lc_vk_mem_block *block, uint64_t size,
             }
             free(best);
         }
+        block->used += size;
+        block->live_count++;
+        rec->offset = best_start;
+        rec->size = size;
+        rec->id = (uint64_t)(uintptr_t)rec;
+        rec->next = block->live_list;
+        block->live_list = rec;
     }
-    block->used += size;
-    block->live_count++;
     *out_offset = best_start;
 #ifndef NDEBUG
     {
         /* Overlap scan: loud abort on allocator corruption. */
         lc_vk_live_node *it;
+        int seen_self = 0;
 
         for (it = block->live_list; it != NULL; it = it->next) {
+            if (it->offset == best_start && it->size == size && !seen_self) {
+                seen_self = 1; /* the record just committed above */
+                continue;
+            }
             if (!(best_start + size <= it->offset ||
                   it->offset + it->size <= best_start)) {
                 fprintf(stderr,
@@ -445,18 +465,6 @@ static int lc_vk_mem_block_alloc(lc_vk_mem_block *block, uint64_t size,
         }
     }
 #endif
-    {
-        lc_vk_live_node *rec = (lc_vk_live_node *)malloc(
-            sizeof(lc_vk_live_node));
-
-        if (rec != NULL) {
-            rec->offset = best_start;
-            rec->size = size;
-            rec->id = (uint64_t)(uintptr_t)rec;
-            rec->next = block->live_list;
-            block->live_list = rec;
-        }
-    }
     return 1;
 }
 
@@ -682,7 +690,18 @@ static lc_result lc_vk_mem_alloc_locked(
         }
         pool->blocks = fresh;
         if (!lc_vk_mem_block_alloc(fresh, aligned, align, &off)) {
-            /* Cannot happen (fresh block fits by construction). */
+            /* Practically unreachable (fresh block fits by construction),
+             * but host-OOM inside block_alloc must not leak the linked
+             * fresh block: unlink and destroy before reporting OOM. */
+            if (fresh->prev != NULL) {
+                fresh->prev->next = fresh->next;
+            } else {
+                pool->blocks = fresh->next;
+            }
+            if (fresh->next != NULL) {
+                fresh->next->prev = fresh->prev;
+            }
+            lc_vk_mem_block_destroy(device, fresh);
             return LC_ERROR_OUT_OF_MEMORY;
         }
         out->memory = fresh->memory;

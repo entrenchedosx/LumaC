@@ -85,3 +85,5 @@ Canonical proofs (all pixel-exact, all validation-clean):
   outside passes and indirect draws strictly require
   INDIRECT_READ. Descriptor updates accept untracked and
   transfer-ordered buffers, rejecting wrong-slot reuse.
+
+Phase 23: STORAGE_READ_WRITE added for compute read-modify-write buffers (LOD history); Hi-Z pyramid uses per-mip SHADER_READ_WRITE -> SHADER_READ subresource transitions; indirect/count buffers transition to INDIRECT_READ before count draws.

@@ -37,6 +37,27 @@
 
 #include <lumac/lumac.h>
 
+/* Symbol visibility (mirrors LC_API; the renderer is currently built
+ * STATIC so LR_API expands empty, but the macro keeps a future shared
+ * build from silently dropping exports — pre-Phase-24 audit fix). */
+#if defined(_WIN32) || defined(_WIN64)
+    #if defined(LUMA_RENDERER_BUILD_SHARED)
+        #if defined(LUMA_RENDERER_EXPORTS)
+            #define LR_API __declspec(dllexport)
+        #else
+            #define LR_API __declspec(dllimport)
+        #endif
+    #else
+        #define LR_API
+    #endif
+#else
+    #if defined(__GNUC__) && __GNUC__ >= 4
+        #define LR_API __attribute__((visibility("default")))
+    #else
+        #define LR_API
+    #endif
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -123,6 +144,29 @@ uint32_t lr_mesh_get_index_count(const lr_mesh *mesh);
 
 /** Mesh local bounds (zeros for NULL; out may be NULL for a no-op). */
 void lr_mesh_get_bounds(const lr_mesh *mesh, lr_bounds *out_bounds);
+
+/* Maximum LOD levels per mesh (level 0 is always the base mesh). */
+#define LR_MESH_MAX_LODS 4u
+
+/**
+ * Append a simplified LOD level to a mesh (Phase 23). `indices`
+ * holds `index_count` 32-bit indices into the mesh's EXISTING
+ * vertex buffer (every index must be valid; index_count must be a
+ * nonzero multiple of 3). `min_pixels` is the projected
+ * bounding-sphere diameter (pixels) below which the renderer
+ * leaves the previous (finer) level for this one; thresholds must
+ * be strictly descending across levels and > 0. Simplified
+ * geometry must fit inside the base bounding sphere (shared
+ * bounds stay conservative). At most LR_MESH_MAX_LODS levels
+ * total (base + 3 simplified).
+ */
+lr_result lr_mesh_add_lod(lr_mesh *mesh,
+                          const uint32_t *indices,
+                          uint32_t index_count,
+                          float min_pixels);
+
+/** LOD level count (1 = base only; 0 for NULL). */
+uint32_t lr_mesh_get_lod_count(const lr_mesh *mesh);
 
 /** Primitive helpers (valid positions/normals/tangents/UVs/indices). */
 lr_result lr_mesh_create_cube(lr_renderer *renderer, float size,
@@ -333,13 +377,24 @@ void lr_quat_multiply(const float a[4], const float b[4],
  * explicit opt-in (nonzero participates; zeroed items neither cast
  * nor receive — C zero-init must stay inert, matching the
  * double_sided opt-in precedent; Luma Assets enables both for
- * imported opaque models). */
+ * imported opaque models).
+ *
+ * instance_id is an optional stable temporal identity (Phase 24):
+ * a caller-owned 64-bit key (e.g. an engine generational handle
+ * packed with a lifetime-unique salt) that survives submission
+ * reorder and storage reuse. The GPU LOD hysteresis history is
+ * keyed by it, never by queue position or GPU slot. 0 means "no
+ * stable identity": LOD runs without hysteresis for that item
+ * (deterministic, always safe). IDs must be unique among live
+ * submissions sharing one renderer; reuse of an ID for a different
+ * logical object reattaches that object's history. */
 typedef struct lr_draw_item {
     lr_mesh *mesh;
     lr_material *material;
     lr_transform transform;
     int casts_shadow;
     int receives_shadow;
+    uint64_t instance_id;
 } lr_draw_item;
 
 /* Opaque per-frame queue statistics. Light counts and per-kind
@@ -381,14 +436,16 @@ typedef enum lr_render_mode {
 
 /* One GPU instance (Phase 21, PART U): explicit 96-byte layout
  * shared with the culling and instanced shaders (std430: mat4 +
- * vec4 + 4x uint; no host pointers). mesh_index is reserved for
- * future multi-mesh groups (0 today: one mesh per group). */
+ * vec4 + 2x uint + u64; no host pointers). mesh_index is reserved for
+ * future multi-mesh groups (0 today: one mesh per group). stable_id
+ * carries lr_draw_item.instance_id (offset 88, 8-aligned); the
+ * extended-visibility cull shader keys LOD hysteresis by it. */
 typedef struct lr_gpu_instance {
     float model[16];
     float bounds[4]; /* local center.xyz, radius */
     uint32_t mesh_index;
     uint32_t object_id;
-    uint32_t pad[2];
+    uint64_t stable_id;
 } lr_gpu_instance;
 
 /* GPU-driven frame diagnostics (Phase 21, PART 35). Counters are
@@ -448,6 +505,75 @@ void lr_renderer_get_gpu_driven_stats(
  */
 lr_result lr_renderer_update_gpu_visibility_stats(
     lr_renderer *renderer);
+
+/* ------------------------------------------------------------------
+ * Extended visibility: Hi-Z occlusion + GPU LOD (Phase 23).
+ *
+ * Opt-in enhancement of GPU-driven mode. When enabled, prepare runs
+ * frustum culling, previous-frame Hi-Z occlusion culling, GPU LOD
+ * selection with hysteresis, per-LOD compaction, and GPU-counted
+ * indirect draws. LOD thresholds ride on the meshes
+ * (lr_mesh_add_lod); occlusion needs no per-object data.
+ * Production frames never read visibility/counts back to the CPU.
+ * ------------------------------------------------------------------ */
+
+/* Extended visibility configuration. */
+typedef struct lr_visibility_settings {
+    int enabled;               /* master switch (default 0: legacy) */
+    int hiz_enabled;           /* Hi-Z occlusion culling */
+    float occlusion_depth_bias;/* NDC depth units, >= 0 (default 0) */
+    int lod_enabled;           /* GPU LOD selection + per-LOD draws */
+    float lod_hysteresis_margin;/* e.g. 0.15 (default 0.15) */
+    int indirect_count_enabled;/* native GPU count when supported */
+    int graph_enabled;         /* schedule passes via render graph */
+} lr_visibility_settings;
+
+/** Fill defaults (all off except margins; call, then tweak). */
+void lr_visibility_settings_default(lr_visibility_settings *out_settings);
+
+/**
+ * Apply visibility settings (copied; NULL renderer or settings is
+ * INVALID_ARGUMENT). Bias must be finite and >= 0; hysteresis in
+ * [0, 1]. Takes effect on the next frame.
+ */
+lr_result lr_renderer_set_visibility(
+    lr_renderer *renderer,
+    const lr_visibility_settings *settings);
+
+/** Copy out active visibility settings (zeros for NULL). */
+void lr_renderer_get_visibility_settings(
+    const lr_renderer *renderer,
+    lr_visibility_settings *out_settings);
+
+/* Extended visibility frame diagnostics. Counters are per-frame
+ * except where noted. lod_visible/tris fill only via
+ * lr_renderer_update_visibility_stats (a documented, test-only GPU
+ * download stall); production frames never stall. */
+typedef struct lr_visibility_stats {
+    uint64_t total_instances;
+    uint64_t frustum_rejected;
+    uint64_t occlusion_rejected;
+    uint64_t visible;
+    uint64_t lod_visible[4];
+    uint64_t indirect_commands;
+    uint64_t indirect_draw_calls;
+    uint64_t triangles_submitted;
+    uint64_t compute_dispatches;
+    double cpu_prepare_ms;
+} lr_visibility_stats;
+
+/**
+ * TEST-ONLY: download per-group visibility counters and fill the
+ * stats above. Stalls the GPU by design; never call in production
+ * frames.
+ */
+lr_result lr_renderer_update_visibility_stats(
+    lr_renderer *renderer);
+
+/** Copy out visibility diagnostics (zeros for NULL renderer/out). */
+void lr_renderer_get_visibility_stats(
+    const lr_renderer *renderer,
+    lr_visibility_stats *out_stats);
 
 /* ------------------------------------------------------------------
  * Lights (Phase 15: submitted per-frame data, NOT scene entities).
@@ -905,6 +1031,19 @@ lr_result lr_renderer_render_output(lr_renderer *renderer,
  *  lifetime follows the HDR target (re-query after resizes). */
 lc_image_view *lr_renderer_get_hdr_view(lr_renderer *renderer);
 
+/**
+ * Borrow one Hi-Z pyramid mip view for debug visualization (NULL
+ * when visibility is disabled or the pyramid is not built yet).
+ * Read-only diagnostics: sample or read back through public
+ * LumaC only. Lifetime follows the pyramid (re-query after
+ * resizes or visibility toggles).
+ */
+lc_image_view *lr_renderer_get_hiz_view(lr_renderer *renderer,
+                                        uint32_t mip);
+
+/** Live Hi-Z mip count (0 when the pyramid is not built yet). */
+uint32_t lr_renderer_get_hiz_mip_count(const lr_renderer *renderer);
+
 /** Borrow the shared BRDF integration LUT view (NULL until first
  *  environment preprocessing builds it). Read-only diagnostics;
  *  read pixels through lc_image_view_get_image + lc_image_readback
@@ -931,6 +1070,165 @@ typedef struct lr_environment_info {
  *  out may be NULL for a no-op). */
 void lr_renderer_get_environment_info(const lr_renderer *renderer,
                                       lr_environment_info *out_info);
+
+/* ------------------------------------------------------------------
+ * Minimal render graph (Phase 23, renderer-owned scheduling).
+ *
+ * A small explicit dependency layer over public LumaC: passes
+ * declare the resources they read/write with semantic uses, the
+ * compiler derives ordering edges (write->read, write->write,
+ * read->write by declaration order), topologically sorts, rejects
+ * cycles and read-before-write transients, analyzes transient
+ * lifetimes, and executes callbacks in derived order. Passes record
+ * their own LumaC transitions inside the callbacks (public API
+ * only); the graph owns scheduling, transients, and diagnostics.
+ * No Vulkan types cross this API. Aggressive transient aliasing is
+ * intentionally deferred (lifetimes are reported for the future).
+ * ------------------------------------------------------------------ */
+
+typedef struct lr_render_graph lr_render_graph;
+typedef struct lr_graph_pass lr_graph_pass;
+typedef struct lr_graph_resource lr_graph_resource;
+
+typedef enum lr_graph_pass_type {
+    LR_GRAPH_PASS_GRAPHICS = 0,
+    LR_GRAPH_PASS_COMPUTE = 1,
+    LR_GRAPH_PASS_TRANSFER = 2
+} lr_graph_pass_type;
+
+/* Semantic resource use (maps to LumaC states inside callbacks;
+ * never a Vulkan stage). */
+typedef enum lr_graph_use {
+    LR_GRAPH_USE_SAMPLED_READ = 0,
+    LR_GRAPH_USE_STORAGE_READ = 1,
+    LR_GRAPH_USE_STORAGE_WRITE = 2,
+    LR_GRAPH_USE_COLOR_ATTACHMENT = 3,
+    LR_GRAPH_USE_DEPTH_ATTACHMENT = 4,
+    LR_GRAPH_USE_INDIRECT_READ = 5,
+    LR_GRAPH_USE_TRANSFER_READ = 6,
+    LR_GRAPH_USE_TRANSFER_WRITE = 7
+} lr_graph_use;
+
+/* Pass recording callback (public LumaC only inside). */
+typedef lr_result (*lr_graph_record_fn)(lr_renderer *renderer,
+                                        lc_command_encoder *encoder,
+                                        void *user);
+
+/** Create an empty graph on a renderer (NULL-safe args). */
+lr_result lr_render_graph_create(lr_renderer *renderer,
+                                 lr_render_graph **out_graph);
+
+/** Destroy a graph and its transient resources (NULL-safe). */
+void lr_render_graph_destroy(lr_render_graph *graph);
+
+/**
+ * Import an externally owned image/buffer under a name (borrowed;
+ * must outlive the graph execution using it). Names need not be
+ * unique but diagnostics read better when they are.
+ */
+lr_graph_resource *lr_graph_import_image(lr_render_graph *graph,
+                                         const char *name,
+                                         lc_image *image);
+lr_graph_resource *lr_graph_import_buffer(lr_render_graph *graph,
+                                          const char *name,
+                                          lc_buffer *buffer);
+
+/**
+ * Declare a graph-owned transient image/buffer (descriptors are
+ * copied). Allocated on compile, reused across frames while the
+ * descriptor stays compatible; replaced through safe retirement
+ * when it changes.
+ */
+lr_graph_resource *lr_graph_transient_image(
+    lr_render_graph *graph,
+    const char *name,
+    const lc_image_desc *desc);
+lr_graph_resource *lr_graph_transient_buffer(
+    lr_render_graph *graph,
+    const char *name,
+    const lc_buffer_desc *desc);
+
+/** Borrow a transient's live handle after compile (NULL before). */
+lc_image *lr_graph_resource_get_image(lr_graph_resource *resource);
+lc_buffer *lr_graph_resource_get_buffer(lr_graph_resource *resource);
+
+/** Add a pass (returns NULL on bad args/capacity). */
+lr_graph_pass *lr_graph_add_pass(lr_render_graph *graph,
+                                 const char *name,
+                                 lr_graph_pass_type type,
+                                 lr_graph_record_fn record,
+                                 void *user);
+
+/** Declare a read/write (INVALID_ARGUMENT on bad/NULL handles). */
+lr_result lr_graph_pass_read(lr_graph_pass *pass,
+                             lr_graph_resource *resource,
+                             lr_graph_use use);
+lr_result lr_graph_pass_write(lr_graph_pass *pass,
+                              lr_graph_resource *resource,
+                              lr_graph_use use);
+
+/** Explicit ordering edge (for semantic sequencing without a
+ * resource edge). Cycles still fail at compile. */
+lr_result lr_graph_add_dependency(lr_graph_pass *before,
+                                  lr_graph_pass *after);
+
+/**
+ * Compile: validate, derive dependencies, sort, analyze transient
+ * lifetimes, (re)allocate transients. Idempotent for an unchanged
+ * topology (recompile is cheap; resources are reused, not
+ * rebuilt). Returns INVALID_ARGUMENT with no execution on cycle,
+ * read-before-write, missing imports, or bad descriptors.
+ */
+lr_result lr_render_graph_compile(lr_render_graph *graph);
+
+/**
+ * Execute compiled passes in derived order on an open frame
+ * encoder (outside any open pass for compute/transfer passes;
+ * graphics passes record into their own begin/end inside the
+ * callback). Compiles implicitly when topology changed.
+ */
+lr_result lr_render_graph_execute(lr_render_graph *graph,
+                                  lc_command_encoder *encoder);
+
+/* Compiled-graph diagnostics (backend-neutral, MCP-ready). */
+typedef struct lr_graph_stats {
+    uint32_t pass_count;
+    uint32_t graphics_passes;
+    uint32_t compute_passes;
+    uint32_t transfer_passes;
+    uint32_t resource_count;
+    uint32_t transient_resources;
+    uint32_t dependency_edges;
+    uint32_t derived_barriers; /* write->read edges needing a
+                                * producer/consumer transition */
+    uint64_t peak_transient_bytes; /* lifetime-aware upper bound
+                                    * (no aliasing yet) */
+} lr_graph_stats;
+
+/** Copy out diagnostics (zeros when NULL/uncompiled). */
+void lr_render_graph_get_stats(const lr_render_graph *graph,
+                               lr_graph_stats *out_stats);
+
+/**
+ * Human-readable topology dump (passes, resources, edges,
+ * lifetimes). Writes at most cap bytes, always NUL-terminates,
+ * and returns the full length that WOULD have been written (0 for
+ * NULL graph). Call with buf NULL / cap 0 to query the size.
+ */
+size_t lr_render_graph_dump(const lr_render_graph *graph,
+                            char *buf, size_t cap);
+
+/** Last compile/execute error text ("" when none; NULL-safe). */
+const char *lr_render_graph_error(const lr_render_graph *graph);
+
+/**
+ * Borrow the renderer's visibility schedule (NULL when the
+ * extended path is disabled or never built). Read-only
+ * diagnostics (dump/stats); lifetime follows the renderer, never
+ * destroy. Useful for debugging and future editor/MCP tooling.
+ */
+lr_render_graph *lr_renderer_borrow_visibility_graph(
+    lr_renderer *renderer);
 
 #ifdef __cplusplus
 }

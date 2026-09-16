@@ -105,9 +105,12 @@ World-space interpolants (position, normal, tangent+handedness,
 uv); no reconstruction in fragment. Normals/tangents use the
 CPU-side **normal matrix** (inverse-transpose 3x3, pushed per
 draw) — never the raw model matrix — so rotation + non-uniform
-scale shade correctly (mirrors fold sign into cofactors;
-negative-scale winding stays a documented limitation shared with
-the cull state). TBN = `[T, w*(N x T), N]`; backfaces flip the
+scale shade correctly (mirrors fold sign into cofactors).
+Negative-determinant (mirrored) transforms additionally flip the
+raster front face per item / per parity group (CW variant, same
+cache rules), so backface culling stays enabled and mirrored tops
+render lit (pre-Phase-24 audit fix, proven by
+`test_mirror_vulkan`). TBN = `[T, w*(N x T), N]`; backfaces flip the
 shading normal when culling is disabled.
 
 ## Color spaces

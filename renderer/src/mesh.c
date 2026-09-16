@@ -146,6 +146,9 @@ lr_result lr_mesh_create(lr_renderer *renderer,
     mesh->renderer = renderer;
     mesh->vertex_count = desc->vertex_count;
     mesh->index_count = desc->index_count;
+    mesh->lod_count = 1; /* base level only until add_lod */
+    mesh->lod_min_px[0] = 0.0f;
+    mesh->lod_index_counts[0] = desc->index_count;
     if (lr_mesh_compute_bounds(desc, &mesh->bounds) != LR_SUCCESS) {
         free(mesh);
         *out_mesh = NULL;
@@ -195,12 +198,18 @@ lr_result lr_mesh_create(lr_renderer *renderer,
 }
 
 void lr_mesh_destroy(lr_mesh *mesh) {
+    uint32_t i;
+
     if (mesh == NULL) {
         return;
     }
     lr_mesh_list_remove(mesh);
     /* Buffers die with plain LumaC destroys (NULL-safe); the device
      * must still be alive (dependents-first contract). */
+    for (i = 1; i < mesh->lod_count && i < LR_MESH_MAX_LODS; i++) {
+        lc_buffer_destroy(mesh->lod_index_buffers[i]);
+        mesh->lod_index_buffers[i] = NULL;
+    }
     lc_buffer_destroy(mesh->index_buffer);
     lc_buffer_destroy(mesh->vertex_buffer);
     free(mesh);
@@ -218,6 +227,64 @@ uint32_t lr_mesh_get_index_count(const lr_mesh *mesh) {
         return 0;
     }
     return mesh->index_count;
+}
+
+lr_result lr_mesh_add_lod(lr_mesh *mesh, const uint32_t *indices,
+                          uint32_t index_count, float min_pixels) {
+    lc_buffer_desc bdesc;
+    lc_buffer *buffer = NULL;
+    uint32_t i;
+
+    if (mesh == NULL || indices == NULL) {
+        return LR_ERROR_INVALID_ARGUMENT;
+    }
+    if (index_count == 0 || (index_count % 3u) != 0u) {
+        return LR_ERROR_INVALID_ARGUMENT;
+    }
+    if (!(min_pixels > 0.0f)) {
+        return LR_ERROR_INVALID_ARGUMENT;
+    }
+    if (mesh->lod_count >= LR_MESH_MAX_LODS) {
+        return LR_ERROR_INVALID_ARGUMENT;
+    }
+    /* Thresholds strictly descend: each level takes over at a
+     * smaller projected size than the previous one. */
+    if (mesh->lod_count > 1 &&
+        min_pixels >= mesh->lod_min_px[mesh->lod_count - 1]) {
+        return LR_ERROR_INVALID_ARGUMENT;
+    }
+    /* Every LOD index must reference a base vertex (shared vertex
+     * buffer; simplified topology only). */
+    for (i = 0; i < index_count; i++) {
+        if (indices[i] >= mesh->vertex_count) {
+            return LR_ERROR_INVALID_ARGUMENT;
+        }
+    }
+    memset(&bdesc, 0, sizeof(bdesc));
+    bdesc.size = (uint64_t)index_count * sizeof(uint32_t);
+    bdesc.usage = LC_BUFFER_USAGE_INDEX;
+    bdesc.memory = LC_MEMORY_GPU_ONLY;
+    if (lc_buffer_create(mesh->renderer->device, &bdesc, &buffer) !=
+        LC_SUCCESS) {
+        return LR_ERROR_RENDER;
+    }
+    if (lc_buffer_write(buffer, 0, indices, bdesc.size) !=
+        LC_SUCCESS) {
+        lc_buffer_destroy(buffer);
+        return LR_ERROR_RENDER;
+    }
+    mesh->lod_index_buffers[mesh->lod_count] = buffer;
+    mesh->lod_index_counts[mesh->lod_count] = index_count;
+    mesh->lod_min_px[mesh->lod_count] = min_pixels;
+    mesh->lod_count++;
+    return LR_SUCCESS;
+}
+
+uint32_t lr_mesh_get_lod_count(const lr_mesh *mesh) {
+    if (mesh == NULL) {
+        return 0;
+    }
+    return mesh->lod_count;
 }
 
 void lr_mesh_get_bounds(const lr_mesh *mesh, lr_bounds *out_bounds) {

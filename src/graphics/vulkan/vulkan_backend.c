@@ -504,10 +504,12 @@ static lc_result lc_vk_create_logical(lc_device *device,
     create_info.enabledExtensionCount = extension_count;
     create_info.ppEnabledExtensionNames = device_extensions;
     create_info.pEnabledFeatures = &enabled_features;
-    /* drawIndirectCount (Phase 21 capability reporting + future
-     * count path): enable when the 1.2 feature exists, chained
-     * with the timeline struct when both are present. Never
-     * enabled blindly. */
+    /* drawIndirectCount (Phase 21 capability reporting, Phase 23
+     * native count path): enable through the 1.2 feature struct
+     * when the loader offers it. The timeline feature folds into
+     * the SAME struct on 1.2 (the KHR struct must not co-exist
+     * with it in one pNext chain); pre-1.2 keeps the KHR struct
+     * alone. Never enabled blindly. */
     {
         PFN_vkGetPhysicalDeviceFeatures2 pfn12 =
             (PFN_vkGetPhysicalDeviceFeatures2)vkGetInstanceProcAddr(
@@ -515,7 +517,8 @@ static lc_result lc_vk_create_logical(lc_device *device,
 
         memset(&device->vulkan12_enabled, 0,
                sizeof(device->vulkan12_enabled));
-        if (pfn12 != NULL) {
+        if (pfn12 != NULL &&
+            props.apiVersion >= VK_API_VERSION_1_2) {
             VkPhysicalDeviceVulkan12Features query;
             VkPhysicalDeviceFeatures2 features2;
 
@@ -527,22 +530,31 @@ static lc_result lc_vk_create_logical(lc_device *device,
                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
             features2.pNext = &query;
             pfn12(physical, &features2);
+            device->vulkan12_enabled.sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
             if (query.drawIndirectCount != VK_FALSE) {
-                device->vulkan12_enabled.sType =
-                    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
                 device->vulkan12_enabled.drawIndirectCount = VK_TRUE;
+            }
+            if (want_timeline_khr &&
+                query.timelineSemaphore != VK_FALSE) {
+                device->vulkan12_enabled.timelineSemaphore = VK_TRUE;
+            } else if (want_timeline_khr) {
+                want_timeline_khr = 0;
             }
         }
     }
-    if (device->vulkan12_enabled.drawIndirectCount != VK_FALSE) {
+    if (device->vulkan12_enabled.drawIndirectCount != VK_FALSE ||
+        device->vulkan12_enabled.timelineSemaphore != VK_FALSE) {
         device->vulkan12_enabled.pNext = (void *)create_info.pNext;
         create_info.pNext = &device->vulkan12_enabled;
     }
-    if (want_timeline_khr) {
+    if (want_timeline_khr &&
+        device->vulkan12_enabled.timelineSemaphore == VK_FALSE) {
         memset(&timeline_features, 0, sizeof(timeline_features));
         timeline_features.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES_KHR;
         timeline_features.timelineSemaphore = VK_TRUE;
+        timeline_features.pNext = (void *)create_info.pNext;
         create_info.pNext = &timeline_features;
     }
 
@@ -733,22 +745,12 @@ static lc_result lc_vk_create_logical(lc_device *device,
         device->indirect_draw_supported = device->compute_supported;
         device->multi_draw_indirect =
             (feats.multiDrawIndirect != 0) ? 1 : 0;
-        device->indirect_count_supported = 0;
-        if (pfn_features2 != NULL) {
-            VkPhysicalDeviceVulkan12Features feats12;
-            VkPhysicalDeviceFeatures2 feats2;
-
-            memset(&feats12, 0, sizeof(feats12));
-            feats12.sType =
-                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-            memset(&feats2, 0, sizeof(feats2));
-            feats2.sType =
-                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-            feats2.pNext = &feats12;
-            pfn_features2(physical, &feats2);
-            device->indirect_count_supported =
-                (feats12.drawIndirectCount != 0) ? 1 : 0;
-        }
+        /* Honest reporting: usable means ENABLED on this device,
+         * not merely offered by the hardware (the enable record
+         * above is the source of truth; pre-1.2 keeps fallback). */
+        device->indirect_count_supported =
+            (device->vulkan12_enabled.drawIndirectCount != 0) ? 1
+                                                              : 0;
         device->max_workgroup_size[0] =
             props.limits.maxComputeWorkGroupSize[0];
         device->max_workgroup_size[1] =

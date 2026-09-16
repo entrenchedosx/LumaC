@@ -183,8 +183,21 @@ lr_result lr_mesh_sphere_data(lr_vertex *out_vertices, uint32_t *out_indices,
     if (out_vertices == NULL || out_indices == NULL) {
         return LR_ERROR_INVALID_ARGUMENT;
     }
-    if (!(radius > 0.0f) || segments < 3 || rings < 2) {
+    if (!(radius > 0.0f) || segments < 3 || rings < 2 ||
+        segments > 4096u || rings > 4096u) {
         return LR_ERROR_INVALID_ARGUMENT;
+    }
+    {
+        /* Checked geometry: (segments+1)*(rings+1) vertices and
+         * segments*rings*6 indices must fit uint32 (Stage 78/90). */
+        uint64_t cols64 = (uint64_t)segments + 1u;
+        uint64_t rows64 = (uint64_t)rings + 1u;
+
+        if (cols64 * rows64 > (uint64_t)UINT32_MAX ||
+            (uint64_t)segments * (uint64_t)rings * 6u >
+                (uint64_t)UINT32_MAX) {
+            return LR_ERROR_INVALID_ARGUMENT;
+        }
     }
     cols = segments + 1u;
     for (j = 0; j <= rings; j++) {
@@ -262,6 +275,29 @@ lr_result lr_mesh_create_sphere(lr_renderer *renderer, float radius,
         }
         return LR_ERROR_INVALID_ARGUMENT;
     }
+    /* Validate BEFORE any allocation: checked arithmetic rejects
+     * overflow-shaped (segments, rings) that would otherwise wrap
+     * (segments+1)*(rings+1) into a tiny malloc followed by a heap
+     * overflow in lr_mesh_sphere_data (P0 audit fix). */
+    if (!(radius > 0.0f) || segments < 3 || rings < 2 ||
+        segments > 4096u || rings > 4096u) {
+        *out_mesh = NULL;
+        return LR_ERROR_INVALID_ARGUMENT;
+    }
+    {
+        uint64_t cols64 = (uint64_t)segments + 1u;
+        uint64_t rows64 = (uint64_t)rings + 1u;
+        uint64_t vcount64 = cols64 * rows64;
+        uint64_t icount64 = (uint64_t)segments * (uint64_t)rings * 6u;
+
+        if (vcount64 > (uint64_t)UINT32_MAX ||
+            icount64 > (uint64_t)UINT32_MAX ||
+            vcount64 > SIZE_MAX / sizeof(lr_vertex) ||
+            icount64 > SIZE_MAX / sizeof(uint32_t)) {
+            *out_mesh = NULL;
+            return LR_ERROR_INVALID_ARGUMENT;
+        }
+    }
     verts = (lr_vertex *)malloc(sizeof(lr_vertex) * (segments + 1u) *
                                (rings + 1u));
     indices = (uint32_t *)malloc(sizeof(uint32_t) * segments * rings * 6u);
@@ -278,13 +314,6 @@ lr_result lr_mesh_create_sphere(lr_renderer *renderer, float radius,
         free(indices);
         *out_mesh = NULL;
         return res;
-    }
-    /* Guard against overflow-shaped requests the data call accepted. */
-    if (segments > 4096u || rings > 4096u) {
-        free(verts);
-        free(indices);
-        *out_mesh = NULL;
-        return LR_ERROR_INVALID_ARGUMENT;
     }
     memset(&desc, 0, sizeof(desc));
     desc.vertices = verts;

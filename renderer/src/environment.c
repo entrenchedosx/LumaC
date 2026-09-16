@@ -988,9 +988,13 @@ lr_result lr_renderer_ensure_hdr(lr_renderer *renderer, uint32_t width,
     }
     idesc.format = LC_FORMAT_D32_FLOAT;
     /* Capture-capable: depth readback (picking/debugging/SSAO
-     * validation) needs TRANSFER_SRC; harmless for depth output. */
+     * validation) needs TRANSFER_SRC; harmless for depth output.
+     * SAMPLED feeds the Phase-23 Hi-Z seed copy (the pass cache
+     * then finalizes depth SHADER_READ instead of attachment-only;
+     * sampling happens strictly after the pass). */
     idesc.usage = (uint32_t)LC_IMAGE_USAGE_DEPTH_STENCIL |
-                  (uint32_t)LC_IMAGE_USAGE_TRANSFER_SRC;
+                  (uint32_t)LC_IMAGE_USAGE_TRANSFER_SRC |
+                  (uint32_t)LC_IMAGE_USAGE_SAMPLED;
     if (lc_image_create(renderer->device, &idesc,
                         &renderer->hdr_depth_image) != LC_SUCCESS) {
         return LR_ERROR_RENDER;

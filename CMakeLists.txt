@@ -167,6 +167,8 @@ file(COPY
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/test_double.comp.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/test_append.comp.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/test_storage.comp.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/count_test.vert.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/count_test.frag.spv"
     DESTINATION "${LC_SPV_DIR}")
 find_program(LC_GLSLC glslc HINTS "$ENV{VULKAN_SDK}/Bin")
 if(LC_GLSLC)
@@ -179,6 +181,8 @@ if(LC_GLSLC)
             "${LC_SPV_DIR}/test_double.comp.spv"
             "${LC_SPV_DIR}/test_append.comp.spv"
             "${LC_SPV_DIR}/test_storage.comp.spv"
+            "${LC_SPV_DIR}/count_test.vert.spv"
+            "${LC_SPV_DIR}/count_test.frag.spv"
             "${LC_SPV_DIR}/vb_triangle.vert.spv"
             "${LC_SPV_DIR}/tex_quad.vert.spv"
             "${LC_SPV_DIR}/tex_quad.frag.spv"
@@ -236,6 +240,12 @@ if(LC_GLSLC)
         COMMAND "${LC_GLSLC}" -fshader-stage=compute -O
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/test_storage.comp"
             -o "${LC_SPV_DIR}/test_storage.comp.spv"
+        COMMAND "${LC_GLSLC}" -fshader-stage=vert
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/count_test.vert"
+            -o "${LC_SPV_DIR}/count_test.vert.spv"
+        COMMAND "${LC_GLSLC}" -fshader-stage=frag
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/count_test.frag"
+            -o "${LC_SPV_DIR}/count_test.frag.spv"
         DEPENDS
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/triangle/shaders/triangle.vert"
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/triangle/shaders/triangle.frag"
@@ -244,6 +254,8 @@ if(LC_GLSLC)
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/test_double.comp"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/test_append.comp"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/test_storage.comp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/count_test.vert"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/count_test.frag"
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/vertex_triangle/shaders/vb_triangle.vert"
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/textured_quad/shaders/tex_quad.vert"
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/textured_quad/shaders/tex_quad.frag"
@@ -262,6 +274,8 @@ if(LC_GLSLC)
         "${LC_SPV_DIR}/test_double.comp.spv"
         "${LC_SPV_DIR}/test_append.comp.spv"
         "${LC_SPV_DIR}/test_storage.comp.spv"
+        "${LC_SPV_DIR}/count_test.vert.spv"
+        "${LC_SPV_DIR}/count_test.frag.spv"
         "${LC_SPV_DIR}/vb_triangle.vert.spv"
         "${LC_SPV_DIR}/tex_quad.vert.spv"
         "${LC_SPV_DIR}/tex_quad.frag.spv"
@@ -292,11 +306,23 @@ if(LUMAC_BUILD_EXAMPLES)
         add_subdirectory(examples/shadow_scene)
         add_subdirectory(examples/ibl_scene)
         add_subdirectory(examples/gpu_driven_scene)
+        add_subdirectory(examples/visibility_scene)
+        if(LUMA_BUILD_ENGINE)
+            add_subdirectory(examples/engine_scene)
+            add_subdirectory(examples/scene_roundtrip)
+            add_subdirectory(examples/lua_scene)
+        endif()
     endif()
     if(LUMA_BUILD_ASSETS)
         add_subdirectory(examples/model_viewer)
         add_subdirectory(examples/pbr_scene)
     endif()
+endif()
+
+# Luma Engine (separate library on public Luma Renderer + LumaC).
+option(LUMA_BUILD_ENGINE "Build the Luma Engine library (le_*)" ON)
+if(LUMA_BUILD_ENGINE AND NOT LUMA_BUILD_RENDERER)
+    message(FATAL_ERROR "LUMA_BUILD_ENGINE requires LUMA_BUILD_RENDERER")
 endif()
 
 # Luma Renderer (separate library on public LumaC only).
@@ -307,6 +333,11 @@ endif()
 # Luma Assets (separate library on public Luma Renderer + LumaC).
 if(LUMA_BUILD_ASSETS)
     add_subdirectory(assets)
+endif()
+
+# Luma Engine (generational scene objects on public Luma Renderer).
+if(LUMA_BUILD_ENGINE)
+    add_subdirectory(engine)
 endif()
 
 # Tests
@@ -511,6 +542,18 @@ if(LUMAC_BUILD_TESTS)
     endif()
     add_test(NAME test_phase21_compute_vulkan COMMAND test_phase21_compute_vulkan)
 
+    # Phase 23: GPU-written indirect draw counts (native where
+    # supported, zero-instance fallback otherwise) with pixel proof.
+    add_executable(test_indirect_count_vulkan tests/test_indirect_count_vulkan.c)
+    target_link_libraries(test_indirect_count_vulkan PRIVATE lumac Vulkan::Vulkan)
+    target_include_directories(test_indirect_count_vulkan PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(test_indirect_count_vulkan PRIVATE LC_TRIANGLE_SPV_DIR="${LC_SPV_DIR}")
+    if(TARGET lumac_triangle_shaders)
+        add_dependencies(test_indirect_count_vulkan lumac_triangle_shaders)
+    endif()
+    add_test(NAME test_indirect_count_vulkan COMMAND test_indirect_count_vulkan)
+
     # Phase 20: four native threads, independent command pools, 50k
     # real draws, batch execution, three frames-in-flight, pixel proof.
     add_executable(test_phase20_recording_vulkan tests/test_phase20_recording_vulkan.c)
@@ -544,6 +587,12 @@ if(LUMAC_BUILD_TESTS)
     add_executable(test_clock tests/test_clock.c)
     target_link_libraries(test_clock PRIVATE lumac)
     target_include_directories(test_clock PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(UNIX AND NOT APPLE)
+        # nanosleep is POSIX-gated under strict -std=c11 (same rule
+        # as the lumac POSIX feature level above).
+        target_compile_definitions(test_clock PRIVATE
+            _POSIX_C_SOURCE=200809L)
+    endif()
     add_test(NAME test_clock COMMAND test_clock)
 
     # Integration: real views, layouts, sets, updates, allocator stress,

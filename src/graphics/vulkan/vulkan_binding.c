@@ -455,7 +455,8 @@ static lc_result lc_vk_validate_buffer_write(
             }
             if (slot->type == LC_BINDING_STORAGE_BUFFER &&
                 st != LC_RESOURCE_STATE_STORAGE_READ &&
-                st != LC_RESOURCE_STATE_STORAGE_WRITE) {
+                st != LC_RESOURCE_STATE_STORAGE_WRITE &&
+                st != LC_RESOURCE_STATE_STORAGE_READ_WRITE) {
                 return LC_ERROR_INVALID_ARGUMENT;
             }
         }

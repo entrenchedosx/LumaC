@@ -1,9 +1,16 @@
 # LumaC Architecture
 
-Phase 20 adds worker encoder → immutable command list → ordered batch execution
-→ queue submission → monotonic completion value. Worker state is recording-local
-and reconciled in execution order. Transfer staging and physical destruction are
-completion-keyed instead of device-idle operations.
+Phase 26 adds the Lua gameplay scripting runtime (interpreted
+only) on top of Phase 25 assets/scenes/serialization (see
+`LUA_SCRIPTING.md`, `SCRIPT_RUNTIME.md`, `SCRIPT_BINDING_API.md`,
+`SCRIPT_AOT.md`, `SCRIPTING_ARCHITECTURE.md`). Phase 25 adds
+engine assets, scenes, and serialization on top of
+the Phase 24 engine (see `ENGINE_ASSET_ARCHITECTURE.md`,
+`SCENE_ARCHITECTURE.md`, `SERIALIZATION_ARCHITECTURE.md`,
+`PERSISTENT_IDENTITY_ARCHITECTURE.md`). Phase 24 added the Luma
+Engine (see `ENGINE_ARCHITECTURE.md` and companions; Lua is the
+permanent scripting choice, implemented in Phase 26 as an
+interpreted runtime with the AOT compiler deferred).
 
 LumaC is a backend-neutral graphics abstraction layer in C11. The
 public API (`include/lumac/lumac.h`) exposes only opaque handles,
@@ -270,3 +277,11 @@ sampled image to its UI, and displays it inside a viewport panel:
 `examples/render_to_texture` is the first primitive version of that
 workflow (fixed 512x512 scene target, sampled fullscreen). No
 high-level system is implemented here on purpose.
+
+Phase 23: Hi-Z occlusion, GPU LOD, indirect-count, and the renderer-owned render graph are implemented (see HIZ/OCCLUSION_CULLING/GPU_LOD/RENDER_GRAPH_ARCHITECTURE.md); meshlets/mesh shaders/bindless/virtual geometry remain deferred.
+
+Phase 24: Luma Engine foundation (`ENGINE_ARCHITECTURE.md` +
+identity/hierarchy/integration/scripting docs). The renderer gains
+only the stable temporal key (`lr_draw_item.instance_id` → LOD
+hysteresis owner tags, `GPU_LOD_ARCHITECTURE.md` addendum below);
+no renderer features are added.

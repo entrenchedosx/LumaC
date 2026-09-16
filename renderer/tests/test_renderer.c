@@ -14,6 +14,8 @@
 
 #include <luma_renderer/luma_renderer.h>
 
+#include "internal/renderer_internal.h"
+
 static int g_passed = 0;
 static int g_failed = 0;
 
@@ -382,6 +384,63 @@ int main(void) {
                            bounds.radius > 1.7f && bounds.radius < 1.74f,
                        "cube bounds exact-ish");
         }
+    }
+
+    /* Mirrored-transform winding parity (Stage 40 audit): negative
+     * determinant flips winding, so the renderer must flip the
+     * raster front face per item instead of disabling culling. */
+    {
+        lr_transform t;
+        float m[16];
+
+        lr_transform_identity(&t);
+        lr_transform_to_matrix(&t, m);
+        TEST_CHECK(lr_matrix_is_mirrored(m) == 0,
+                   "parity(identity) == 0");
+        t.scale[0] = -1.0f;
+        lr_transform_to_matrix(&t, m);
+        TEST_CHECK(lr_matrix_is_mirrored(m) == 1,
+                   "parity(neg-x) == 1");
+        t.scale[0] = 2.0f;
+        t.scale[1] = -3.0f;
+        t.scale[2] = -1.0f;
+        lr_transform_to_matrix(&t, m);
+        TEST_CHECK(lr_matrix_is_mirrored(m) == 0,
+                   "parity(double mirror) == 0");
+        t.scale[0] = -2.0f;
+        t.scale[1] = 3.0f;
+        t.scale[2] = 1.0f;
+        lr_transform_to_matrix(&t, m);
+        TEST_CHECK(lr_matrix_is_mirrored(m) == 1,
+                   "parity(non-uniform neg) == 1");
+        /* Rotation alone never mirrors (proper rotation det +1). */
+        lr_transform_identity(&t);
+        {
+            float axis_y[3] = { 0.0f, 1.0f, 0.0f };
+
+            lr_quat_from_axis_angle(axis_y, 1.5707963f,
+                                    t.rotation);
+        }
+        lr_transform_to_matrix(&t, m);
+        TEST_CHECK(lr_matrix_is_mirrored(m) == 0,
+                   "parity(90deg yaw) == 0");
+    }
+
+    /* Sphere overflow hardening (Stage 78/90 audit): huge segment
+     * counts fail cleanly instead of overflowing the malloc size. */
+    {
+        lr_vertex one_v[1];
+        uint32_t one_i[6];
+
+        TEST_CHECK(lr_mesh_sphere_data(one_v, one_i, 1.0f, 5000, 4) ==
+                       LR_ERROR_INVALID_ARGUMENT,
+                   "sphere data(segments>4096) -> INVALID");
+        TEST_CHECK(lr_mesh_sphere_data(one_v, one_i, 1.0f, 8, 9000) ==
+                       LR_ERROR_INVALID_ARGUMENT,
+                   "sphere data(rings>4096) -> INVALID");
+        TEST_CHECK(lr_mesh_create_sphere(NULL, 1.0f, 8, 4, NULL) ==
+                       LR_ERROR_INVALID_ARGUMENT,
+                   "sphere create(NULL) -> INVALID");
     }
 
     printf("\nTests passed: %d, failed: %d\n", g_passed, g_failed);

@@ -9,13 +9,16 @@
 #include "luma_renderer/luma_renderer.h"
 
 /* Pipeline cache: one pipeline per (target signature, material
- * type, cull mode). Bounded; stable once warm. */
+ * type, cull mode, front face). Mirrored instances use the CW
+ * variant; CULL_NONE normalizes to CCW (front face is irrelevant
+ * without culling). Bounded; stable once warm. */
 #define LR_PIPELINE_CACHE_MAX 16
 
 typedef struct lr_cached_pipeline {
     lc_render_target_desc signature; /* structural, extent ignored */
     lr_material_type material_type;
     lc_cull_mode cull_mode;
+    lc_front_face front_face;
     lc_pipeline *pipeline;
 } lr_cached_pipeline;
 
@@ -92,6 +95,8 @@ typedef struct lr_queued_item {
     int casts_shadow;
     int receives_shadow;
     int main_visible;
+    int mirrored; /* 1 when det(upper 3x3) < 0 (Stage 40 mirrored fix) */
+    uint64_t instance_id; /* stable temporal key from lr_draw_item (0 = none) */
 } lr_queued_item;
 
 /* One submitted light (public copy + shadow assignment). Slot is
@@ -196,6 +201,38 @@ struct lr_environment {
 #define LR_GPU_MAX_FLIGHTS 8
 #define LR_GPU_MAX_GROUPS 256
 
+/* Phase 23 extended visibility per-flight resources (up to 4 LOD
+ * segments share one visible buffer; history persists per group
+ * across frames for LOD hysteresis). */
+typedef struct lr_vis_flight {
+    lc_buffer *visible;      /* 4 x capacity uint instance slots */
+    lc_buffer *lod_counters; /* 4 x {count, capacity} */
+    lc_buffer *indirect;     /* 4 indexed indirect commands */
+    lc_buffer *count;        /* 4 x uint32 draw counts (0/1) */
+    lc_buffer *history;      /* capacity uints, 0xFFFFFFFF new */
+    lc_buffer *history_ids;  /* capacity u64 owner tags, ~0u new */
+    lc_buffer *stats;        /* {frustum_rejected, occl_rejected} */
+    lc_binding_set *cull_set;
+    lc_binding_set *finalize_set;
+    lc_binding_set *vert_set; /* instances + visible (VERTEX) */
+    int initialized;
+    int sets_ready;
+    int history_primed;
+} lr_vis_flight;
+
+typedef struct lr_vis_group {
+    lr_mesh *mesh;
+    lr_material *material;
+    int receives_shadow;
+    int mirrored; /* winding parity: mirrored items need CW front */
+    uint32_t capacity;
+    uint32_t count;
+    lr_gpu_instance *cpu;
+    lc_buffer *instances; /* shared across flights */
+    lr_vis_flight flights[LR_GPU_MAX_FLIGHTS];
+    uint32_t flights_owned;
+} lr_vis_group;
+
 typedef struct lr_gpu_flight_res {
     lc_buffer *visible;
     lc_buffer *counter;
@@ -210,6 +247,7 @@ typedef struct lr_gpu_group {
     lr_mesh *mesh;
     lr_material *material;
     int receives_shadow;
+    int mirrored; /* winding parity: mirrored items need CW front */
     uint32_t capacity;
     uint32_t count;
     lr_gpu_instance *cpu; /* malloc'd staging copy, capacity */
@@ -418,7 +456,110 @@ struct lr_renderer {
     lc_pipeline *post_tint_pipelines[2]; /* per slot signature */
     lc_binding_set *post_stage_sets[2];  /* per slot, rewritten */
     uint64_t post_pipeline_epochs[2];
+    /* Phase 23 extended visibility (Hi-Z occlusion + GPU LOD).
+     * Gated by vis_settings.enabled; the legacy Phase-21 path is
+     * byte-identical when disabled. Previous-frame matrices drive
+     * occlusion against the previous-frame pyramid (one frame of
+     * latency, documented in GPU_LOD.../OCCLUSION docs); bypass
+     * frames (teleport/resize/Hi-Z off) keep everything visible. */
+    lr_visibility_settings vis_settings;
+    float vis_view_proj[16];      /* current frame (latched begin) */
+    float vis_prev_view_proj[16]; /* previous frame */
+    float vis_cam_pos[3];
+    float vis_prev_cam_pos[3];
+    int vis_has_prev;      /* previous matrices valid */
+    int vis_bypass;        /* occlusion bypass this frame */
+    int vis_hiz_was_enabled; /* previous frame stored depth for Hi-Z */
+    uint32_t vis_width;    /* extent the Hi-Z tracks */
+    uint32_t vis_height;
+    struct lr_hiz *hiz;    /* dedicated pyramid (hiz.c owns) */
+    int vis_ready;         /* shared shaders/pipelines/layouts live */
+    lc_shader *vis_hiz_copy_shader;
+    lc_shader *vis_hiz_reduce_shader;
+    lc_shader *vis_cull_shader;
+    lc_shader *vis_finalize_shader;
+    lc_compute_pipeline *vis_hiz_copy_pipeline;
+    lc_compute_pipeline *vis_hiz_reduce_pipeline;
+    lc_compute_pipeline *vis_cull_pipeline;
+    lc_compute_pipeline *vis_finalize_pipeline;
+    lc_binding_layout *vis_hiz_copy_layout;
+    lc_binding_layout *vis_hiz_reduce_layout;
+    lc_binding_layout *vis_cull_layout;
+    lc_binding_layout *vis_finalize_layout;
+    lc_binding_layout *vis_vert_layout; /* instances + visible */
+    lc_binding_set *vis_hiz_copy_set;   /* depth + mip0 + sampler */
+    lc_binding_set **vis_hiz_reduce_sets; /* per mip: src + dst */
+    lc_sampler *vis_sampler;            /* nearest, clamp-to-edge */
+    lc_buffer *vis_params_buffer;       /* mapped params, CPU-written */
+    struct lr_render_graph *vis_graph;  /* visibility schedule */
+    int vis_graph_built;                /* topology compiled */
+    uint64_t vis_graph_topology;        /* rebuild key */
+    lr_vis_group *vis_groups;           /* extended groups */
+    uint32_t vis_group_count;
+    uint32_t vis_group_capacity;
+    uint32_t vis_prepared_frame;        /* v2 prepare stamp */
+    uint32_t vis_prepared_flight;       /* v2 prepare slot */
+    int vis_params_primed;              /* params buffer transitioned */
+    lr_visibility_stats vis_stats;      /* last update_* snapshot */
 };
+
+/* Phase 23 Hi-Z pyramid (renderer/src/hiz.c). Opaque handle owned
+ * by the renderer, sized to an output extent. */
+typedef struct lr_hiz lr_hiz;
+uint32_t lr_hiz_mip_count(uint32_t width, uint32_t height);
+lr_result lr_hiz_ensure(lr_renderer *renderer, uint32_t width,
+                        uint32_t height);
+void lr_hiz_destroy(lr_renderer *renderer);
+/* Drop per-mip reduce sets (views are going away; called before
+ * any Hi-Z rebuild and at shared teardown). */
+void lr_hiz_free_reduce_sets(lr_renderer *renderer);
+uint32_t lr_hiz_width(const lr_renderer *renderer);
+uint32_t lr_hiz_height(const lr_renderer *renderer);
+uint32_t lr_hiz_levels(const lr_renderer *renderer);
+/* Borrow the pyramid image / one per-mip view (NULL on bad args;
+ * lifetime follows the Hi-Z, never destroy). */
+lc_image *lr_hiz_image(const lr_renderer *renderer);
+lc_image_view *lr_hiz_view(const lr_renderer *renderer, uint32_t mip);
+/* Borrow the full-chain sampling view for occlusion reads. */
+lc_image_view *lr_hiz_sample_view(const lr_renderer *renderer);
+/* Record pyramid generation from the HDR depth view into the open
+ * frame encoder (outside any pass). Depth must be SHADER_READ. */
+lr_result lr_hiz_generate(lr_renderer *renderer,
+                          lc_command_encoder *encoder);
+/* Read one mip back to CPU floats (row-major w*h; TEST/debug
+ * only: stalls by design). */
+lr_result lr_hiz_read_mip(lr_renderer *renderer, uint32_t mip,
+                          float *out_pixels);
+/* Deterministic CPU MAX-pyramid reference (matches the GPU
+ * reduction bit-for-bit on exact inputs; float rounding on
+ * conversions is the only documented tolerance). */
+void lr_hiz_cpu_pyramid(const float *mip0, uint32_t width,
+                        uint32_t height, uint32_t mip, float *out);
+
+/* Phase 23 extended visibility (renderer/src/visibility.c). */
+lr_result lr_vis_ensure_shared(lr_renderer *renderer);
+void lr_vis_destroy_shared(lr_renderer *renderer);
+/* Latch per-frame matrices at begin (call from lr_renderer_begin
+ * after the camera is validated). */
+void lr_vis_on_begin(lr_renderer *renderer, const float view_proj[16],
+                     const float cam_pos[3]);
+/* Extended prepare + draws (used instead of the legacy GPU path
+ * when vis_settings.enabled). */
+lr_result lr_vis_prepare(lr_renderer *renderer,
+                         lc_command_encoder *encoder);
+lr_result lr_vis_record_draws(lr_renderer *renderer,
+                              lc_command_encoder *encoder,
+                              lc_render_target *target,
+                              const lc_render_target_desc *signature);
+/* Per-LOD index buffer for draws (level 0 = base buffer). */
+lc_buffer *lr_mesh_lod_buffer(const lr_mesh *mesh, uint32_t level);
+uint32_t lr_mesh_lod_index_count(const lr_mesh *mesh, uint32_t level);
+/* Projected bounding-sphere diameter in pixels (shared CPU/GPU
+ * formula documentation; the GPU mirrors it in vis_cull.comp). */
+float lr_vis_projected_diameter(const float view_proj[16],
+                                const float center[3], float radius,
+                                uint32_t view_w, uint32_t view_h,
+                                int *out_behind);
 
 struct lr_mesh {
     lr_renderer *renderer; /* owner (borrowed back-pointer) */
@@ -427,6 +568,17 @@ struct lr_mesh {
     uint32_t vertex_count;
     uint32_t index_count;
     lr_bounds bounds;
+    /* Phase 23 mesh LODs: level 0 is the base index buffer above.
+     * lod_index_buffers[i] (i >= 1) holds a simplified index list
+     * into the SAME vertex buffer; lod_min_px[i] is the projected
+     * diameter (pixels) below which the renderer leaves level i-1
+     * for level i (strictly descending, shared bounds stay
+     * conservative: simplified geometry must fit the base sphere).
+     * lod_count is 1 when no LOD was added. */
+    uint32_t lod_count;
+    float lod_min_px[LR_MESH_MAX_LODS];
+    lc_buffer *lod_index_buffers[LR_MESH_MAX_LODS];
+    uint32_t lod_index_counts[LR_MESH_MAX_LODS];
     lr_mesh *next;
     lr_mesh *prev;
 };
@@ -500,12 +652,14 @@ void lr_material_list_remove(lr_material *material);
 void lr_queue_sort(lr_queued_item *items, uint32_t count);
 
 /* Pipeline cache: get-or-create the pipeline for (signature,
- * material type, cull mode). Returns lr_result; *out_pipeline
+ * material type, cull mode, front face). CULL_NONE normalizes
+ * front face to CCW internally. Returns lr_result; *out_pipeline
  * borrows the cache entry. */
 lr_result lr_renderer_pipeline_for(lr_renderer *renderer,
                                    const lc_render_target_desc *signature,
                                    lr_material_type material_type,
                                    lc_cull_mode cull_mode,
+                                   lc_front_face front_face,
                                    lc_pipeline **out_pipeline);
 
 /* Depth-pipeline cache: get-or-create the depth-only pipeline for a
@@ -532,6 +686,10 @@ void lr_shadow_fit_directional(const float corners[8][3],
                                float out_view[16]);
 void lr_shadow_light_view(const float eye[3], const float target[3],
                           float out_view[16]);
+
+/* Winding parity of a column-major model matrix: 1 when the upper
+ * 3x3 determinant is negative (mirrored transform). */
+int lr_matrix_is_mirrored(const float m[16]);
 
 /* Normal matrix (inverse-transpose 3x3) from a column-major model
  * matrix for correct normals/tangents under non-uniform scale.
@@ -607,10 +765,10 @@ void lr_gpu_prune_dead_groups(lr_renderer *renderer);
 /* Destroy every group and its GPU resources. */
 void lr_gpu_destroy_groups(lr_renderer *renderer);
 /* Instanced-PBR pipeline variant (own mini-cache, same signature
- * rules plus the instance slot). */
+ * rules plus the instance slot and front-face parity). */
 lr_result lr_renderer_instanced_pipeline_for(
     lr_renderer *renderer, const lc_render_target_desc *signature,
     lr_material_type material_type, lc_cull_mode cull_mode,
-    lc_pipeline **out_pipeline);
+    lc_front_face front_face, lc_pipeline **out_pipeline);
 
 #endif /* LUMA_RENDERER_INTERNAL_H */

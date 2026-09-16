@@ -118,6 +118,42 @@ changes are permitted with a changelog entry.
   layers fail safely (explicit result codes, never crashes, never
   blind dereferences) and never allocate per-frame on hot paths.
 
+## Engine layering (Phase 24)
+
+- Luma Engine (`le_*`) depends only on the public Luma Renderer +
+  LumaC APIs (audited at configure time by `engine/CMakeLists.txt`).
+  Generational handles (`{index, generation, world_tag}`) are the
+  only gameplay identity — never pointers, indices, or queue/GPU
+  slots. Stale handles fail safely; cross-world use is rejected.
+- The engine owns scene storage; the application owns the engine
+  and keeps borrowed `lr_mesh`/`lr_material` alive. Descriptors are
+  zero-initializable; counts accompany arrays; sizes are
+  overflow-checked. The ABI is script-bound in Phase 26 (see
+  `SCRIPTING_ARCHITECTURE.md`, `SCRIPT_BINDING_API.md`).
+
+## Engine scripting (Phase 26)
+
+- One `lua_State` per engine, worlds isolated by `world_tag`; no
+  Lua spelling crosses the public C API (configure-time
+  VM-confinement audit; only `engine/src/script/` touches Lua).
+- Script-facing engine calls funnel through the VM-independent
+  `le_script_backend_ops` table so a future native backend can
+  implement the same operations without the VM.
+- Persistence carries script asset IDs + exported values (`script`
+  / `sprop` scene lines) — never VM state.
+
+## Engine assets & scenes (Phase 25)
+
+- Gameplay references assets by generational `le_asset` handles
+  (registry-owned backing, never renderer pointers); persistent
+  `le_asset_id` / `le_scene_object_id` values are the only things
+  stored on disk (Lua must never persist raw runtime indices).
+- Scenes are versioned canonical text (memory-first, file helpers
+  above); unknown fields tolerated, unknown components/versions
+  rejected; malformed input fails transactionally (world/scene
+  untouched). New `le_result` codes follow the same switch-safety
+  contract.
+
 ## Phase 18 additions
 
 - Readback (`lc_image_query_readback` / `lc_image_readback`,
@@ -191,3 +227,5 @@ before 1.0:
   retry-with-smaller-blocks policy (callers size explicitly);
   `drawIndirectCount` is reported but has no public draw call
   (arrives with the async-compute scheduler).
+
+Phase 23: indirect-count draws are public (lc_encoder_draw_indirect_count / indexed form); STORAGE_READ_WRITE covers compute read-modify-write history buffers.

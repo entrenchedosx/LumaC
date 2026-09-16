@@ -2069,7 +2069,12 @@ typedef enum lc_resource_state {
     LC_RESOURCE_STATE_UNIFORM_READ = 10,
     LC_RESOURCE_STATE_STORAGE_READ = 11,
     LC_RESOURCE_STATE_STORAGE_WRITE = 12,
-    LC_RESOURCE_STATE_INDIRECT_READ = 13
+    LC_RESOURCE_STATE_INDIRECT_READ = 13,
+    /* Phase 23: read-modify-write storage (compute-ordered read +
+     * write access; the D3D12 UAV-barrier equivalent). Buffers that
+     * one dispatch both reads and writes (e.g. GPU LOD history)
+     * live in this state across frames. */
+    LC_RESOURCE_STATE_STORAGE_READ_WRITE = 14
 } lc_resource_state;
 
 /* One subresource range: mip/layer subset (cubemap faces are array
@@ -2696,6 +2701,45 @@ LC_API lc_result lc_encoder_draw_indexed_indirect(
     lc_buffer *buffer,
     uint64_t offset,
     uint32_t draw_count,
+    uint32_t stride);
+
+/**
+ * Record a non-indexed indirect draw with a GPU-written draw count
+ * (Phase 23). `buffer` follows the fixed-count rules above;
+ * `count_buffer` must carry INDIRECT usage, hold at least
+ * count_offset + 4 bytes (count_offset must be a multiple of 4),
+ * and both buffers must already be INDIRECT_READ (barriers stay
+ * outside passes). `max_draw_count` bounds execution:
+ * at most max_draw_count commands starting at `offset` run, and
+ * the GPU count is clamped to it.
+ *
+ * Where lc_compute_capabilities.indirect_count is nonzero the
+ * backend consumes the GPU count natively; otherwise it draws all
+ * max_draw_count commands, so producers must leave unused slots
+ * with instance_count 0 (valid no-op draws). Either way no CPU
+ * readback of the count is required.
+ */
+LC_API lc_result lc_encoder_draw_indirect_count(
+    lc_command_encoder *encoder,
+    lc_buffer *buffer,
+    uint64_t offset,
+    lc_buffer *count_buffer,
+    uint64_t count_offset,
+    uint32_t max_draw_count,
+    uint32_t stride);
+
+/**
+ * Record an indexed indirect draw with a GPU-written draw count
+ * (same rules as the non-indexed count form, plus a bound index
+ * buffer).
+ */
+LC_API lc_result lc_encoder_draw_indexed_indirect_count(
+    lc_command_encoder *encoder,
+    lc_buffer *buffer,
+    uint64_t offset,
+    lc_buffer *count_buffer,
+    uint64_t count_offset,
+    uint32_t max_draw_count,
     uint32_t stride);
 
 /* -------------------------------------------------------------------------

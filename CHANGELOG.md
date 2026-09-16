@@ -1,5 +1,211 @@
 # Changelog
 
+## Phase 26
+
+- Added Lua gameplay scripting runtime (interpreted only; native
+  AOT compiler explicitly NOT implemented): Lua 5.4.8 vendored
+  unmodified in `third_party/lua/` (32 lib sources, `lua.c`/`luac.c`
+  excluded, own static `luma_lua`), one `lua_State` per `le_engine`
+  with worlds isolated by `world_tag` (no global engine state).
+- Added VM-independent `le_script_backend_ops` ABI
+  (`compile`/`release_chunk`/`instantiate`/`release_instance`/
+  `fire`/`get`/`set`/`list_props`) behind the rule
+  `Script semantics ─┤├→ Engine operations`: the VM never defines
+  gameplay semantics; a future native backend implements the same
+  8 ops. Arg-form `start(self)`/`update(self,dt)`/
+  `fixed_update(self,dt)`/`destroy(self)` is canonical for AOT.
+- Added lifecycle dispatch: snapshot iteration in slot order,
+  pending starts delayed until effectively enabled, `destroy` fires
+  iff `started`, fixed-step accumulator (`script_fixed_dt`,
+  `script_max_steps`, `script_accum`, spiral guard), nest cap 64,
+  teardown guards; structural mutation inside callbacks executes
+  immediately and safely (new objects start next frame).
+- Added `World`/`Object`/`Assets` Lua bindings over the Phase 25
+  public API only (create/destroy/find/is_alive/instantiate,
+  transforms, hierarchy, components, properties, script-aware scene
+  instantiate); identity userdata (object/asset/scene/instance)
+  with generation-checked equality; stale/cross-world use raises
+  catchable Lua errors.
+- Added `export(name, default)` properties
+  (bool/int/number/string/vec3/asset) with typed C get/set/list;
+  sandboxed `require("scripts.x")` modules (engine roots, `..`
+  escapes rejected); `print` routed to `le_script_log_fn`;
+  deterministic `LUA_MASKCOUNT` hook + allocator wrapper with
+  `memory_budget`; transactional reload preserving values/state
+  without re-running `start()`.
+- Added scene persistence for scripts: `script <hex>` +
+  `sprop <kind> <name> <value>` lines (asset refs by persistent
+  ID); never VM state. Per-object single script
+  (`LE_COMPONENT_SCRIPT`, `LE_ASSET_SCRIPT` appended, no
+  reordering).
+- Added `examples/lua_scene` (spinner/mover/orbiter + error demo
+  with embedded fallbacks) and
+  `docs/{LUA_SCRIPTING,SCRIPT_RUNTIME,SCRIPT_BINDING_API,
+  SCRIPT_AOT}.md` plus the `SCRIPTING_ARCHITECTURE.md` Phase 26
+  update.
+- Tests: `test_script` (75 headless checks: lifecycle, mover,
+  delayed-start, error policy, syntax PARSE, exports, spawn+
+  destroy, cross-world, serialization round-trip, reload,
+  fixed-step, budgets, sandbox, print, stats/refcount/unload,
+  teardown, determinism), `test_script_vulkan` (31 checks incl.
+  render-driven pixel proofs). Fixed: `_ENV`-fallback harvest
+  stack bug (`lua_pushvalue(L,-2)` copied the funcs table instead
+  of the function — callbacks silently never ran); Linux
+  `errno_t` portability fix (`script_asset.c`).
+- Explicitly NOT in Phase 26: Lua→C/AOT compiler, LLVM/JIT,
+  physics, editor, MCP.
+
+## Phase 25
+
+- Added engine assets (`le_asset` generational handles on an
+  engine-owned registry; mesh/material/texture/scene types;
+  FNV-1a/UUID persistent IDs; normalized source paths; READY-gated
+  submission; type-safe access; `ASSET_IN_USE` unload policy;
+  stats/inspection) and asset-backed renderables (handles resolve
+  to renderer backing per frame; unready races skip as dead, never
+  dangle). Worlds share assets; world death drops references only.
+- Added scenes (`le_scene` payloads distinct from worlds;
+  persistent 128-bit object IDs; world capture with ID
+  preservation; transactional instantiate with forward refs,
+  cycle/duplicate/missing-asset rejection and rollback; duplicate
+  instantiation with disjoint handles + temporal keys; instance
+  lookup records).
+- Added canonical versioned scene text format (memory-first +
+  file helpers; deterministic bytes; `%.9g` floats; strict
+  escaping; unknown fields tolerated, unknown components/versions
+  rejected; 64 MB/16M-object bounds; fuzz suite).
+- Added world-preserving reparent (`LE_REPARENT_KEEP_WORLD` via
+  TRS inverse + decomposition + commit-time verification) and
+  public `le_matrix_decompose` (shear/singular fail honestly).
+- Added glTF bridge (`le_gltf_import`: reuses `la_model_load`,
+  adopts meshes/materials via new `la_model_adopt_*` API,
+  canonical-path dedup returning identical handles).
+- Added `examples/scene_roundtrip` (capture→save→destroy→load→
+  duplicate instantiate→render; 1+1 shared assets) and
+  `docs/{ENGINE_ASSET,SCENE,SERIALIZATION,PERSISTENT_IDENTITY}_
+  ARCHITECTURE.md`.
+- Tests: `test_scene` (114 headless checks), `test_scene_vulkan`
+  (92 checks incl. pixel-exact round-trip, 5000-object scene,
+  two-world/two-instance isolation, glTF import).
+- Fixed: TRS matrix inverse scale distribution (rows, not columns)
+  found by the rotated-parent KEEP_WORLD test.
+
+## Phase 24
+
+- Added Luma Engine (`engine/`, `le_*` static library on public
+  Luma Renderer + LumaC only; configure-time backend-independence
+  audit): generational objects (`{index, generation, world_tag}`),
+  world ownership (geometric growth, free-list reuse, overflow/OOM
+  safety), names, enabled state (effective = self && ancestors),
+  lightweight components (transform universal; renderable/camera/
+  light dense + swap-remove, no exposed addresses), T*R*S
+  transforms with iterative dirty propagation, parent/child
+  hierarchy (cycle rejection, local-preserving reparent, destroy-
+  subtree, 10k-deep stack-safe), deterministic ascending-slot
+  iteration, extraction + submission (`render_scene`/`render_output`
+  /`render_end` trio + one-call offscreen helper), structured
+  stats/memory accounting, honest single-thread contract.
+- Added stable renderer temporal identity (closes the pre-Phase-24
+  P2 debt): `le_object_stable_id` packs `{salt, tag, index,
+  generation}` into `lr_draw_item.instance_id`; renderer LOD
+  hysteresis keys per-slot owner tags (slot reuse restarts UNKNOWN;
+  ID 0 = metric path). Reorder preserves history; destroy/reuse
+  retires it.
+- Added `examples/engine_scene` (CameraRig→Camera, Sun, SceneRoot
+  incl. mirrored object, MovingParent→ChildA/ChildB; GPU-driven,
+  public APIs only) and
+  `docs/{ENGINE,OBJECT_IDENTITY,TRANSFORM_HIERARCHY,
+  ENGINE_RENDERER_INTEGRATION,SCRIPTING}_ARCHITECTURE.md`.
+- Recorded the permanent Lua scripting decision (VM/AOT explicitly
+  NOT implemented; engine ABI kept script-friendly).
+- Tests: `test_engine` (292 CPU checks), `test_engine_stress`
+  (100k lifecycle + 5k churn + 20k world-destroy), expanded
+  `test_engine_vulkan` (109 checks: pixel proofs, parented
+  camera/renderable, lights, mirror parities, reorder + LOD-mix
+  agreement, destroy/reuse retirement, GPU + CPU paths, small +
+  5000-object accounting invariants, multi-world). Fixed
+  `test_lod_vulkan` forward declaration + keyed-hysteresis stable
+  ID (105/105).
+- Fixed: `le_object_is_alive` funnels through the single resolve
+  validator; render-camera derivation revalidates slots post-
+  resolve; `le_ensure_object_capacity` free-list fast path
+  simplified (no dead branches).
+
+## Pre-Phase-24 audit
+
+- Fixed mirrored (negative-determinant) transforms rendering
+  inside-out: per-item winding parity (`lr_matrix_is_mirrored`) now
+  selects a CW front-face pipeline variant and parity-groups GPU
+  batches, instead of relying on callers to mark materials
+  double-sided. New `renderer/tests/test_mirror_vulkan` proves
+  lit-pixel coverage for mirrored cubes on the CPU and GPU-driven
+  paths; the shadow test's "known debt" case now asserts lit tops.
+- Fixed legacy GPU visibility stats reading stale per-group
+  counters for frame-skipped groups (`count == 0` groups contribute
+  zero, matching the extended-visibility path).
+- Fixed allocator host-OOM accounting corruption (live record is
+  pre-allocated; free-list mutations roll back) and grow-path fresh
+  block leak on OOM.
+- Fixed render-graph transient reuse keying on the full descriptor
+  (usage/samples/type/flags), not just format/extent.
+- Fixed worker `execute` burning single-shot state on rejected
+  mixed compute/graphics batches; added swapchain-primary guard.
+- Fixed recorded image transitions racing transfer/worker state
+  marks (old states now snapshotted under the state shard).
+- Fixed `lr_mesh_create_sphere`/`lr_mesh_sphere_data` integer
+  overflow on huge segment/ring counts (fail cleanly pre-alloc).
+- Fixed shared (DLL) builds: white-box compute test symbols
+  exported (`LC_API` convention) and all renderer tests given the
+  DLL search path (was `STATUS_DLL_NOT_FOUND` for Phase 23 tests).
+- Fixed unlit "vertex attribute not consumed" validation noise:
+  unlit shader declares only locations 0+3 and its pipeline binds
+  only those two (PBR keeps four).
+- Added `LR_API` visibility macro (renderer builds static today;
+  the macro reserves a clean shared future).
+- Clarified `visibility_scene --instances N` semantics: N counts
+  generation candidates; frame 0 prints
+  candidates/submitted/street-skipped/submit-failed with the exact
+  accounting equation.
+- Added `tools/tsan-lavapipe.suppr` (Mesa lavapipe driver-internal
+  TSan noise suppressions; no LumaC frame implicated).
+- 100k accounting root cause: street-grid filtering intentionally
+  rejects ~half the candidates before submit (verified exact:
+  5000 = 2458 + 2542 street-skipped; submitted =
+  frustum + occlusion + visible every frame).
+
+## Phase 23
+
+- Added GPU Hi-Z depth pyramid (dedicated R32F mip chain, MAX
+  reduction, per-mip semantic transitions, CPU MAX reference,
+  `renderer/tests/test_hiz_vulkan` with 8x8/7x5/1xN/Nx1/1x1 plus
+  resize fixtures, all GPU mips bit-exact).
+- Added GPU Hi-Z occlusion culling (frustum -> occlusion -> LOD ->
+  compaction -> indirect generation, conservative-visible policy,
+  previous-frame depth with teleport/first-frame bypass,
+  `test_occlusion_vulkan` with wall/pixel/teleport/rotation/
+  moving-occluder proofs and Hi-Z ON/OFF pixel equivalence).
+- Added renderer mesh LODs (up to 4 levels, projected-diameter
+  metric, GPU selection with hysteresis + UNKNOWN first-frame
+  history, `test_lod_vulkan` against an independent CPU oracle,
+  measured triangle reduction, graph/manual equivalence).
+- Added backend-neutral indirect-count draws
+  (`lc_encoder_draw_indirect_count` /
+  `lc_encoder_draw_indexed_indirect_count`,
+  `lc_compute_capabilities.indirect_count`, zero-instance
+  fallback, `tests/test_indirect_count_vulkan` count 0/partial/
+  max pixel proofs).
+- Added minimal renderer-owned render graph (pass/resource/use
+  declarations, derived edges, topological sort, cycle and
+  read-before-write rejection, transient lifetimes + reuse,
+  diagnostics/dump/stats, visibility pipeline migrated,
+  `renderer/tests/test_render_graph`).
+- Added `examples/visibility_scene` (`--frames/--instances/
+  --no-hiz/--no-lod/--debug-hiz`, counters, screenshots,
+  `docs/images/visibility-scene.png`) and
+  `docs/{HIZ,OCCLUSION_CULLING,GPU_LOD,RENDER_GRAPH}_ARCHITECTURE.md`.
+- Fixed: transfer release/acquire barriers use IGNORED families
+  under CONCURRENT sharing (validation-clean cross-queue uploads).
+
 ## Phase 21
 
 - Added backend-neutral compute: `LC_SHADER_STAGE_COMPUTE`,

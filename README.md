@@ -1,9 +1,18 @@
 # LumaC
 
-Phase 20 adds independently recordable command lists, configurable frames in
-flight, queue diagnostics and completion values, bounded asynchronous transfer,
-async readback, and deferred native-resource retirement. See the Phase 20
-architecture documents in `docs/`.
+Phase 26 adds the Lua gameplay scripting runtime on top of the
+Phase 25 engine assets/scenes/serialization: Lua 5.4.8 vendored
+unmodified in `third_party/lua/`, one `lua_State` per engine with
+sandboxed stdlibs, `World`/`Object`/`Assets` engine bindings,
+`start`/`update`/`fixed_update`/`destroy` lifecycle dispatch,
+`export()`-declared properties, script components on objects,
+scene `script`/`sprop` persistence (never VM state), transactional
+reload, memory + instruction budgets, and an AOT-compatible script
+ABI (`Script semantics ─┤├→ Engine operations`; native compiler
+explicitly NOT implemented). See `docs/LUA_SCRIPTING.md`,
+`docs/SCRIPT_RUNTIME.md`, `docs/SCRIPT_BINDING_API.md`,
+`docs/SCRIPT_AOT.md`, `docs/SCRIPTING_ARCHITECTURE.md`, and
+`examples/lua_scene/`.
 
 Lightweight cross-platform graphics API written in C11, with native Windows/Linux windowing and a Vulkan backend.
 
@@ -416,6 +425,30 @@ Renderer — done (Phase 13): Luma Renderer with reusable meshes
 transforms, frustum-culled draw lists, statistics, offscreen and
 multi-viewport rendering.
 
+Engine — done (Phase 24): Luma Engine with generational objects,
+world ownership, names, enabled state, transform hierarchy (dirty
+propagation, cycle rejection, deep-hierarchy safe), renderable /
+camera / light components, extraction into the renderer with stable
+temporal identity, 100k-object CPU scale, and a script-friendly ABI
+for future Lua (see `docs/ENGINE_ARCHITECTURE.md` and
+`examples/engine_scene/`).
+
+Scene & assets — done (Phase 25): engine asset registry
+(mesh/material/texture/scene with persistent content IDs),
+asset-backed renderables, world-preserving reparent, canonical
+versioned scene format with transactional load, world↔scene capture
++ duplicate instantiation, glTF bridge (see
+`docs/ENGINE_ASSET_ARCHITECTURE.md` and
+`examples/scene_roundtrip/`).
+
+Scripting — done (Phase 26, interpreted only): Lua 5.4.8 runtime
+(one state per engine, sandboxed stdlibs), World/Object/Assets
+bindings, lifecycle dispatch with fixed-step accumulator,
+export() properties, script components, scene script/sprop
+persistence, reload, budgets, AOT-compatible ABI (no compiler,
+no JIT, no physics — see `docs/LUA_SCRIPTING.md` and
+`examples/lua_scene/`).
+
 Lighting — done (Phase 15/16): Cook-Torrance PBR (metallic workflow,
 normal mapping, emissive, occlusion), directional/point/spot lights,
 and PCF shadow mapping (fitted directional + cone spot, opt-in
@@ -438,9 +471,19 @@ budgets, device-lost recovery, D3D12, Wayland.
 LumaC/
 ├── .github/workflows/   # Windows + Linux CI
 ├── docs/                # ARCHITECTURE.md, API_DESIGN.md,
-│                        # RENDERER_ARCHITECTURE.md,
+│                        # RENDERER_ARCHITECTURE.md, ENGINE_ARCHITECTURE.md,
+│                        # OBJECT_IDENTITY/TRANSFORM_HIERARCHY/ENGINE_RENDERER_
+│                        # INTEGRATION/SCRIPTING_ARCHITECTURE.md,
+│                        # LUA_SCRIPTING/SCRIPT_RUNTIME/SCRIPT_BINDING_API/
+│                        # SCRIPT_AOT.md,
+│                        # ENGINE_ASSET/SCENE/SERIALIZATION/
+│                        # PERSISTENT_IDENTITY_ARCHITECTURE.md,
 │                        # ASSET_ARCHITECTURE.md, PBR_ARCHITECTURE.md,
 │                        # SHADOW_ARCHITECTURE.md, images/
+├── engine/              # luma_engine (le_*): generational objects,
+│                        # worlds, hierarchy, transforms, components,
+│                        # assets, scenes, serialization, Lua scripting
+│                        # + tests
 ├── renderer/            # luma_renderer (lr_*): renderer, mesh,
 │                        # material (unlit + PBR), lights, shadows,
 │                        # camera, draw list + shaders/tests
@@ -452,7 +495,8 @@ LumaC/
 │                        # texture_upload, textured_quad (+ shaders/),
 │                        # cube_3d (+ shaders/), render_to_texture (+ shaders/),
 │                        # renderer_scene, model_viewer, pbr_scene,
-│                        # shadow_scene
+│                        # shadow_scene, visibility_scene, engine_scene,
+│                        # scene_roundtrip, lua_scene
 ├── include/lumac/       # public lumac.h
 ├── src/                 # core, platform, graphics, vulkan backend
 ├── tests/               # headless unit tests + Vulkan integration tests

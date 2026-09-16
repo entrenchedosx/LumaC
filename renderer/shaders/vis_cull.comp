@@ -1,0 +1,277 @@
+/* Phase 23 visibility culling (one group per dispatch).
+ *
+ * Pipeline per instance: frustum test (current planes) ->
+ * Hi-Z occlusion test (previous-frame matrices against the
+ * previous-frame pyramid) -> GPU LOD selection (projected size
+ * with hysteresis from per-slot history) -> capacity-guarded
+ * atomic append into the selected LOD segment.
+ *
+ * Conservative-correctness contract: any uncertain projection
+ * (near-plane intersection, camera inside the bound, samples
+ * outside the viewport, depth outside [0,1]) keeps the instance
+ * VISIBLE. False visibility is acceptable; false occlusion is a
+ * bug. Occlusion is skipped entirely on bypass frames (camera
+ * teleport, resize, Hi-Z disabled) so stale depth can never hide
+ * geometry.
+ *
+ * LOD history is keyed by stable instance identity (Phase 24),
+ * never by dispatch slot: each slot's owner tag rides in
+ * HistoryIds, and a slot reused by a different stable ID restarts
+ * UNKNOWN instead of inheriting hysteresis. An ID of 0 means "no
+ * stable identity" and always takes the metric path.
+ *
+ * Bounds safety: every invocation exits early for
+ * id >= instanceCount, and all appends are capacity-guarded.
+ */
+#version 450
+
+layout(local_size_x = 64) in;
+
+struct GpuInstance {
+    mat4 model;
+    vec4 bounds;
+    uint meshIndex;
+    uint objectId;
+    /* Stable 64-bit temporal key as two words (uvec2 avoids the
+     * shaderInt64 device feature; layout still 96 bytes). */
+    uvec2 stableId;
+};
+
+layout(set = 0, binding = 0) readonly buffer Instances {
+    GpuInstance items[];
+} instances;
+
+/* Four LOD segments of capacity uints each (segment = lod * cap). */
+layout(set = 0, binding = 1) buffer Visible {
+    uint indices[];
+} visible;
+
+/* Four {count, capacity} pairs. */
+layout(set = 0, binding = 2) buffer LodCounters {
+    uvec2 counters[];
+} lodCounters;
+
+layout(set = 0, binding = 3) buffer History {
+    uint prevLod[];
+} history;
+
+/* Owner tag per history slot (stable-ID halves, all-ones when
+ * new). Written by the same invocation that writes prevLod, so no
+ * cross-invocation race exists for a slot. */
+layout(set = 0, binding = 8) buffer HistoryIds {
+    uvec2 ids[];
+} historyIds;
+
+layout(set = 0, binding = 4) readonly buffer Params {
+    mat4 viewProjCurr;
+    mat4 viewProjPrev;
+    vec4 planes[6];
+    vec4 camPosPrev;
+    uvec4 viewInfo;   /* viewportW, viewportH, hizW, hizH */
+    uvec4 hizInfo;    /* hizMips, lodCapacity, flags, unused */
+    vec4 misc;        /* occlusionBias, lodHysteresis, unused, unused */
+} params;
+
+layout(set = 0, binding = 5) uniform texture2D hizTex;
+layout(set = 0, binding = 6) uniform sampler hizSamp;
+layout(set = 0, binding = 7) buffer Stats {
+    uint frustumRejected;
+    uint occlusionRejected;
+} stats;
+
+layout(push_constant) uniform Push {
+    uint instanceCount;
+    uint lodCount;
+    float switchPx[4];
+    uint lodCapacity;
+} push;
+
+#define FLAG_HIZ_ENABLED 1u
+#define FLAG_BYPASS_OCCLUSION 2u
+#define FLAG_LOD_ENABLED 4u
+#define HISTORY_UNKNOWN 0xFFFFFFFFu
+
+bool sphereVisible(vec3 center, float radius) {
+    for (int i = 0; i < 6; i++) {
+        vec4 plane = params.planes[i];
+        if (dot(plane.xyz, center) + plane.w < -radius) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    GpuInstance item;
+    vec3 center;
+    float sx;
+    float sy;
+    float sz;
+    float radius;
+    vec4 clipC;
+    float wC;
+    float rPx;
+    float sizePx;
+    uint lod;
+    uint slot;
+    uint cap;
+
+    if (id >= push.instanceCount) {
+        return;
+    }
+    item = instances.items[id];
+    center = (item.model * vec4(item.bounds.xyz, 1.0)).xyz;
+    /* Maximum column magnitude: conservative under non-uniform
+     * and negative (mirrored) scales, matching cull.comp. */
+    sx = length(item.model[0].xyz);
+    sy = length(item.model[1].xyz);
+    sz = length(item.model[2].xyz);
+    radius = item.bounds.w * max(sx, max(sy, sz));
+
+    if (!sphereVisible(center, radius)) {
+        atomicAdd(stats.frustumRejected, 1u);
+        return;
+    }
+
+    /* Projected screen radius (pixels) from the current matrix:
+     * pixels-per-unit at the center depth times the world radius.
+     * A non-positive center w means the center is behind the
+     * camera while the sphere still touches the frustum: treat
+     * the size as huge (LOD0) and skip occlusion (uncertain). */
+    clipC = params.viewProjCurr * vec4(center, 1.0);
+    wC = clipC.w;
+    if (wC > 0.0001) {
+        float ppu = max(abs(params.viewProjCurr[0][0]) *
+                            float(params.viewInfo.x),
+                        abs(params.viewProjCurr[1][1]) *
+                            float(params.viewInfo.y)) /
+                    (2.0 * wC);
+        rPx = radius * ppu;
+    } else {
+        rPx = 1e9;
+    }
+    sizePx = 2.0 * rPx;
+
+    /* ---- Hi-Z occlusion (previous-frame screen space). ---- */
+    if ((params.hizInfo.z & FLAG_HIZ_ENABLED) != 0u &&
+        (params.hizInfo.z & FLAG_BYPASS_OCCLUSION) == 0u &&
+        wC > 0.0001) {
+        vec3 toCenter = center - params.camPosPrev.xyz;
+        float dist = length(toCenter);
+        if (dist > radius) {
+            vec3 pNear = center - (toCenter / dist) * radius;
+            vec4 clipP = params.viewProjPrev * vec4(pNear, 1.0);
+            if (clipP.w > 0.0001) {
+                vec3 ndc = clipP.xyz / clipP.w;
+                if (ndc.z >= -0.001 && ndc.z <= 1.001) {
+                    float cx = (ndc.x * 0.5 + 0.5) *
+                               float(params.viewInfo.z);
+                    float cy = (ndc.y * 0.5 + 0.5) *
+                               float(params.viewInfo.w);
+                    float extent =
+                        max(sizePx, 1.0);
+                    int maxMip =
+                        int(params.hizInfo.x) - 1;
+                    /* Tiny footprint -> coarse mip (conservative:
+                     * MAX over a larger region hides less), large
+                     * footprint -> fine mip (precise). */
+                    int mip = maxMip -
+                              int(floor(log2(extent)));
+                    float dNear = clamp(ndc.z, 0.0, 1.0);
+                    float bias = params.misc.x;
+                    vec2 corners[5];
+                    bool tested = false;
+                    bool occluded = true;
+                    int s;
+
+                    mip = clamp(mip, 0, maxMip);
+                    corners[0] = vec2(cx - rPx, cy - rPx);
+                    corners[1] = vec2(cx + rPx, cy - rPx);
+                    corners[2] = vec2(cx - rPx, cy + rPx);
+                    corners[3] = vec2(cx + rPx, cy + rPx);
+                    corners[4] = vec2(cx, cy);
+                    for (s = 0; s < 5; s++) {
+                        /* Samples outside the viewport do not
+                         * describe this object: ignore them. An
+                         * object with no assessable sample stays
+                         * visible. */
+                        if (corners[s].x < 0.0 ||
+                            corners[s].y < 0.0 ||
+                            corners[s].x >=
+                                float(params.viewInfo.z) ||
+                            corners[s].y >=
+                                float(params.viewInfo.w)) {
+                            continue;
+                        }
+                        tested = true;
+                        {
+                            ivec2 texel =
+                                ivec2(corners[s]) >> mip;
+                            float stored = texelFetch(
+                                sampler2D(hizTex, hizSamp), texel,
+                                mip).x;
+                            /* Standard-Z MAX pyramid: behind the
+                             * farthest recorded depth means behind
+                             * everything in the footprint. */
+                            if (dNear <= stored + bias) {
+                                occluded = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (tested && occluded) {
+                        atomicAdd(stats.occlusionRejected, 1u);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /* ---- GPU LOD selection (projected diameter, hysteresis). ---- */
+    lod = 0u;
+    if ((params.hizInfo.z & FLAG_LOD_ENABLED) != 0u &&
+        push.lodCount > 1u) {
+        uint cand = 0u;
+        uint h;
+        uvec2 want;
+        uvec2 have;
+        while (cand + 1u < push.lodCount &&
+               sizePx < push.switchPx[cand + 1u]) {
+            cand++;
+        }
+        /* Stable-identity gate: history applies only when this
+         * slot's recorded owner is this instance. Reordered or
+         * reused slots (and ID 0, "no identity") restart UNKNOWN,
+         * which is exactly the metric decision. */
+        want = item.stableId;
+        have = historyIds.ids[id];
+        if ((want.x == 0u && want.y == 0u) || have != want) {
+            lod = cand;
+            historyIds.ids[id] = want;
+        } else {
+            h = history.prevLod[id];
+            if (h == HISTORY_UNKNOWN || h >= push.lodCount) {
+                /* Deterministic first frame: metric decides. */
+                lod = cand;
+            } else if (cand > h) {
+                /* Coarser immediately (saves work sooner). */
+                lod = cand;
+            } else if (cand < h) {
+                /* Finer only past the margin (stability wins). */
+                float up = push.switchPx[h] * (1.0 + params.misc.y);
+                lod = (sizePx > up) ? cand : h;
+            } else {
+                lod = h;
+            }
+        }
+        history.prevLod[id] = lod;
+    }
+
+    cap = push.lodCapacity;
+    slot = atomicAdd(lodCounters.counters[lod].x, 1u);
+    if (slot < cap) {
+        visible.indices[lod * cap + slot] = id;
+    }
+}

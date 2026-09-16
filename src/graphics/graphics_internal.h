@@ -91,7 +91,9 @@ typedef struct lc_vk_pass_key {
     VkAttachmentLoadOp depth_load;
     VkAttachmentStoreOp depth_store;
     int present; /* 1: color[0] ends PRESENT_SRC (swapchain) */
-    int depth_sampled; /* 1: depth ends SHADER_READ (sampled usage) */
+    int depth_sampled; /* 1: depth ends SHADER_READ (SAMPLED usage
+                         * AND STORE op; DONT_CARE stays
+                         * attachment-optimal like plain depth) */
 } lc_vk_pass_key;
 
 typedef struct lc_vk_cached_pass {
@@ -1600,11 +1602,14 @@ lc_result lc_worker_record_transition(
     lc_command_encoder *enc, lc_image *image, uint32_t base_mip,
     uint32_t level_count, uint32_t base_layer, uint32_t layer_count,
     lc_resource_state new_state);
-/* Compute recording into worker lists (vulkan_worker.c). */
-lc_result lc_worker_record_bind_compute_pipeline(
+/* Compute recording into worker lists (vulkan_worker.c). LC_API so
+ * the white-box compute test links against shared builds too (same
+ * convention as lc_vulkan_copy_buffer below; never public API). */
+LC_API lc_result lc_worker_record_bind_compute_pipeline(
     lc_command_encoder *enc, const lc_compute_pipeline *pipeline);
-lc_result lc_worker_record_dispatch(lc_command_encoder *enc, uint32_t x,
-                                    uint32_t y, uint32_t z);
+LC_API lc_result lc_worker_record_dispatch(lc_command_encoder *enc,
+                                           uint32_t x, uint32_t y,
+                                           uint32_t z);
 lc_result lc_worker_record_draw_indirect(lc_command_encoder *enc,
                                          const lc_buffer *buffer,
                                          uint64_t offset,
@@ -1613,11 +1618,19 @@ lc_result lc_worker_record_draw_indirect(lc_command_encoder *enc,
 lc_result lc_worker_record_draw_indexed_indirect(
     lc_command_encoder *enc, const lc_buffer *buffer, uint64_t offset,
     uint32_t draw_count, uint32_t stride);
-lc_result lc_worker_record_push_compute(
+lc_result lc_worker_record_draw_indirect_count(
+    lc_command_encoder *enc, const lc_buffer *buffer, uint64_t offset,
+    const lc_buffer *count_buffer, uint64_t count_offset,
+    uint32_t max_draw_count, uint32_t stride);
+lc_result lc_worker_record_draw_indexed_indirect_count(
+    lc_command_encoder *enc, const lc_buffer *buffer, uint64_t offset,
+    const lc_buffer *count_buffer, uint64_t count_offset,
+    uint32_t max_draw_count, uint32_t stride);
+LC_API lc_result lc_worker_record_push_compute(
     lc_command_encoder *enc, const lc_compute_pipeline *pipeline,
     uint32_t visibility, uint32_t offset, uint32_t size,
     const void *data);
-lc_result lc_worker_record_transition_buffer(
+LC_API lc_result lc_worker_record_transition_buffer(
     lc_command_encoder *enc, lc_buffer *buffer,
     lc_resource_state new_state);
 /* Compute worker-list lifecycle (vulkan_worker.c). */
@@ -1643,13 +1656,24 @@ lc_result lc_vulkan_encoder_draw_indirect(lc_command_encoder *enc,
 lc_result lc_vulkan_encoder_draw_indexed_indirect(
     lc_command_encoder *enc, lc_buffer *buffer, uint64_t offset,
     uint32_t draw_count, uint32_t stride);
+lc_result lc_vk_indirect_count_valid(const lc_buffer *count_buffer,
+                                     uint64_t count_offset,
+                                     uint32_t max_draw_count);
+lc_result lc_vulkan_encoder_draw_indirect_count(
+    lc_command_encoder *enc, lc_buffer *buffer, uint64_t offset,
+    lc_buffer *count_buffer, uint64_t count_offset,
+    uint32_t max_draw_count, uint32_t stride);
+lc_result lc_vulkan_encoder_draw_indexed_indirect_count(
+    lc_command_encoder *enc, lc_buffer *buffer, uint64_t offset,
+    lc_buffer *count_buffer, uint64_t count_offset,
+    uint32_t max_draw_count, uint32_t stride);
 lc_result lc_vulkan_encoder_transition_buffer(lc_command_encoder *enc,
                                               lc_buffer *buffer,
                                               lc_resource_state new_state);
 lc_result lc_vulkan_encoder_bind_compute_set(
     lc_command_encoder *enc, const lc_compute_pipeline *pipeline,
     uint32_t slot, lc_binding_set *set);
-lc_result lc_worker_record_bind_compute_set(
+LC_API lc_result lc_worker_record_bind_compute_set(
     lc_command_encoder *enc, const lc_compute_pipeline *pipeline,
     uint32_t slot, lc_binding_set *set);
 /* Compute worker-list lifecycle (vulkan_worker.c). */
@@ -1691,8 +1715,9 @@ void lc_compute_pipeline_destroy_for_device(const lc_device *device);
 int lc_compute_pipeline_is_live(const lc_compute_pipeline *pipeline);
 /* Isolated cross-queue compute submit, test path only
  * (vulkan_compute.c). Fire-and-forget in timeline mode (returns
- * the signaled value); synchronous in fallback (returns 0). */
-lc_result lc_vk_compute_dispatch_once(
+ * the signaled value); synchronous in fallback (returns 0).
+ * LC_API for shared-build test linkage (never public API). */
+LC_API lc_result lc_vk_compute_dispatch_once(
     lc_device *device, lc_compute_pipeline *pipeline,
     lc_binding_set *const *sets, const uint32_t *slots,
     uint32_t set_count, const void *push_data, uint32_t push_size,

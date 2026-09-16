@@ -1,0 +1,13 @@
+# Luma TSan suppressions (pre-Phase-24 audit): Mesa lavapipe's internal
+# worker threads race among themselves under ThreadSanitizer (known
+# driver-internal noise; no LumaC frame is ever implicated). Suppress
+# anything rooted in the driver .so so real LumaC races surface.
+race:libvulkan_lvp*
+race:libvulkan_radeon*
+race:libvulkan_intel*
+race:libvulkan_nouveau*
+race:libvulkan_gfxstream*
+race:libvulkan_virtio*
+race:libvulkan_asahi*
+thread:libvulkan_lvp*
+mutex:libvulkan_lvp*

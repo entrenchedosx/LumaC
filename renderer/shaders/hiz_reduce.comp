@@ -1,0 +1,48 @@
+/* Phase 23 Hi-Z reduction (compute, MAX pyramid).
+ *
+ * Standard-Z MAX reduction: each output texel holds the maximum
+ * (farthest) depth of its source region, so an object whose nearest
+ * depth exceeds the stored value is behind everything in that
+ * region. Source texels outside odd-sized extents do not exist and
+ * are skipped (the last row/column is covered, never dropped).
+ */
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform texture2D srcMip;
+layout(set = 0, binding = 1, r32f) uniform writeonly image2D dstMip;
+layout(set = 0, binding = 2) uniform sampler hizSamp;
+
+layout(push_constant) uniform Params {
+    uvec2 srcSize;
+    uvec2 dstSize;
+    int srcLevel;
+} params;
+
+void main() {
+    uvec2 px = gl_GlobalInvocationID.xy;
+    uvec2 base;
+    float m = 0.0;
+    int dx;
+    int dy;
+
+    if (px.x >= params.dstSize.x || px.y >= params.dstSize.y) {
+        return;
+    }
+    base = px * 2u;
+    for (dy = 0; dy < 2; dy++) {
+        for (dx = 0; dx < 2; dx++) {
+            uvec2 s = base + uvec2(uint(dx), uint(dy));
+            float d;
+
+            if (s.x >= params.srcSize.x || s.y >= params.srcSize.y) {
+                continue;
+            }
+            d = texelFetch(sampler2D(srcMip, hizSamp), ivec2(s),
+                           params.srcLevel).x;
+            m = max(m, d);
+        }
+    }
+    imageStore(dstMip, ivec2(px), vec4(m));
+}

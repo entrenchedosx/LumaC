@@ -72,6 +72,7 @@ lr_result lr_renderer_pipeline_for(lr_renderer *renderer,
                                    const lc_render_target_desc *signature,
                                    lr_material_type material_type,
                                    lc_cull_mode cull_mode,
+                                   lc_front_face front_face,
                                    lc_pipeline **out_pipeline) {
     uint32_t i;
     lc_graphics_pipeline_desc pd;
@@ -90,10 +91,17 @@ lr_result lr_renderer_pipeline_for(lr_renderer *renderer,
         return LR_ERROR_INVALID_ARGUMENT;
     }
     want_pbr = (material_type == LR_MATERIAL_PBR_METALLIC_ROUGHNESS);
+    /* CULL_NONE makes front face irrelevant: normalize so mirrored and
+     * regular double-sided items share one pipeline. */
+    if (cull_mode == LC_CULL_NONE) {
+        front_face = LC_FRONT_FACE_COUNTER_CLOCKWISE;
+    }
     for (i = 0; i < renderer->pipeline_count; i++) {
         /* Extent-independent structural compare (mirrors the LumaC
          * rule: counts, formats, depth, samples — never extent or
-         * object identity) plus material type and cull mode. */
+         * object identity) plus material type, cull mode, and front
+         * face. A missing key field here would silently reuse the
+         * wrong pipeline (Stage 29 audit). */
         const lc_render_target_desc *cached =
             &renderer->pipelines[i].signature;
         uint32_t k;
@@ -101,6 +109,7 @@ lr_result lr_renderer_pipeline_for(lr_renderer *renderer,
 
         if (renderer->pipelines[i].material_type == material_type &&
             renderer->pipelines[i].cull_mode == cull_mode &&
+            renderer->pipelines[i].front_face == front_face &&
             cached->color_attachment_count ==
                 signature->color_attachment_count &&
             cached->depth_stencil_format ==
@@ -124,7 +133,12 @@ lr_result lr_renderer_pipeline_for(lr_renderer *renderer,
         return LR_ERROR_UNSUPPORTED;
     }
 
-    /* Shared vertex layout over lr_vertex (56-byte stride). */
+    /* Shared vertex layout over lr_vertex (56-byte stride). PBR
+     * consumes all four attributes; unlit consumes only position +
+     * UV, so its pipeline binds exactly those two — binding
+     * unconsumed attributes trips "not consumed" validation noise
+     * (Stage 83 audit; same rule as the 1-attribute depth
+     * pipeline). Stride/offsets are identical either way. */
     vbinding.binding = 0;
     vbinding.stride = sizeof(lr_vertex);
     vbinding.input_rate = LC_VERTEX_INPUT_PER_VERTEX;
@@ -132,18 +146,25 @@ lr_result lr_renderer_pipeline_for(lr_renderer *renderer,
     vattrs[0].binding = 0;
     vattrs[0].format = LC_FORMAT_RGB32_FLOAT;
     vattrs[0].offset = 0;
-    vattrs[1].location = 1;
-    vattrs[1].binding = 0;
-    vattrs[1].format = LC_FORMAT_RGB32_FLOAT;
-    vattrs[1].offset = sizeof(float) * 3u;
-    vattrs[2].location = 2;
-    vattrs[2].binding = 0;
-    vattrs[2].format = LC_FORMAT_RGBA32_FLOAT;
-    vattrs[2].offset = sizeof(float) * 6u;
-    vattrs[3].location = 3;
-    vattrs[3].binding = 0;
-    vattrs[3].format = LC_FORMAT_RG32_FLOAT;
-    vattrs[3].offset = sizeof(float) * 10u;
+    if (want_pbr) {
+        vattrs[1].location = 1;
+        vattrs[1].binding = 0;
+        vattrs[1].format = LC_FORMAT_RGB32_FLOAT;
+        vattrs[1].offset = sizeof(float) * 3u;
+        vattrs[2].location = 2;
+        vattrs[2].binding = 0;
+        vattrs[2].format = LC_FORMAT_RGBA32_FLOAT;
+        vattrs[2].offset = sizeof(float) * 6u;
+        vattrs[3].location = 3;
+        vattrs[3].binding = 0;
+        vattrs[3].format = LC_FORMAT_RG32_FLOAT;
+        vattrs[3].offset = sizeof(float) * 10u;
+    } else {
+        vattrs[1].location = 3;
+        vattrs[1].binding = 0;
+        vattrs[1].format = LC_FORMAT_RG32_FLOAT;
+        vattrs[1].offset = sizeof(float) * 10u;
+    }
     if (want_pbr) {
         /* Model + normal matrices ride push (both stages: the
          * fragment side carries the receive-shadow flag). 116B. */
@@ -166,7 +187,7 @@ lr_result lr_renderer_pipeline_for(lr_renderer *renderer,
     pd.vertex_bindings = &vbinding;
     pd.vertex_binding_count = 1;
     pd.vertex_attributes = vattrs;
-    pd.vertex_attribute_count = 4;
+    pd.vertex_attribute_count = want_pbr ? 4u : 2u;
     {
         /* PBR draws bind slot 0 (material set) + slot 1 (frame
          * shadow set) + slot 2 (frame environment set); unlit
@@ -184,7 +205,7 @@ lr_result lr_renderer_pipeline_for(lr_renderer *renderer,
             pd.binding_layout_count = 1;
         }
         pd.cull_mode = cull_mode;
-        pd.front_face = LC_FRONT_FACE_COUNTER_CLOCKWISE;
+        pd.front_face = front_face;
         pd.depth_test_enable =
             (signature->depth_stencil_format == LC_FORMAT_UNDEFINED) ? 0 : 1;
         pd.depth_write_enable = pd.depth_test_enable;
@@ -200,6 +221,7 @@ lr_result lr_renderer_pipeline_for(lr_renderer *renderer,
     renderer->pipelines[renderer->pipeline_count].material_type =
         material_type;
     renderer->pipelines[renderer->pipeline_count].cull_mode = cull_mode;
+    renderer->pipelines[renderer->pipeline_count].front_face = front_face;
     renderer->pipelines[renderer->pipeline_count].pipeline = pipeline;
     renderer->pipeline_count++;
     *out_pipeline = pipeline;
@@ -869,13 +891,17 @@ lr_result lr_renderer_create(const lr_renderer_desc *desc,
 
     /* Fail fast: pre-build both primary pipelines now. */
     res = lr_renderer_pipeline_for(renderer, &renderer->primary,
-                                   LR_MATERIAL_UNLIT, LC_CULL_BACK, &primed);
+                                   LR_MATERIAL_UNLIT, LC_CULL_BACK,
+                                   LC_FRONT_FACE_COUNTER_CLOCKWISE,
+                                   &primed);
     if (res != LR_SUCCESS) {
         goto fail;
     }
     res = lr_renderer_pipeline_for(renderer, &renderer->primary,
                                    LR_MATERIAL_PBR_METALLIC_ROUGHNESS,
-                                   LC_CULL_BACK, &primed);
+                                   LC_CULL_BACK,
+                                   LC_FRONT_FACE_COUNTER_CLOCKWISE,
+                                   &primed);
     if (res != LR_SUCCESS) {
         goto fail;
     }
@@ -1001,6 +1027,9 @@ lr_result lr_renderer_begin(lr_renderer *renderer,
     gpu.cam_pos[3] = 1.0f;
     memcpy(renderer->camera_mapped, &gpu, sizeof(gpu));
     lr_frustum_from_viewproj(gpu.view_proj, renderer->frustum_planes);
+    /* Extended visibility latches current-frame matrices for LOD
+     * projection and previous-frame occlusion (cheap memcpy). */
+    lr_vis_on_begin(renderer, gpu.view_proj, camera->position);
     renderer->queued = 0;
     renderer->light_count = 0;
     renderer->shadow_assigned = 0;
@@ -1741,9 +1770,15 @@ static lr_result lr_render_items(lr_renderer *renderer,
         int gpu_pbr_done = 0;
 
         if (renderer->render_mode == LR_RENDER_MODE_GPU_DRIVEN &&
-            renderer->gpu_prepared_frame == renderer->frame_number) {
-            if (lr_gpu_record_draws(renderer, encoder, target,
-                                    &signature) != LR_SUCCESS) {
+            (renderer->gpu_prepared_frame == renderer->frame_number ||
+             renderer->vis_prepared_frame == renderer->frame_number)) {
+            if (renderer->vis_prepared_frame == renderer->frame_number) {
+                if (lr_vis_record_draws(renderer, encoder, target,
+                                        &signature) != LR_SUCCESS) {
+                    return LR_ERROR_RENDER;
+                }
+            } else if (lr_gpu_record_draws(renderer, encoder, target,
+                                           &signature) != LR_SUCCESS) {
                 return LR_ERROR_RENDER;
             }
             gpu_pbr_done = 1;
@@ -1778,7 +1813,12 @@ static lr_result lr_render_items(lr_renderer *renderer,
         res = lr_renderer_pipeline_for(
             renderer, &signature, item->material->type,
             (want_pbr && item->material->double_sided) ? LC_CULL_NONE
-                                                       : LC_CULL_BACK,
+                                                        : LC_CULL_BACK,
+            /* Mirrored transforms invert winding: flip the raster
+             * front face for this item instead of disabling culling
+             * (Stage 40 audit fix). */
+            item->mirrored ? LC_FRONT_FACE_CLOCKWISE
+                           : LC_FRONT_FACE_COUNTER_CLOCKWISE,
             &pipeline);
         if (res != LR_SUCCESS) {
             return res;
@@ -2006,7 +2046,7 @@ lr_result lr_renderer_render_scene(lr_renderer *renderer,
     if (renderer->render_mode == LR_RENDER_MODE_GPU_DRIVEN) {
         uint64_t gpu0 = lr_perf_now();
 
-        res = lr_gpu_prepare(renderer, encoder);
+        res = lr_renderer_prepare_gpu(renderer, encoder);
         renderer->gpu_stats.cpu_prepare_ms = lr_perf_to_ms(
             lr_perf_now() - gpu0, renderer->perf_freq);
         if (res != LR_SUCCESS) {
@@ -2024,7 +2064,15 @@ lr_result lr_renderer_render_scene(lr_renderer *renderer,
     memset(&datt, 0, sizeof(datt));
     datt.view = renderer->hdr_depth_view;
     datt.depth_load_op = LC_LOAD_OP_CLEAR;
-    datt.depth_store_op = LC_STORE_OP_DONT_CARE;
+    /* Hi-Z occlusion seeds from the previous frame's depth: keep
+     * the attachment (sampled-readable final) only while the
+     * extended visibility path needs it; otherwise discard as
+     * before (bandwidth stays identical for legacy frames). */
+    datt.depth_store_op =
+        (renderer->vis_settings.enabled &&
+         renderer->vis_settings.hiz_enabled)
+            ? LC_STORE_OP_STORE
+            : LC_STORE_OP_DONT_CARE;
     datt.clear_depth = 1.0f;
     datt.stencil_load_op = LC_LOAD_OP_DONT_CARE;
     datt.stencil_store_op = LC_STORE_OP_DONT_CARE;

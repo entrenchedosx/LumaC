@@ -95,11 +95,18 @@ lc_result lc_vulkan_offscreen_pass(lc_device *device,
                            ? lc_vulkan_translate_format(target->depth_format)
                            : VK_FORMAT_UNDEFINED;
     /* Sampled-usage depth selects the sampled-readable final layout
-     * (must agree with pass creation + end-of-pass adoption). */
+     * (must agree with pass creation + end-of-pass adoption). The
+     * STORE op joins the key: a discarded (DONT_CARE) depth ends
+     * attachment-optimal/UNDEFINED like plain depth even when the
+     * image carries SAMPLED usage (Phase 23: Hi-Z stores depth only
+     * while it needs the previous frame; legacy frames keep the
+     * exact historical behavior). */
     key.depth_sampled =
         (target->depth_view != NULL && target->depth_view->image != NULL &&
          (target->depth_view->image->usage & LC_IMAGE_USAGE_SAMPLED) !=
-             0)
+             0 &&
+         desc->depth_attachment != NULL &&
+         desc->depth_attachment->depth_store_op == LC_STORE_OP_STORE)
             ? 1
             : 0;
     if (desc->depth_attachment != NULL) {
@@ -1044,6 +1051,174 @@ lc_result lc_vulkan_encoder_draw_indexed_indirect(
         uint32_t i;
 
         for (i = 0; i < draw_count; i++) {
+            vkCmdDrawIndexedIndirect(flight->cmd, buffer->vk_buffer,
+                                     (VkDeviceSize)offset +
+                                         (VkDeviceSize)i *
+                                             (VkDeviceSize)stride,
+                                     1, stride);
+        }
+    }
+    return LC_SUCCESS;
+}
+
+/* Validate a GPU-count buffer (shared frame/worker rules): the
+ * Vulkan count buffer carries INDIRECT usage and one uint32. */
+lc_result lc_vk_indirect_count_valid(const lc_buffer *count_buffer,
+                                     uint64_t count_offset,
+                                     uint32_t max_draw_count) {
+    if (count_buffer == NULL ||
+        count_buffer->vk_buffer == VK_NULL_HANDLE) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if ((count_buffer->usage & LC_BUFFER_USAGE_INDIRECT) == 0) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (max_draw_count == 0 || (count_offset % 4u) != 0u) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (count_offset + 4u > count_buffer->size) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    return LC_SUCCESS;
+}
+
+/* Both command and count buffers must already be INDIRECT_READ
+ * (same outside-pass rule as fixed-count draws). */
+static lc_result lc_vk_indirect_count_ready(lc_device *device,
+                                            const lc_buffer *buffer,
+                                            const lc_buffer *count_buffer) {
+    lc_resource_state command_state;
+    lc_resource_state count_state;
+
+    lc_device_lock_transfer(device);
+    command_state = buffer->buffer_state;
+    count_state = count_buffer->buffer_state;
+    lc_device_unlock_transfer(device);
+    if (command_state != LC_RESOURCE_STATE_INDIRECT_READ ||
+        count_state != LC_RESOURCE_STATE_INDIRECT_READ) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    return LC_SUCCESS;
+}
+
+lc_result lc_vulkan_encoder_draw_indirect_count(
+    lc_command_encoder *enc, lc_buffer *buffer, uint64_t offset,
+    lc_buffer *count_buffer, uint64_t count_offset,
+    uint32_t max_draw_count, uint32_t stride) {
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+    lc_result res;
+
+    if (enc == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (enc->worker_mode) {
+        return lc_worker_record_draw_indirect_count(
+            enc, buffer, offset, count_buffer, count_offset,
+            max_draw_count, stride);
+    }
+    if (enc->swapchain == NULL || !enc->in_pass) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    if (!lc_enc_frame_ready(swapchain) || enc->bound_pipeline == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    res = lc_vk_indirect_batch_valid(buffer, offset, max_draw_count,
+                                     stride,
+                                     (uint32_t)sizeof(
+                                         lc_indirect_draw_command));
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+    res = lc_vk_indirect_count_valid(count_buffer, count_offset,
+                                     max_draw_count);
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+    res = lc_vk_indirect_count_ready(swapchain->device, buffer,
+                                     count_buffer);
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+    flight = lc_enc_flight(swapchain);
+    if (swapchain->device->indirect_count_supported != 0) {
+        vkCmdDrawIndirectCount(flight->cmd, buffer->vk_buffer,
+                               (VkDeviceSize)offset,
+                               count_buffer->vk_buffer,
+                               (VkDeviceSize)count_offset,
+                               max_draw_count, stride);
+        return LC_SUCCESS;
+    }
+    /* GPU-driven fallback (no count consumption): draw the whole
+     * bound. Producers zero instance_count on unused slots, so the
+     * extras are valid no-op draws and no CPU count readback is
+     * ever needed. */
+    {
+        uint32_t i;
+
+        for (i = 0; i < max_draw_count; i++) {
+            vkCmdDrawIndirect(flight->cmd, buffer->vk_buffer,
+                              (VkDeviceSize)offset +
+                                  (VkDeviceSize)i * (VkDeviceSize)stride,
+                              1, stride);
+        }
+    }
+    return LC_SUCCESS;
+}
+
+lc_result lc_vulkan_encoder_draw_indexed_indirect_count(
+    lc_command_encoder *enc, lc_buffer *buffer, uint64_t offset,
+    lc_buffer *count_buffer, uint64_t count_offset,
+    uint32_t max_draw_count, uint32_t stride) {
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+    lc_result res;
+
+    if (enc == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (enc->worker_mode) {
+        return lc_worker_record_draw_indexed_indirect_count(
+            enc, buffer, offset, count_buffer, count_offset,
+            max_draw_count, stride);
+    }
+    if (enc->swapchain == NULL || !enc->in_pass) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    if (!lc_enc_frame_ready(swapchain) || enc->bound_pipeline == NULL ||
+        !enc->index_bound || enc->bound_index_buffer == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    res = lc_vk_indirect_batch_valid(
+        buffer, offset, max_draw_count, stride,
+        (uint32_t)sizeof(lc_indirect_draw_indexed_command));
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+    res = lc_vk_indirect_count_valid(count_buffer, count_offset,
+                                     max_draw_count);
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+    res = lc_vk_indirect_count_ready(swapchain->device, buffer,
+                                     count_buffer);
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+    flight = lc_enc_flight(swapchain);
+    if (swapchain->device->indirect_count_supported != 0) {
+        vkCmdDrawIndexedIndirectCount(
+            flight->cmd, buffer->vk_buffer, (VkDeviceSize)offset,
+            count_buffer->vk_buffer, (VkDeviceSize)count_offset,
+            max_draw_count, stride);
+        return LC_SUCCESS;
+    }
+    {
+        uint32_t i;
+
+        for (i = 0; i < max_draw_count; i++) {
             vkCmdDrawIndexedIndirect(flight->cmd, buffer->vk_buffer,
                                      (VkDeviceSize)offset +
                                          (VkDeviceSize)i *

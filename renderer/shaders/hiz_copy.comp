@@ -1,0 +1,30 @@
+/* Phase 23 Hi-Z seed copy (compute).
+ *
+ * Seeds mip 0 of the dedicated R32F Hi-Z pyramid from the scene
+ * depth buffer (standard-Z convention: near maps to 0, far maps to
+ * 1, depth compare LESS, clear 1.0). One invocation per texel;
+ * out-of-range invocations exit (odd extents are exact, never
+ * padded into the pyramid).
+ */
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform texture2D depthTex;
+layout(set = 0, binding = 1, r32f) uniform writeonly image2D hizOut;
+layout(set = 0, binding = 2) uniform sampler hizSamp;
+
+layout(push_constant) uniform Params {
+    uvec2 size;
+} params;
+
+void main() {
+    uvec2 px = gl_GlobalInvocationID.xy;
+    float d;
+
+    if (px.x >= params.size.x || px.y >= params.size.y) {
+        return;
+    }
+    d = texelFetch(sampler2D(depthTex, hizSamp), ivec2(px), 0).x;
+    imageStore(hizOut, ivec2(px), vec4(d));
+}

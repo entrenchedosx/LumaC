@@ -128,6 +128,29 @@ int lr_mat3_normal_from_mat4(const float m[16], float out_normal[12]) {
     return 1;
 }
 
+/* Winding parity (Stage 40 audit fix): 1 when the upper 3x3 has
+ * negative determinant (odd mirror count), so callers can flip the
+ * raster front-face instead of globally disabling backface culling.
+ * Degenerate (near-zero determinant) reports 0; such items are
+ * already rejected by the normal-matrix path. */
+int lr_matrix_is_mirrored(const float m[16]) {
+    float a00 = m[0];
+    float a10 = m[1];
+    float a20 = m[2];
+    float a01 = m[4];
+    float a11 = m[5];
+    float a21 = m[6];
+    float a02 = m[8];
+    float a12 = m[9];
+    float a22 = m[10];
+    float c00 = a11 * a22 - a12 * a21;
+    float c01 = a12 * a20 - a10 * a22;
+    float c02 = a10 * a21 - a11 * a20;
+    float det = a00 * c00 + a01 * c01 + a02 * c02;
+
+    return (det < 0.0f) ? 1 : 0;
+}
+
 float lr_vec3_length(const float v[3]) {
     return sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
 }

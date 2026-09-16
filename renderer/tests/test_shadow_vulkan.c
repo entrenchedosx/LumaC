@@ -1716,9 +1716,8 @@ int main(void) {
      *
      * Non-uniform scale must widen the silhouette; double-sided and
      * single-sided horizontals must agree (documented CULL_NONE
-     * rule); mirrored meshes cast correct silhouettes even though
-     * their main-pass winding is inside-out (documented debt:
-     * mirrored main centers differ, shadows match).
+     * rule); mirrored meshes cast correct silhouettes AND render
+     * correct main-pass tops (Stage 40 per-item front-face fix).
      */
     {
         lr_material *mat = make_pbr(&env, gray, 0.0f, 0.8f);
@@ -1960,9 +1959,10 @@ int main(void) {
             lr_material_destroy(ds_mat);
             lr_mesh_destroy(flat);
         }
-        /* Mirrored caster (negative scale): shadow matches, but the
-         * main pass sees through the flipped-winding top to unlit
-         * interior (documented debt: mirrored main top differs). */
+        /* Mirrored caster (negative scale): shadow matches AND the
+         * main pass now renders the flipped-winding top correctly
+         * (Stage 40 audit fix: per-item front-face flip; the old
+         * "sees through to unlit interior" debt is gone). */
         {
             unsigned char *p_norm = NULL;
             unsigned char *p_mirr = NULL;
@@ -2012,8 +2012,8 @@ int main(void) {
                        "mirrored: shadow silhouette matches");
             TEST_CHECK(p_norm != NULL && p_mirr != NULL &&
                            luminance(top_norm) > 0.4 &&
-                           luminance(top_mirr) < 0.1,
-                       "mirrored: main top differs (known debt)");
+                           luminance(top_mirr) > 0.4,
+                       "mirrored: main top renders lit (debt fixed)");
             free(p_norm);
             free(p_mirr);
         }

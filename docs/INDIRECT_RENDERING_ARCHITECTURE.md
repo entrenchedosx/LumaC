@@ -30,3 +30,5 @@ honestly via `lc_compute_capabilities.indirect_count`, and the
 fixed-count path (compute writes `instanceCount`, one indirect
 call) covers all Phase 21 work. A public count API arrives with
 the async-compute scheduler, not before.
+
+Phase 23: GPU-written counts are now public via lc_encoder_draw_indirect_count / lc_encoder_draw_indexed_indirect_count (native drawIndirectCount where lc_compute_capabilities.indirect_count is set, zero-instance no-op fallback otherwise). Proofs in tests/test_indirect_count_vulkan (count 0/partial/max pixel proofs, worker-list coverage).

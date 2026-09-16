@@ -1,0 +1,50 @@
+/* Phase 23 visibility finalize (one group per dispatch).
+ *
+ * Single-invocation pass: converts per-LOD visible counts into up
+ * to lodCount indexed indirect commands plus one 0/1 draw-count
+ * word per LOD. Empty LODs emit instanceCount 0 (valid no-op for
+ * the fixed-count fallback) and count 0 (skipped by native
+ * indirect-count draws). firstInstance points at the LOD segment
+ * inside the shared visible buffer, so the vertex shader needs no
+ * LOD awareness.
+ */
+#version 450
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Counters {
+    uvec2 counters[];
+} lodCounters;
+
+layout(set = 0, binding = 1) buffer Indirect {
+    uint words[];
+} indirect;
+
+layout(set = 0, binding = 2) buffer CountBuf {
+    uint counts[];
+} countBuf;
+
+layout(push_constant) uniform Push {
+    uint lodCount;
+    uint indexCounts[4];
+    uint capacity;
+} push;
+
+void main() {
+    uint l;
+
+    for (l = 0u; l < push.lodCount; l++) {
+        uint vis = lodCounters.counters[l].x;
+        uint base = l * 5u;
+
+        if (vis > push.capacity) {
+            vis = push.capacity;
+        }
+        indirect.words[base + 0u] = push.indexCounts[l];
+        indirect.words[base + 1u] = vis;
+        indirect.words[base + 2u] = 0u;
+        indirect.words[base + 3u] = 0u;
+        indirect.words[base + 4u] = l * push.capacity;
+        countBuf.counts[l] = (vis > 0u) ? 1u : 0u;
+    }
+}

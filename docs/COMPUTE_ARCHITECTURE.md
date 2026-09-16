@@ -40,3 +40,5 @@ reject wrong-slot reuse loudly.
 
 D3D12 mapping: compute PSO, `Dispatch`, UAV barriers, one
 fence-value domain. No Vulkan names cross the public API.
+
+Phase 23: compute drives Hi-Z copy/reduce, frustum+occlusion+LOD culling, and indirect finalize dispatches; indirect-count capability consumed natively where offered.

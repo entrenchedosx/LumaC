@@ -5,12 +5,18 @@ build-rel/
 build-shared/
 build-release/
 build-linux/
+build-linux-p23/
+build-linux-tsan/
+build verify/
 build_verify/
 build_wsl/
 build_release/
 build_wsl_release/
 build_wsl_tsan/
 build-wsl/
+build-wsl-p26/
+build-wsl-asan/
+build_base/
 out/
 
 # CMake generated files (in-source configure leftovers)
@@ -57,3 +63,6 @@ desktop.ini
 # Temporary logs and captures
 *.log
 *.ppm
+
+# Scratch screenshots at repo root (use docs/images/ instead)
+hiz-debug.png

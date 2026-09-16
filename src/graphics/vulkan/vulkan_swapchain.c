@@ -361,7 +361,21 @@ void lc_vulkan_swapchain_teardown(lc_swapchain *swapchain) {
     }
     /* Coarse but correct: frames may be in flight (submitted, awaiting
      * present), and destroying a swapchain with pending work is
-     * invalid. Nothing here needs finer granularity yet. */
+     * invalid. Nothing here needs finer granularity yet.
+     *
+     * Pre-Phase-24 audit (Stage 24): per-flight fence waits alone are
+     * NOT sufficient here. Flight fences signal at submit completion,
+     * but vkQueuePresentKHR work queued in end_frame may still
+     * reference the old images, views, framebuffers, and present
+     * semaphores after every fence is signaled; present completion
+     * is unobservable without present-fence support (no
+     * VK_KHR_present_wait / maintenance1 retirement plumbing yet).
+     * oldSwapchain chaining alone does not make view/framebuffer/
+     * semaphore destruction safe either. So this device-wide wait
+     * stays until a present-aware retirement path exists. It fires
+     * only on recreate/destroy (never per frame: steady-state
+     * device-wide waits are zero), which keeps it off every hot
+     * path. See docs/PRE_PHASE24_AUDIT_BASELINE.md. */
     if (device_handle != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_handle);
     }

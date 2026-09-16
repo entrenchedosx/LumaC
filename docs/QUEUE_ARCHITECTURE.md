@@ -24,3 +24,5 @@ frame/worker buffers while a minimal isolated submit proves
 cross-queue execution. Overlapping async compute stays deferred:
 no scheduler, no overlap promise.
 
+
+Phase 23: visibility passes declare graphics/compute classes and execute dependency-ordered (serialized); no async overlap yet, architecture permits it.

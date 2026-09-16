@@ -68,6 +68,12 @@ lr_result lr_renderer_submit(lr_renderer *renderer,
     memcpy(slot->matrix, matrix, sizeof(matrix));
     slot->casts_shadow = (item->casts_shadow != 0) ? 1 : 0;
     slot->receives_shadow = (item->receives_shadow != 0) ? 1 : 0;
+    /* Stable temporal key rides along untouched (0 = none). */
+    slot->instance_id = item->instance_id;
+    /* Winding parity for mirrored (negative-determinant) transforms
+     * (Stage 40 audit fix): decided once at submit so every path
+     * (CPU draws, GPU grouping, LOD history) agrees. */
+    slot->mirrored = lr_matrix_is_mirrored(matrix);
     lr_world_sphere(matrix, item->mesh->bounds.center,
                     item->mesh->bounds.radius, item->transform.scale,
                     slot->sphere_center, &slot->sphere_radius);

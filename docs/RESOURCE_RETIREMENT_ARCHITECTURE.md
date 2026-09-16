@@ -18,3 +18,5 @@ recreation retains documented device-idle debt. Destroying an object concurrentl
 with active recording of that same object is outside the contract; destruction
 after list completion is detected through the list registry.
 
+
+Phase 23: Hi-Z images, visibility buffers, and transient graph resources retire through the existing deferred path (no global idle); shutdown retirement ordering fix retained.

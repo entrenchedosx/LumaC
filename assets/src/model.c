@@ -453,6 +453,94 @@ uint32_t la_model_get_instance_count(const la_model *model) {
     return (model != NULL) ? model->instance_count : 0;
 }
 
+la_result la_model_adopt_mesh(la_model *model, uint32_t mesh_index,
+                              uint32_t primitive_index,
+                              lr_mesh **out_mesh) {
+    if (out_mesh != NULL) {
+        *out_mesh = NULL;
+    }
+    if (model == NULL || out_mesh == NULL) {
+        return LA_ERROR_INVALID_ARGUMENT;
+    }
+    if (!la_model_is_live(model->manager, model)) {
+        return LA_ERROR_INVALID_ARGUMENT;
+    }
+    if (mesh_index >= model->mesh_count) {
+        return LA_ERROR_INVALID_ARGUMENT;
+    }
+    if (primitive_index >=
+        model->meshes[mesh_index].primitive_count) {
+        return LA_ERROR_INVALID_ARGUMENT;
+    }
+    if (model->meshes[mesh_index].primitives[primitive_index].mesh ==
+        NULL) {
+        return LA_ERROR_INVALID_ARGUMENT; /* already adopted */
+    }
+    *out_mesh =
+        model->meshes[mesh_index].primitives[primitive_index].mesh;
+    model->meshes[mesh_index].primitives[primitive_index].mesh = NULL;
+    return LA_SUCCESS;
+}
+
+la_result la_model_adopt_material(la_model *model,
+                                  uint32_t material_index,
+                                  lr_material **out_material) {
+    if (out_material != NULL) {
+        *out_material = NULL;
+    }
+    if (model == NULL || out_material == NULL) {
+        return LA_ERROR_INVALID_ARGUMENT;
+    }
+    if (!la_model_is_live(model->manager, model)) {
+        return LA_ERROR_INVALID_ARGUMENT;
+    }
+    if (material_index >= model->material_count) {
+        return LA_ERROR_INVALID_ARGUMENT;
+    }
+    if (model->materials[material_index].material == NULL) {
+        return LA_ERROR_INVALID_ARGUMENT; /* already adopted */
+    }
+    *out_material = model->materials[material_index].material;
+    model->materials[material_index].material = NULL;
+    return LA_SUCCESS;
+}
+
+lr_mesh *la_model_borrow_mesh(const la_model *model,
+                              uint32_t mesh_index,
+                              uint32_t primitive_index) {
+    if (model == NULL || mesh_index >= model->mesh_count) {
+        return NULL;
+    }
+    if (primitive_index >=
+        model->meshes[mesh_index].primitive_count) {
+        return NULL;
+    }
+    return model->meshes[mesh_index].primitives[primitive_index].mesh;
+}
+
+uint32_t la_model_get_primitive_count(const la_model *model,
+                                      uint32_t mesh_index) {
+    if (model == NULL || mesh_index >= model->mesh_count) {
+        return 0;
+    }
+    return model->meshes[mesh_index].primitive_count;
+}
+
+uint32_t la_model_get_primitive_material(const la_model *model,
+                                         uint32_t mesh_index,
+                                         uint32_t primitive_index) {
+    if (model == NULL || mesh_index >= model->mesh_count) {
+        return UINT32_MAX;
+    }
+    if (primitive_index >=
+        model->meshes[mesh_index].primitive_count) {
+        return UINT32_MAX;
+    }
+    return model->meshes[mesh_index]
+        .primitives[primitive_index]
+        .material_index;
+}
+
 const la_model_node *la_model_get_node(const la_model *model,
                                        uint32_t index) {
     if (model == NULL || index >= model->node_count) {

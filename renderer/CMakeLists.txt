@@ -47,6 +47,10 @@ file(COPY
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr_instanced.vert.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/cull.comp.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/finalize.comp.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/hiz_copy.comp.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/hiz_reduce.comp.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vis_cull.comp.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vis_finalize.comp.spv"
     DESTINATION "${LR_SPV_DIR}")
 find_program(LR_GLSLC glslc HINTS "$ENV{VULKAN_SDK}/Bin")
 if(LR_GLSLC)
@@ -69,6 +73,10 @@ if(LR_GLSLC)
             "${LR_SPV_DIR}/pbr_instanced.vert.spv"
             "${LR_SPV_DIR}/cull.comp.spv"
             "${LR_SPV_DIR}/finalize.comp.spv"
+            "${LR_SPV_DIR}/hiz_copy.comp.spv"
+            "${LR_SPV_DIR}/hiz_reduce.comp.spv"
+            "${LR_SPV_DIR}/vis_cull.comp.spv"
+            "${LR_SPV_DIR}/vis_finalize.comp.spv"
         COMMAND "${LR_GLSLC}" -fshader-stage=vert -O
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/unlit.vert"
             -o "${LR_SPV_DIR}/unlit.vert.spv"
@@ -120,6 +128,18 @@ if(LR_GLSLC)
         COMMAND "${LR_GLSLC}" -fshader-stage=compute -O
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/finalize.comp"
             -o "${LR_SPV_DIR}/finalize.comp.spv"
+        COMMAND "${LR_GLSLC}" -fshader-stage=compute -O
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/hiz_copy.comp"
+            -o "${LR_SPV_DIR}/hiz_copy.comp.spv"
+        COMMAND "${LR_GLSLC}" -fshader-stage=compute -O
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/hiz_reduce.comp"
+            -o "${LR_SPV_DIR}/hiz_reduce.comp.spv"
+        COMMAND "${LR_GLSLC}" -fshader-stage=compute -O
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vis_cull.comp"
+            -o "${LR_SPV_DIR}/vis_cull.comp.spv"
+        COMMAND "${LR_GLSLC}" -fshader-stage=compute -O
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vis_finalize.comp"
+            -o "${LR_SPV_DIR}/vis_finalize.comp.spv"
         DEPENDS
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/unlit.vert"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/unlit.frag"
@@ -138,6 +158,10 @@ if(LR_GLSLC)
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr_instanced.vert"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/cull.comp"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/finalize.comp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/hiz_copy.comp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/hiz_reduce.comp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vis_cull.comp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vis_finalize.comp"
         COMMENT "Compiling Luma Renderer shaders")
     add_custom_target(luma_renderer_shaders DEPENDS
         "${LR_SPV_DIR}/unlit.vert.spv"
@@ -156,7 +180,11 @@ if(LR_GLSLC)
         "${LR_SPV_DIR}/post_tint.frag.spv"
         "${LR_SPV_DIR}/pbr_instanced.vert.spv"
         "${LR_SPV_DIR}/cull.comp.spv"
-        "${LR_SPV_DIR}/finalize.comp.spv")
+        "${LR_SPV_DIR}/finalize.comp.spv"
+        "${LR_SPV_DIR}/hiz_copy.comp.spv"
+        "${LR_SPV_DIR}/hiz_reduce.comp.spv"
+        "${LR_SPV_DIR}/vis_cull.comp.spv"
+        "${LR_SPV_DIR}/vis_finalize.comp.spv")
 endif()
 
 # Embedded SPIR-V bytes (portable hex dump, no host tools needed).
@@ -296,6 +324,38 @@ add_custom_command(
         "-DSYM=lr_finalize_comp_spv"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hex_to_c.cmake"
     DEPENDS "${LR_SPV_DIR}/finalize.comp.spv")
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/lr_hiz_copy_comp_spv.c"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DIN=${LR_SPV_DIR}/hiz_copy.comp.spv"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/lr_hiz_copy_comp_spv.c"
+        "-DSYM=lr_hiz_copy_comp_spv"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hex_to_c.cmake"
+    DEPENDS "${LR_SPV_DIR}/hiz_copy.comp.spv")
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/lr_hiz_reduce_comp_spv.c"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DIN=${LR_SPV_DIR}/hiz_reduce.comp.spv"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/lr_hiz_reduce_comp_spv.c"
+        "-DSYM=lr_hiz_reduce_comp_spv"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hex_to_c.cmake"
+    DEPENDS "${LR_SPV_DIR}/hiz_reduce.comp.spv")
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/lr_vis_cull_comp_spv.c"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DIN=${LR_SPV_DIR}/vis_cull.comp.spv"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/lr_vis_cull_comp_spv.c"
+        "-DSYM=lr_vis_cull_comp_spv"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hex_to_c.cmake"
+    DEPENDS "${LR_SPV_DIR}/vis_cull.comp.spv")
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/lr_vis_finalize_comp_spv.c"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DIN=${LR_SPV_DIR}/vis_finalize.comp.spv"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/lr_vis_finalize_comp_spv.c"
+        "-DSYM=lr_vis_finalize_comp_spv"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hex_to_c.cmake"
+    DEPENDS "${LR_SPV_DIR}/vis_finalize.comp.spv")
 
 add_library(luma_renderer STATIC
     src/renderer.c
@@ -307,6 +367,9 @@ add_library(luma_renderer STATIC
     src/environment.c
     src/post.c
     src/gpu_driven.c
+    src/hiz.c
+    src/visibility.c
+    src/render_graph.c
     "${CMAKE_CURRENT_BINARY_DIR}/lr_unlit_vert_spv.c"
     "${CMAKE_CURRENT_BINARY_DIR}/lr_unlit_frag_spv.c"
     "${CMAKE_CURRENT_BINARY_DIR}/lr_pbr_vert_spv.c"
@@ -324,6 +387,10 @@ add_library(luma_renderer STATIC
     "${CMAKE_CURRENT_BINARY_DIR}/lr_pbr_instanced_vert_spv.c"
     "${CMAKE_CURRENT_BINARY_DIR}/lr_cull_comp_spv.c"
     "${CMAKE_CURRENT_BINARY_DIR}/lr_finalize_comp_spv.c"
+    "${CMAKE_CURRENT_BINARY_DIR}/lr_hiz_copy_comp_spv.c"
+    "${CMAKE_CURRENT_BINARY_DIR}/lr_hiz_reduce_comp_spv.c"
+    "${CMAKE_CURRENT_BINARY_DIR}/lr_vis_cull_comp_spv.c"
+    "${CMAKE_CURRENT_BINARY_DIR}/lr_vis_finalize_comp_spv.c"
 )
 if(TARGET luma_renderer_shaders)
     add_dependencies(luma_renderer luma_renderer_shaders)
@@ -354,6 +421,8 @@ endif()
 # Renderer tests (CTest registration flows from the top level).
 add_executable(test_renderer tests/test_renderer.c)
 target_link_libraries(test_renderer PRIVATE luma_renderer)
+target_include_directories(test_renderer PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
 if(UNIX AND NOT APPLE)
     target_link_libraries(test_renderer PRIVATE m)
 endif()
@@ -471,12 +540,93 @@ if(UNIX AND NOT APPLE)
 endif()
 add_test(NAME test_gpu_driven_vulkan COMMAND test_gpu_driven_vulkan)
 
+# Hi-Z depth pyramid (Phase 23): CPU-reference pyramid equivalence.
+add_executable(test_hiz_vulkan tests/test_hiz_vulkan.c)
+target_link_libraries(test_hiz_vulkan PRIVATE luma_renderer lumac Vulkan::Vulkan)
+target_include_directories(test_hiz_vulkan PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(TARGET luma_renderer_shaders)
+    add_dependencies(test_hiz_vulkan luma_renderer_shaders)
+endif()
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_hiz_vulkan PRIVATE m)
+endif()
+add_test(NAME test_hiz_vulkan COMMAND test_hiz_vulkan)
+
+# Hi-Z occlusion culling (Phase 23): wall-scene visibility,
+# edge cases, on/off pixel equivalence, yaw-sweep stress.
+add_executable(test_occlusion_vulkan tests/test_occlusion_vulkan.c)
+target_link_libraries(test_occlusion_vulkan PRIVATE luma_renderer lumac Vulkan::Vulkan)
+target_include_directories(test_occlusion_vulkan PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(TARGET luma_renderer_shaders)
+    add_dependencies(test_occlusion_vulkan luma_renderer_shaders)
+endif()
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_occlusion_vulkan PRIVATE m)
+endif()
+add_test(NAME test_occlusion_vulkan COMMAND test_occlusion_vulkan)
+
+# GPU LOD selection (Phase 23): thresholds, hysteresis, scales,
+# triangle reduction, fallback/graph equivalence.
+add_executable(test_lod_vulkan tests/test_lod_vulkan.c)
+target_link_libraries(test_lod_vulkan PRIVATE luma_renderer lumac Vulkan::Vulkan)
+target_include_directories(test_lod_vulkan PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(TARGET luma_renderer_shaders)
+    add_dependencies(test_lod_vulkan luma_renderer_shaders)
+endif()
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_lod_vulkan PRIVATE m)
+endif()
+add_test(NAME test_lod_vulkan COMMAND test_lod_vulkan)
+
+# Mirrored-transform rendering (Stage 40 audit): negative-scale
+# winding flips the raster front face per item/group (CPU + GPU
+# paths), proven by lit-pixel coverage on both frame halves.
+add_executable(test_mirror_vulkan tests/test_mirror_vulkan.c)
+target_link_libraries(test_mirror_vulkan PRIVATE luma_renderer lumac Vulkan::Vulkan)
+target_include_directories(test_mirror_vulkan PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_mirror_vulkan PRIVATE m)
+endif()
+add_test(NAME test_mirror_vulkan COMMAND test_mirror_vulkan)
+
+# Render-graph foundation (Phase 23): derivation, cycles,
+# transients, diagnostics, execution order.
+add_executable(test_render_graph tests/test_render_graph.c)
+target_link_libraries(test_render_graph PRIVATE luma_renderer lumac Vulkan::Vulkan)
+target_include_directories(test_render_graph PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(TARGET luma_renderer_shaders)
+    add_dependencies(test_render_graph luma_renderer_shaders)
+endif()
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_render_graph PRIVATE m)
+endif()
+add_test(NAME test_render_graph COMMAND test_render_graph)
+
 # Shared Windows builds place lumac.dll beside the top-level tests;
 # renderer tests live one directory deeper, so extend their DLL search
-# path explicitly (no-op for static builds).
+# path explicitly (no-op for static builds). Every renderer test
+# binary must be listed (audit fix: the Phase 23 tests were missing
+# and failed with STATUS_DLL_NOT_FOUND under shared builds).
 if(WIN32)
     set_tests_properties(test_renderer test_renderer_vulkan test_pbr
         test_pbr_vulkan test_shadow test_shadow_vulkan test_ibl
-        test_ibl_vulkan test_gpu_driven_vulkan PROPERTIES
+        test_ibl_vulkan test_gpu_driven_vulkan test_hiz_vulkan
+        test_occlusion_vulkan test_lod_vulkan test_mirror_vulkan
+        test_render_graph PROPERTIES
         ENVIRONMENT "PATH=$<TARGET_FILE_DIR:lumac>\;$ENV{PATH}")
 endif()

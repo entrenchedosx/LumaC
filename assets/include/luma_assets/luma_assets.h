@@ -193,6 +193,49 @@ la_result la_model_load(la_asset_manager *manager, const char *path,
  */
 void la_model_destroy(la_model *model);
 
+/* ------------------------------------------------------------------
+ * Ownership transfer (Phase 25 engine bridge): adopt renderer
+ * resources OUT of a model into caller ownership. The model
+ * releases the adopted slot (never double-destroys); the caller
+ * destroys the resource (or hands it to another owner, e.g. the
+ * engine asset registry). Textures/samplers stay manager-cached
+ * (borrowed by adopted materials — keep the manager alive while
+ * adopted materials live, same dependents-first rule).
+ * ------------------------------------------------------------------ */
+
+/** Adopt one mesh primitive's lr_mesh (model releases ownership;
+ *  *out_mesh borrowed-then-owned by the caller on success).
+ *
+ * @return LA_SUCCESS, LA_ERROR_INVALID_ARGUMENT (NULL args, dead
+ *         model, out-of-range indices, already-adopted slot),
+ *         LA_ERROR_NOT_FOUND (no mesh at that node/primitive).
+ */
+la_result la_model_adopt_mesh(la_model *model, uint32_t mesh_index,
+                              uint32_t primitive_index,
+                              lr_mesh **out_mesh);
+
+/** Adopt one material's lr_material (same contract). */
+la_result la_model_adopt_material(la_model *model,
+                                  uint32_t material_index,
+                                  lr_material **out_material);
+
+/** Borrow one primitive's mesh WITHOUT transfer (NULL for NULL
+ *  model, out-of-range, or adopted-away slots). Lifetime follows
+ *  the model. */
+lr_mesh *la_model_borrow_mesh(const la_model *model,
+                              uint32_t mesh_index,
+                              uint32_t primitive_index);
+
+/** Primitive count for one mesh slot (0 for NULL/out-of-range). */
+uint32_t la_model_get_primitive_count(const la_model *model,
+                                      uint32_t mesh_index);
+
+/** Material index for one primitive (UINT32_MAX when unassigned;
+ *  UINT32_MAX for NULL/out-of-range too). */
+uint32_t la_model_get_primitive_material(const la_model *model,
+                                         uint32_t mesh_index,
+                                         uint32_t primitive_index);
+
 /* Inspection (all NULL-safe; indices out of range behave as documented;
  * returned pointers borrow model/manager storage — see lifetimes). */
 uint32_t la_model_get_node_count(const la_model *model);

@@ -1167,14 +1167,11 @@ lc_result lc_vulkan_worker_execute(lc_command_encoder *primary,
         return res;
     }
     /* Single-shot burns only on a fully accepted batch. */
-    for (i = 0; i < list_count; i++) {
-        lists[i]->executed = 1;
-        lists[i]->completion_value = UINT64_MAX;
-    }
-    /* Compute-only batches execute directly (no render-pass
-     * reopen dance); mixing compute and graphics lists in one
-     * batch is rejected (deterministic ordering across domains
-     * is a later scheduler's job). */
+    /* Compute-only batches execute directly (no render-pass reopen
+     * dance); mixing compute and graphics lists in one batch is
+     * rejected (deterministic ordering across domains is a later
+     * scheduler's job). The mix check runs BEFORE burning single-shot
+     * state so a rejected mixed batch stays re-executable. */
     {
         int any_compute = 0;
         int any_graphics = 0;
@@ -1193,11 +1190,40 @@ lc_result lc_vulkan_worker_execute(lc_command_encoder *primary,
             free(cmds);
             return LC_ERROR_INVALID_ARGUMENT;
         }
+    }
+    for (i = 0; i < list_count; i++) {
+        lists[i]->executed = 1;
+        lists[i]->completion_value = UINT64_MAX;
+    }
+    /* Compute-only batches execute directly (no render-pass
+     * reopen dance). */
+    {
+        int any_compute = 0;
+        int any_graphics = 0;
+
+        for (i = 0; i < list_count; i++) {
+            if (lists[i]->is_compute) {
+                any_compute = 1;
+            } else {
+                any_graphics = 1;
+            }
+        }
         if (any_compute) {
             vkCmdExecuteCommands(primary_cmd, list_count, cmds);
             free(cmds);
             return LC_SUCCESS;
         }
+        (void)any_graphics;
+    }
+    /* Worker graphics lists target offscreen render targets only, so a
+     * swapchain primary can never match (rejected above). Guard anyway:
+     * ending the open pass below is unrecoverable if the reopen fails. */
+    if (primary->pass_is_swapchain || primary->pass_target_obj == NULL) {
+        fprintf(stderr,
+                "[lumac] execute conflict: worker graphics lists cannot "
+                "execute inside a swapchain pass\n");
+        free(cmds);
+        return LC_ERROR_INVALID_ARGUMENT;
     }
     /* Offscreen begin permits ordinary inline commands, so its first
      * render-pass instance uses INLINE contents. Vulkan requires a
@@ -1671,6 +1697,128 @@ lc_result lc_worker_record_draw_indexed_indirect(
         uint32_t i;
 
         for (i = 0; i < draw_count; i++) {
+            vkCmdDrawIndexedIndirect(
+                list->cmd, buffer->vk_buffer,
+                (VkDeviceSize)offset +
+                    (VkDeviceSize)i * (VkDeviceSize)stride,
+                1, stride);
+        }
+    }
+    return LC_SUCCESS;
+}
+
+/* Worker-list count draws record directly into the secondary
+ * (same native-or-fallback rule as the frame path). */
+static lc_result lc_worker_record_indirect_count_common(
+    lc_command_list *list, const lc_buffer *buffer, uint64_t offset,
+    const lc_buffer *count_buffer, uint64_t count_offset,
+    uint32_t max_draw_count, uint32_t stride, uint32_t elem_size) {
+    lc_result res;
+
+    res = lc_vk_indirect_batch_valid(buffer, offset, max_draw_count,
+                                     stride, elem_size);
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+    res = lc_vk_indirect_count_valid(count_buffer, count_offset,
+                                     max_draw_count);
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+    lc_device_lock_transfer(list->device);
+    if (buffer->buffer_state != LC_RESOURCE_STATE_INDIRECT_READ ||
+        count_buffer->buffer_state !=
+            LC_RESOURCE_STATE_INDIRECT_READ) {
+        lc_device_unlock_transfer(list->device);
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    res = lc_worker_log_ref(list, buffer);
+    if (res == LC_SUCCESS) {
+        res = lc_worker_log_ref(list, count_buffer);
+    }
+    lc_device_unlock_transfer(list->device);
+    return res;
+}
+
+lc_result lc_worker_record_draw_indirect_count(
+    lc_command_encoder *enc, const lc_buffer *buffer, uint64_t offset,
+    const lc_buffer *count_buffer, uint64_t count_offset,
+    uint32_t max_draw_count, uint32_t stride) {
+    lc_command_list *list = lc_worker_open(enc);
+    lc_result res;
+
+    if (list == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (list->is_compute) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (enc->bound_pipeline == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    res = lc_worker_record_indirect_count_common(
+        list, buffer, offset, count_buffer, count_offset,
+        max_draw_count, stride,
+        (uint32_t)sizeof(lc_indirect_draw_command));
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+    if (list->device->indirect_count_supported != 0) {
+        vkCmdDrawIndirectCount(list->cmd, buffer->vk_buffer,
+                               (VkDeviceSize)offset,
+                               count_buffer->vk_buffer,
+                               (VkDeviceSize)count_offset,
+                               max_draw_count, stride);
+        return LC_SUCCESS;
+    }
+    {
+        uint32_t i;
+
+        for (i = 0; i < max_draw_count; i++) {
+            vkCmdDrawIndirect(list->cmd, buffer->vk_buffer,
+                              (VkDeviceSize)offset +
+                                  (VkDeviceSize)i * (VkDeviceSize)stride,
+                              1, stride);
+        }
+    }
+    return LC_SUCCESS;
+}
+
+lc_result lc_worker_record_draw_indexed_indirect_count(
+    lc_command_encoder *enc, const lc_buffer *buffer, uint64_t offset,
+    const lc_buffer *count_buffer, uint64_t count_offset,
+    uint32_t max_draw_count, uint32_t stride) {
+    lc_command_list *list = lc_worker_open(enc);
+    lc_result res;
+
+    if (list == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (list->is_compute) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (enc->bound_pipeline == NULL || !enc->index_bound ||
+        enc->bound_index_buffer == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    res = lc_worker_record_indirect_count_common(
+        list, buffer, offset, count_buffer, count_offset,
+        max_draw_count, stride,
+        (uint32_t)sizeof(lc_indirect_draw_indexed_command));
+    if (res != LC_SUCCESS) {
+        return res;
+    }
+    if (list->device->indirect_count_supported != 0) {
+        vkCmdDrawIndexedIndirectCount(
+            list->cmd, buffer->vk_buffer, (VkDeviceSize)offset,
+            count_buffer->vk_buffer, (VkDeviceSize)count_offset,
+            max_draw_count, stride);
+        return LC_SUCCESS;
+    }
+    {
+        uint32_t i;
+
+        for (i = 0; i < max_draw_count; i++) {
             vkCmdDrawIndexedIndirect(
                 list->cmd, buffer->vk_buffer,
                 (VkDeviceSize)offset +

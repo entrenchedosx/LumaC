@@ -638,7 +638,8 @@ static unsigned char *draw_manual_indirect(gpu_env *env,
     sig.samples = LC_SAMPLE_COUNT_1;
     if (lr_renderer_instanced_pipeline_for(
             env->renderer, &sig, LR_MATERIAL_PBR_METALLIC_ROUGHNESS,
-            LC_CULL_BACK, &pipe) != LR_SUCCESS) {
+            LC_CULL_BACK, LC_FRONT_FACE_COUNTER_CLOCKWISE,
+            &pipe) != LR_SUCCESS) {
         lc_binding_set_destroy(iset);
         lc_buffer_destroy(vis);
         lc_buffer_destroy(inst);
@@ -1052,7 +1053,10 @@ int main(void) {
         CHECK(stats.instances_visible == oracle,
               "GPU visible == CPU oracle");
         /* Full SET comparison (sorted GPU indices vs oracle flags):
-         * proves compaction content, not just the count. */
+         * proves compaction content, not just the count. Aggregates
+         * across ALL groups: winding parity splits mirrored items
+         * into their own group (CW front-face variant), so a
+         * single-group read would miss them. */
         {
             lr_renderer *rr = env.renderer;
             uint32_t got[512];
@@ -1060,23 +1064,81 @@ int main(void) {
             uint32_t ngot = 0;
             uint32_t nwant = 0;
             uint32_t a;
+            uint32_t g;
             int same = 1;
 
             memset(got, 0, sizeof(got));
             memset(want, 0, sizeof(want));
-            if (rr->group_count > 0 &&
-                rr->gpu_last_flight <
-                    rr->groups[0].flights_owned &&
-                rr->groups[0].flights[rr->gpu_last_flight].initialized &&
-                rr->groups[0].flights[rr->gpu_last_flight].visible !=
-                    NULL) {
-                lc_buffer *vis =
-                    rr->groups[0].flights[rr->gpu_last_flight].visible;
+            for (g = 0; g < rr->group_count; g++) {
+                uint32_t words[2] = { 0, 0 };
+                uint32_t cnt = 0;
 
-                if (lc_buffer_read(vis, 0, got, n * sizeof(uint32_t)) ==
-                    LC_SUCCESS) {
-                    ngot = (uint32_t)stats.instances_visible;
+                if (rr->groups[g].count == 0 ||
+                    rr->gpu_last_flight >=
+                        rr->groups[g].flights_owned ||
+                    !rr->groups[g]
+                         .flights[rr->gpu_last_flight]
+                         .initialized ||
+                    rr->groups[g]
+                            .flights[rr->gpu_last_flight]
+                            .visible == NULL ||
+                    rr->groups[g]
+                            .flights[rr->gpu_last_flight]
+                            .counter == NULL) {
+                    continue;
                 }
+                if (lc_buffer_read(
+                        rr->groups[g]
+                            .flights[rr->gpu_last_flight]
+                            .counter,
+                        0, words, sizeof(words)) != LC_SUCCESS) {
+                    same = 0;
+                    break;
+                }
+                cnt = words[0];
+                if (cnt > rr->groups[g].capacity) {
+                    cnt = rr->groups[g].capacity;
+                }
+                if (ngot + cnt > 512u) {
+                    same = 0;
+                    break;
+                }
+                if (cnt > 0 &&
+                    lc_buffer_read(
+                        rr->groups[g]
+                            .flights[rr->gpu_last_flight]
+                            .visible,
+                        0, &got[ngot],
+                        cnt * sizeof(uint32_t)) != LC_SUCCESS) {
+                    same = 0;
+                    break;
+                }
+                /* Visible entries are group-local compaction slots
+                 * (the vertex shader indexes instances[] with them);
+                 * translate to submission objectIds via the group's
+                 * CPU mirror before comparing with the oracle. */
+                {
+                    uint32_t s;
+
+                    for (s = 0; s < cnt; s++) {
+                        uint32_t slot = got[ngot + s];
+
+                        if (slot >= rr->groups[g].count ||
+                            rr->groups[g].cpu == NULL) {
+                            same = 0;
+                            break;
+                        }
+                        got[ngot + s] =
+                            rr->groups[g].cpu[slot].object_id;
+                    }
+                    if (!same) {
+                        break;
+                    }
+                }
+                ngot += cnt;
+            }
+            if (ngot != (uint32_t)stats.instances_visible) {
+                same = 0;
             }
             for (a = 0; a < n; a++) {
                 if (env.oracle_want[a]) {
@@ -1114,9 +1176,11 @@ int main(void) {
         CHECK(stats.instances_visible + stats.instances_culled == n,
               "visible + culled == total");
         CHECK(stats.instances_visible <= n, "visible bounded");
-        CHECK(stats.compute_dispatches == 2, "one cull+finalize pair");
-        CHECK(stats.indirect_draw_calls == 1, "one indirect draw");
-        CHECK(stats.gpu_driven_batches == 1, "one batch");
+        /* Two parity groups (regular + the one mirrored cube):
+         * one cull+finalize pair and one indirect draw each. */
+        CHECK(stats.compute_dispatches == 4, "two cull+finalize pairs");
+        CHECK(stats.indirect_draw_calls == 2, "two indirect draws");
+        CHECK(stats.gpu_driven_batches == 2, "two batches");
         CHECK(stats.counter_overflows == 0, "no overflow");
     }
 
@@ -1341,10 +1405,10 @@ int main(void) {
 
                     lr_renderer_get_gpu_driven_stats(env.renderer,
                                                      &s2);
-                    CHECK(s2.gpu_driven_batches == 1,
-                          "scene path prepares one batch");
-                    CHECK(s2.compute_dispatches == 2,
-                          "scene path two dispatches");
+                    CHECK(s2.gpu_driven_batches == 2,
+                          "scene path prepares two batches");
+                    CHECK(s2.compute_dispatches == 4,
+                          "scene path four dispatches");
                 } else {
                     CHECK(0, "render_scene gpu succeeds");
                 }
