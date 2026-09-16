@@ -17,6 +17,14 @@ SET_CAMERA / SET_LIGHT / SET_RIGID_BODY / SET_COLLIDER /
 SET_SCRIPT_PROPERTY (le_script_property before/after pair)
 ```
 
+Phase 32 appends three kinds (values stable, never reordered):
+
+```
+INSTANTIATE_PREFAB (led_prefab_command: prefab asset + project UUID)
+CREATE_PREFAB (filesystem op — undo/redo are no-ops by design)
+ASSIGN_ASSET (typed material/script assignment + before-image)
+```
+
 Payload: `{kind, label, target, parent?, mode?, name?, enabled?,
 vec?, component?, comp_bytes[512]+size?, script_prop?}`. Component
 bytes are full `le_*_desc` snapshots (size-validated per kind).
@@ -40,6 +48,19 @@ bytes are full `le_*_desc` snapshots (size-validated per kind).
   scalar `SET_*` kinds without a before-image remove on undo.
 - **Script property**: type must match the export declaration
   (checked by the engine); unknown names fail.
+- **INSTANTIATE_PREFAB**: undo destroys the whole instance (root
+  cascade), redo re-instantiates. Instance roots resolve by
+  census-diff (before/after newcomer with no parent) — never tail
+  rules: slot recycling puts pre-existing roots at higher slots,
+  and the old tail rule once destroyed the WRONG subtree
+  (regression covered: source object survives undo/redo).
+- **CREATE_PREFAB**: filesystem ops are NOT scene-undo
+  (documented split) — undo/redo are no-op successes; explicit
+  project-delete removes the file. Rejected while playing.
+- **ASSIGN_ASSET**: MATERIAL retargets an asset renderable's
+  material (needs one; type-checked); SCRIPT attaches/replaces
+  the script component. Before-images restore mesh+material IDs
+  / presence+handle. Rejected while playing.
 
 ## Coalescing
 

@@ -1,5 +1,20 @@
 # LumaC
 
+Phase 32 turns engine + scenes + editor core into a **Luma
+Project**: portable project roots (`luma.project` manifest),
+sidecar-based asset database (stable UUIDs across
+rename/move/reimport), importer registry over existing runtime
+pipelines (glTF/Lua/scene/prefab/texture), transactional
+reimport (failed source keeps last-known-good live), headless
+asset browser (folders/view/filter/search/selection-by-UUID/drag
+payloads), and prefab foundation (`.luprefab` create/load/
+instantiate through the scene parser + commit path, undoable
+instantiate/assign commands, play isolation). One engine
+addition: `LE_ASSET_PREFAB`. All headless-proven (7 new suites).
+See `docs/PROJECT_ARCHITECTURE.md`, `docs/ASSET_DATABASE.md`,
+`docs/ASSET_IMPORT_PIPELINE.md`, `docs/ASSET_REIMPORT.md`,
+`docs/PREFAB_ARCHITECTURE.md`, `docs/PROJECT_PATHS.md`.
+
 Phase 31 adds the Godot-like editor foundation on top of the engine:
 headless `EditorCore` (session, selection, undoable commands with
 bounded history + coalescing, dirty tracking, scene new/open/save/

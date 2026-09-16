@@ -1,5 +1,57 @@
 # Changelog
 
+## Phase 32
+
+- Added the Luma Project system (`editor/src/project/`, same
+  `luma_editor` lib): portable roots (`luma.project` manifest,
+  lexical normalize + escape-rejecting resolve, no CWD
+  dependence), sidecar asset database (`<source>.luma`: stable
+  project UUIDs across rename/move/reimport/close-reopen, UUID +
+  path hash indexes, deterministic path-sorted enumeration,
+  case-insensitive search, duplicate-UUID conflict marking,
+  corrupt-sidecar isolation, explicit incremental scan with
+  STALE/MISSING/restored states), importer registry
+  (`luma.gltf/lua/scene/prefab/texture` over existing runtime
+  pipelines; unknown extensions ignored; name-keyed glTF
+  sub-asset tables with full-table publish on reimport),
+  transactional candidate-then-swap reimport (script
+  handle-preserving path + generic new-handle path; broken
+  source keeps last-known-good live), headless browser model
+  (folder tree, filter/search/sort, selection by UUID, drag
+  payloads, drops through undoable commands), project
+  rename/move/delete (UUID-preserving moves with sidecar
+  rewrite; ref-checked delete with DB-edge + hex text scan, no
+  force-delete), prefab foundation (`.luprefab` reusing the
+  scene vocabulary + scene parser + scene commit path; three
+  identity levels; editor-side instance tracking; three new
+  undoable command kinds with census-diff instance roots and
+  conservative play rejection). One engine addition:
+  `LE_ASSET_PREFAB` + `le_asset_create_prefab`/
+  `le_asset_get_prefab_text` (opaque payload ownership).
+- Fixed along the way: scan sweep-bit clearing fresh/restored
+  records to MISSING; rename leaving a stale sidecar `source`
+  line; prefab payloads written in text mode (CRLF drift —
+  binary now, loads tolerate CR); tail-rule instance-root
+  resolution destroying the wrong subtree (census-diff).
+- Tests (7 new suites, all headless): `test_prefab_smoke` (39),
+  `test_project` (43: paths/portability/identity/switch),
+  `test_import` (60: import/reimport-txn/browser/delete
+  ref-check), `test_assetdb` (35: determinism/conflicts/
+  isolation), `test_project_editor` (40: drops/assign/play/E2E),
+  `test_gltf_identity` (21, Vulkan-gated: stable identical
+  reimport + sidecar round-trip), `test_prefab` (51:
+  determinism/isolation/8-malformed/1k-stress/registry-vs-
+  project identity).
+- Docs: `docs/{PROJECT_ARCHITECTURE,ASSET_DATABASE,
+  ASSET_IMPORT_PIPELINE,ASSET_REIMPORT,PREFAB_ARCHITECTURE,
+  PROJECT_PATHS,PHASE32_DESIGN}.md`; updated
+  `EDITOR_COMMANDS.md`, `README.md`, `CHANGELOG.md`.
+- Deferred (tracked, not hidden): engine material-ID
+  reorder-fragility (factor-hash debt); texture GPU upload
+  laziness; double-instantiate capture namespace; nested
+  prefabs; prefab overrides; 100k-record stress timings;
+  force-delete.
+
 ## Phase 31
 
 - Added Luma Editor foundation (`editor/`, `led_*`, static C11
