@@ -307,12 +307,26 @@ le_result le_object_add_collider(le_world *world,
         return code;
     }
     if (desc->shape != LE_COLLIDER_SPHERE &&
-        desc->shape != LE_COLLIDER_BOX) {
+        desc->shape != LE_COLLIDER_BOX &&
+        desc->shape != LE_COLLIDER_CAPSULE) {
         return LE_ERROR_INVALID_ARGUMENT;
     }
     if (desc->shape == LE_COLLIDER_SPHERE) {
         if (!isfinite(desc->radius) || desc->radius <= 0.0f ||
             desc->radius > 1e6f) {
+            return LE_ERROR_INVALID_ARGUMENT;
+        }
+    } else if (desc->shape == LE_COLLIDER_CAPSULE) {
+        /* Capsule: radius > 0, half cylinder length >= 0
+         * (0 = sphere). Both finite and bounded. */
+        if (!isfinite(desc->capsule_radius) ||
+            desc->capsule_radius <= 0.0f ||
+            desc->capsule_radius > 1e6f) {
+            return LE_ERROR_INVALID_ARGUMENT;
+        }
+        if (!isfinite(desc->capsule_half_height) ||
+            desc->capsule_half_height < 0.0f ||
+            desc->capsule_half_height > 1e6f) {
             return LE_ERROR_INVALID_ARGUMENT;
         }
     } else {
@@ -355,6 +369,8 @@ le_result le_object_add_collider(le_world *world,
             e = &pw->colliders[(uint32_t)existing];
             e->shape = desc->shape;
             e->radius = desc->radius;
+            e->capsule_radius = desc->capsule_radius;
+            e->capsule_half = desc->capsule_half_height;
             memcpy(e->half_extents, desc->half_extents,
                    sizeof(e->half_extents));
             memcpy(e->offset, desc->offset, sizeof(e->offset));
@@ -388,6 +404,8 @@ le_result le_object_add_collider(le_world *world,
     e->slot = slot;
     e->shape = desc->shape;
     e->radius = desc->radius;
+    e->capsule_radius = desc->capsule_radius;
+    e->capsule_half = desc->capsule_half_height;
     memcpy(e->half_extents, desc->half_extents,
            sizeof(e->half_extents));
     memcpy(e->offset, desc->offset, sizeof(e->offset));
@@ -474,6 +492,8 @@ int le_object_get_collider(const le_world *world,
 
         out_desc->shape = e->shape;
         out_desc->radius = e->radius;
+        out_desc->capsule_radius = e->capsule_radius;
+        out_desc->capsule_half_height = e->capsule_half;
         memcpy(out_desc->half_extents, e->half_extents,
                sizeof(out_desc->half_extents));
         memcpy(out_desc->offset, e->offset,

@@ -1105,9 +1105,10 @@ int main(void) {
         le_engine_destroy(engine);
     }
 
-    /* Component count contract extended (8 incl. physics +
-     * Phase 29 animator; earlier values unchanged). */
-    TEST_CHECK(LE_COMPONENT_COUNT == 8, "component count is 8");
+    /* Component count contract extended (9 incl. physics +
+     * Phase 29 animator + Phase 30 character; earlier values
+     * unchanged). */
+    TEST_CHECK(LE_COMPONENT_COUNT == 9, "component count is 9");
 
     printf("Phase 28 tests: %d passed, %d failed\n", g_passed,
            g_failed);

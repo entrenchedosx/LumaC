@@ -119,6 +119,9 @@ add_library(luma_engine STATIC
     src/physics/events.c
     src/physics/query.c
     src/physics/scene_physics.c
+    src/physics/cast.c
+    src/physics/ccd.c
+    src/physics/character.c
     src/animation/anim_asset.c
     src/animation/anim_sample.c
     src/animation/anim_pose.c
@@ -130,6 +133,7 @@ add_library(luma_engine STATIC
     src/animation/anim_serialize.c
     src/gltf_bridge_anim.c
     src/script/script_bind_anim.c
+    src/script/script_bind_character.c
     src/script/script_bind_physics.c
     src/script/script_runtime.c
     src/script/script_lua.c
@@ -338,6 +342,70 @@ if(UNIX AND NOT APPLE)
 endif()
 add_test(NAME test_physics_bench COMMAND test_physics_bench)
 
+# Phase 30: capsule collider tests (headless).
+add_executable(test_capsule tests/test_capsule.c)
+target_link_libraries(test_capsule PRIVATE luma_engine)
+target_include_directories(test_capsule PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_capsule PRIVATE m)
+endif()
+add_test(NAME test_capsule COMMAND test_capsule)
+
+# Phase 30: shape-cast / sweep tests (headless).
+add_executable(test_cast tests/test_cast.c)
+target_link_libraries(test_cast PRIVATE luma_engine)
+target_include_directories(test_cast PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_cast PRIVATE m)
+endif()
+add_test(NAME test_cast COMMAND test_cast)
+
+# Phase 30: CCD foundation tests (headless).
+add_executable(test_ccd tests/test_ccd.c)
+target_link_libraries(test_ccd PRIVATE luma_engine)
+target_include_directories(test_ccd PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_ccd PRIVATE m)
+endif()
+add_test(NAME test_ccd COMMAND test_ccd)
+
+# Phase 30: character controller tests (headless).
+add_executable(test_character tests/test_character.c)
+target_link_libraries(test_character PRIVATE luma_engine)
+target_include_directories(test_character PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_character PRIVATE m)
+endif()
+add_test(NAME test_character COMMAND test_character)
+
+# Phase 30: character platform/trigger/push tests (headless).
+add_executable(test_character_platform
+    tests/test_character_platform.c)
+target_link_libraries(test_character_platform PRIVATE luma_engine)
+target_include_directories(test_character_platform PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_character_platform PRIVATE m)
+endif()
+add_test(NAME test_character_platform
+    COMMAND test_character_platform)
+
+# Phase 30: Lua character gameplay tests (headless).
+add_executable(test_character_script
+    tests/test_character_script.c)
+target_link_libraries(test_character_script PRIVATE luma_engine)
+target_include_directories(test_character_script PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_character_script PRIVATE m)
+endif()
+add_test(NAME test_character_script
+    COMMAND test_character_script)
+
 # Phase 29: headless animation & skinning foundation tests.
 add_executable(test_animation tests/test_animation.c)
 target_link_libraries(test_animation PRIVATE luma_engine)
@@ -381,6 +449,6 @@ add_test(NAME test_animation_vulkan COMMAND test_animation_vulkan)
 # engine tests live one directory deeper, so extend their DLL search
 # path explicitly (no-op for static builds).
 if(WIN32)
-    set_tests_properties(test_engine test_engine_stress test_engine_vulkan test_scene test_scene_vulkan test_script test_script_vulkan test_input test_input_script test_input_vulkan test_input_bench test_physics test_physics_script test_physics_vulkan test_physics_bench test_animation test_animation_script test_animation_vulkan PROPERTIES
+    set_tests_properties(test_engine test_engine_stress test_engine_vulkan test_scene test_scene_vulkan test_script test_script_vulkan test_input test_input_script test_input_vulkan test_input_bench test_physics test_physics_script test_physics_vulkan test_physics_bench test_animation test_animation_script test_animation_vulkan test_capsule test_cast test_ccd test_character test_character_platform test_character_script PROPERTIES
         ENVIRONMENT "PATH=$<TARGET_FILE_DIR:lumac>\;$ENV{PATH}")
 endif()

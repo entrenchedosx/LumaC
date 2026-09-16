@@ -110,6 +110,12 @@ Convenience and test spellings:
   most 0.25 s of animation — settle long fades with several
   small steps (or drive `le_world_update` directly, which is
   unclamped).
+- Phase 30: characters move OUTSIDE the fixed physics pass —
+  `le_character_move`/`le_character_gravity` run from gameplay
+  code (typically `fixed_update`, before or after the physics
+  sub-step; sweeps observe step-fresh poses either way). CCD
+  bodies sweep INSIDE the physics sub-step (phase 3 replaces
+  blind integration for CONTINUOUS spheres/capsules).
 
 ## Legacy update contract
 

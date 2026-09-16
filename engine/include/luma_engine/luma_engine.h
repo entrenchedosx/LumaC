@@ -533,7 +533,10 @@ typedef enum le_component_type {
     /* Phase 29: animator component (appended; earlier values
      * unchanged). */
     LE_COMPONENT_ANIMATOR = 7,
-    LE_COMPONENT_COUNT = 8
+    /* Phase 30: character controller (appended; earlier values
+     * unchanged). */
+    LE_COMPONENT_CHARACTER_CONTROLLER = 8,
+    LE_COMPONENT_COUNT = 9
 } le_component_type;
 
 /** Nonzero when the object carries the component (transform is
@@ -1493,10 +1496,12 @@ typedef enum le_body_type {
     LE_BODY_KINEMATIC = 2 /* script/app-driven, pushes dynamics */
 } le_body_type;
 
-/** Collider shape (stable ABI; capsule DEFERRED in Phase 28). */
+/** Collider shape (stable ABI; capsule added in Phase 30,
+ *  appended — earlier values unchanged). */
 typedef enum le_collider_shape {
     LE_COLLIDER_SPHERE = 0,
-    LE_COLLIDER_BOX = 1
+    LE_COLLIDER_BOX = 1,
+    LE_COLLIDER_CAPSULE = 2
 } le_collider_shape;
 
 typedef struct le_scene_object {
@@ -1538,6 +1543,8 @@ typedef struct le_scene_object {
     le_collider_shape collider_shape;
     float collider_radius;
     float collider_half_extents[3];
+    float collider_capsule_radius;
+    float collider_capsule_half;
     float collider_offset[3];
     float collider_orientation[4];
     int collider_is_trigger;
@@ -1558,6 +1565,21 @@ typedef struct le_scene_object {
                         * is declared later in this header) */
     float animator_speed;
     float animator_start_time;
+    /* Phase 30: character controller (authoring config only;
+     * never runtime ground cache / velocities). */
+    int has_character;
+    float character_radius;
+    float character_height;
+    float character_up[3];
+    float character_skin_width;
+    float character_slope_angle;
+    float character_step_height;
+    float character_gravity;
+    float character_terminal_velocity;
+    float character_snap_distance;
+    float character_push_strength;
+    uint32_t character_layer;
+    uint32_t character_mask;
 } le_scene_object;
 
 /** Create an empty scene payload owned by the engine (also
@@ -2177,10 +2199,155 @@ LE_API int le_engine_is_minimized(le_engine *engine);
 LE_API le_result le_world_set_paused(le_world *world, int paused);
 LE_API int le_world_is_paused(const le_world *world);
 
-/** Per-world pause (independent of global time scale; editor can
- *  hold the game world while its own world runs). */
-LE_API le_result le_world_set_paused(le_world *world, int paused);
-LE_API int le_world_is_paused(const le_world *world);
+/* ------------------------------------------------------------------
+ * Character controller (Phase 30): dedicated kinematic capsule
+ * movement primitive (NOT a dynamic rigid body — no friction
+ * tuning, no unwanted rotation, stable slopes/stairs/platforms).
+ *
+ * Pipeline per move: initial overlap recovery -> platform ride
+ * -> capsule sweep -> move to contact -> slide (bounded) ->
+ * step attempt -> ground probe/snap -> final state.
+ * Fixed-step ordering: gameplay calls le_character_move from
+ * fixed_update scripts (forces/impulses first, then physics
+ * integrates dynamics). No controller clock exists.
+ *
+ * CharacterController != RigidBody: the controller owns a
+ * kinematic capsule sweep over the physics world and writes the
+ * engine transform; dynamic bodies are blockers it can push
+ * (bounded impulse) and that can depenetrate it. Characters
+ * must be world roots (same rule as dynamic bodies).
+ * ------------------------------------------------------------------ */
+
+/** Character controller configuration (authoring state;
+ *  zero-init, then fill). radius > 0; height >= 2*radius
+ *  (total height INCLUDING caps); up = unit world-up preference
+ *  (default {0,1,0}; stored per controller for future gravity
+ *  directions); skin_width = contact separation margin;
+ *  max_slope_angle = walkable limit in RADIANS [0, PI/2);
+ *  step_height >= 0; gravity >= 0 (fall accel along -up);
+ *  terminal_velocity >= 0 (fall speed cap); snap_distance >= 0
+ *  (ground adhesion when descending); push_strength >= 0
+ *  (impulse scale for shoving dynamics, 0 = block only). */
+typedef struct le_character_desc {
+    float radius;
+    float height;
+    float up[3];
+    float skin_width;
+    float max_slope_angle;
+    float step_height;
+    float gravity;
+    float terminal_velocity;
+    float snap_distance;
+    float push_strength;
+    uint32_t layer;
+    uint32_t mask;
+} le_character_desc;
+
+/** One character move result (plain values; generation-safe). */
+typedef struct le_character_move_result {
+    float requested[3];
+    float actual[3];
+    int grounded;
+    float ground_normal[3];
+    le_object ground_object; /* INVALID when airborne */
+    int hit_wall;
+    int hit_ceiling;
+    int stepped;
+    int snapped;
+    int unresolved_penetration;
+    uint32_t collision_count;
+} le_character_move_result;
+
+/** Attach (or replace) a character controller. The object must
+ *  be a world root (parented rejected INVALID_HIERARCHY) and
+ *  must not carry a DYNAMIC body (kinematic controller vs
+ *  dynamic integration would fight; static/kinematic bodies are
+ *  allowed but unnecessary).
+ *
+ * @return LE_SUCCESS, LE_ERROR_INVALID_ARGUMENT (NULL args, bad
+ *         radius/height/up/margin/slope/step/gravity/snap/
+ *         layer), LE_ERROR_WRONG_WORLD, LE_ERROR_STALE_HANDLE,
+ *         LE_ERROR_INVALID_HIERARCHY, LE_ERROR_OUT_OF_MEMORY.
+ */
+LE_API le_result le_object_add_character(
+    le_world *world, const le_object *object,
+    const le_character_desc *desc);
+/** Remove a controller (missing = success/no-op). */
+LE_API le_result le_object_remove_character(
+    le_world *world, const le_object *object);
+/** Copy out controller config (zeros for NULL/stale/missing).
+ *  Returns 1 when present, 0 otherwise. */
+LE_API int le_object_get_character(const le_world *world,
+                                   const le_object *object,
+                                   le_character_desc *out_desc);
+
+/** Move by a desired world-space displacement (sweep + slide +
+ *  step + snap). Deterministic for the same world + displacement
+ *  sequence. out_result may be NULL.
+ *
+ * @return LE_SUCCESS, LE_ERROR_INVALID_ARGUMENT (NULL
+ *         args/NaN displacement/disabled/missing controller),
+ *         LE_ERROR_WRONG_WORLD, LE_ERROR_STALE_HANDLE.
+ */
+LE_API le_result le_character_move(
+    le_world *world, const le_object *object,
+    const float displacement[3],
+    le_character_move_result *out_result);
+
+/** Gravity tick: integrates fall velocity along -up by
+ *  gravity*dt (clamped to terminal) and moves down. Call once
+ *  per fixed step from gameplay. Snap keeps adhesion while
+ *  descending; upward motion disables snap (no jump cancel). */
+LE_API le_result le_character_gravity(le_world *world,
+                                      const le_object *object,
+                                      float dt);
+
+/** Queries (safe value data; zeros/false for NULL/stale). */
+LE_API int le_character_is_grounded(const le_world *world,
+                                    const le_object *object);
+LE_API void le_character_ground_normal(
+    const le_world *world, const le_object *object,
+    float out_normal[3]);
+LE_API le_object le_character_ground_object(
+    const le_world *world, const le_object *object);
+LE_API void le_character_get_velocity(
+    const le_world *world, const le_object *object,
+    float out_velocity[3]);
+LE_API float le_character_horizontal_speed(
+    const le_world *world, const le_object *object);
+
+/** Vertical velocity along +up (positive = rising, e.g. jump
+ *  speed). Set clamps to [-terminal, +terminal*4] finite. */
+LE_API le_result le_character_set_vertical_velocity(
+    le_world *world, const le_object *object, float v);
+LE_API float le_character_get_vertical_velocity(
+    const le_world *world, const le_object *object);
+
+/** Teleport: set local transform, reset fall velocity to 0,
+ *  invalidate ground cache; recovery runs on the next move. */
+LE_API le_result le_character_teleport(
+    le_world *world, const le_object *object,
+    const float position[3]);
+
+/** Enable/disable: disabled controllers do not move, query, or
+ *  accumulate gravity (move returns INVALID_ARGUMENT; grounded
+ *  reports false until re-enabled and moved). */
+LE_API le_result le_character_set_enabled(le_world *world,
+                                          const le_object *object,
+                                          int enabled);
+LE_API int le_character_is_enabled(const le_world *world,
+                                   const le_object *object);
+
+/** Inspection stats (zeros for NULL; out may be NULL). */
+typedef struct le_character_stats {
+    uint32_t controller_count;
+    uint32_t grounded_count;
+    uint32_t platform_attachments;
+    uint32_t unresolved_penetrations;
+} le_character_stats;
+
+LE_API void le_character_get_stats(const le_world *world,
+                                   le_character_stats *out);
 
 /* ------------------------------------------------------------------
  * Physics & collision foundation (Phase 28): engine-owned
@@ -2239,9 +2406,16 @@ typedef struct le_rigid_body_desc {
 typedef struct le_collider_desc {
     le_collider_shape shape;
     /* Sphere: radius (> 0 finite). Box: half extents (> 0 finite
-     * each axis). Only the shape-selected field is read. */
+     * each axis). Capsule: capsule_radius (> 0 finite) +
+     * capsule_half_height (>= 0 finite: HALF the cylindrical
+     * segment length, i.e. half the distance between the two
+     * hemisphere centers; total capsule height =
+     * 2 * (capsule_half_height + capsule_radius); 0 = sphere).
+     * Only the shape-selected field(s) are read. */
     float radius;
     float half_extents[3];
+    float capsule_radius;
+    float capsule_half_height;
     /* Local frame of the shape relative to the object origin. */
     float offset[3];
     float orientation[4]; /* quat (x,y,z,w); normalized on store */
@@ -2274,7 +2448,8 @@ LE_API int le_object_get_rigid_body(const le_world *world,
                                     const le_object *object,
                                     le_rigid_body_desc *out_desc);
 
-/** Attach (or replace) a collider (sphere or box). Static and
+/** Attach (or replace) a collider (sphere, box, or capsule —
+ *  Phase 30). Static and
  *  kinematic colliders may parent freely; dynamic colliders ride
  *  their root body (see parenting rule above).
  *
@@ -2425,6 +2600,109 @@ LE_API uint32_t le_physics_overlap_box(
     float hy, float hz, uint32_t layer_mask, int hit_triggers,
     le_object *out, uint32_t cap);
 
+/* ---- shape casts / sweeps (Phase 30) ----
+ * A sweep answers: how far may this shape move along a
+ * displacement before first touching blocking geometry?
+ * fraction in [0,1]: 0 = immediate hit at start, 1 = full
+ * movement is free. Zero displacement is a defined overlap
+ * query at the start pose (hit iff penetrating; fraction 0).
+ * Initial overlap never pretends to be collision-free:
+ * started_overlapping = 1 with fraction 0 and a depenetration
+ * normal/depth. Swept AABB = union(start,end) + margin drives
+ * the broad phase; ties break by stable (slot, generation)
+ * identity, never traversal order. Triggers never block:
+ * hit_triggers selects report-only (1) vs ignore (0). */
+
+/** Cast shape selector (stable ABI). */
+typedef enum le_cast_shape {
+    LE_CAST_SPHERE = 0,
+    LE_CAST_CAPSULE = 1,
+    LE_CAST_BOX = 2
+} le_cast_shape;
+
+/** One shape-cast hit (plain values; generation-safe). */
+typedef struct le_shape_hit {
+    le_object object;      /* generation-safe hit object */
+    float fraction;        /* [0,1] along displacement */
+    float distance;        /* fraction * |displacement| */
+    float point[3];        /* world contact point */
+    float normal[3];       /* against motion (from hit to cast) */
+    int started_overlapping;
+    float penetration;     /* depenetration depth (overlap only) */
+} le_shape_hit;
+
+/** Generic typed shape cast. Center = world-space shape origin
+ *  at sweep start; orientation = unit quat (box/capsule axis;
+ *  ignored for spheres). Sphere: radius. Capsule:
+ *  capsule_radius + capsule_half (half cylinder length, same
+ *  convention as colliders). Box: half extents (axis-aligned in
+ *  the orientation frame). Displacement = full requested motion
+ *  vector (length may be 0 = overlap query). layer_mask selects
+ *  collider layers; exclude_slot skips one object slot
+ *  (use 0xFFFFFFFFu for none) — typically the caster itself.
+ *
+ * @return 1 on blocking hit (out_hit filled; may be NULL for a
+ *         boolean query), 0 when the full movement is free.
+ *         Trigger overlaps never block; with hit_triggers != 0
+ *         they are reported through out_trigger (single nearest;
+ *         may be NULL), without affecting the blocking result.
+ */
+LE_API int le_physics_shape_cast(
+    le_world *world, le_cast_shape shape, const float center[3],
+    const float orientation[4], const float dims[3],
+    const float displacement[3], uint32_t layer_mask,
+    int hit_triggers, uint32_t exclude_slot,
+    le_shape_hit *out_hit, le_shape_hit *out_trigger);
+
+/** Sphere cast (center + radius swept along displacement). */
+LE_API int le_physics_sphere_cast(
+    le_world *world, const float center[3], float radius,
+    const float displacement[3], uint32_t layer_mask,
+    int hit_triggers, uint32_t exclude_slot,
+    le_shape_hit *out_hit);
+/** Capsule cast (segment center + orientation + radius/half). */
+LE_API int le_physics_capsule_cast(
+    le_world *world, const float center[3],
+    const float orientation[4], float radius, float half_height,
+    const float displacement[3], uint32_t layer_mask,
+    int hit_triggers, uint32_t exclude_slot,
+    le_shape_hit *out_hit);
+/** Box cast (center + orientation + half extents). */
+LE_API int le_physics_box_cast(
+    le_world *world, const float center[3],
+    const float orientation[4], const float half_extents[3],
+    const float displacement[3], uint32_t layer_mask,
+    int hit_triggers, uint32_t exclude_slot,
+    le_shape_hit *out_hit);
+
+/* ---- continuous collision (Phase 30) ----
+ * CONTINUOUS bodies sweep their shape along v*dt each fixed
+ * sub-step vs static/kinematic geometry (dynamic-vs-dynamic is
+ * deferred, documented). Default remains DISCRETE (Phase 28
+ * behavior, unchanged). TOI in [0,dt]; advance to contact minus
+ * LE_CCD_MARGIN; bounded LE_CCD_MAX_ITERS impacts per step. */
+
+/** Body collision mode (stable ABI; appended default first). */
+typedef enum le_collision_mode {
+    LE_COLLISION_DISCRETE = 0,
+    LE_COLLISION_CONTINUOUS = 1
+} le_collision_mode;
+
+/** Contact margin for CCD (meters): bodies stop this far short
+ *  of first contact so floating-point re-hits at t=0 cannot
+ *  loop. */
+#define LE_CCD_MARGIN ((float)0.001)
+/** Maximum CCD impacts resolved per body per fixed step. */
+#define LE_CCD_MAX_ITERS ((uint32_t)4)
+
+/** Set/get a body's collision mode (missing body = INVALID for
+ *  set; get returns LE_COLLISION_DISCRETE for missing). */
+LE_API le_result le_physics_set_collision_mode(
+    le_world *world, const le_object *object,
+    le_collision_mode mode);
+LE_API le_collision_mode le_physics_get_collision_mode(
+    const le_world *world, const le_object *object);
+
 /* ---- debug extraction (plain data for future editor views;
  * no renderer involved) ---- */
 
@@ -2433,6 +2711,9 @@ typedef struct le_physics_debug_counts {
     uint32_t spheres;  /* 3 rings each */
     uint32_t contacts; /* 1 segment each */
     uint32_t aabbs;    /* 12 edges each */
+    /* Phase 30: capsule wireframes (2 rings + 4 rails = 20
+     * segments each; appended, earlier fields unchanged). */
+    uint32_t capsules;
 } le_physics_debug_counts;
 
 LE_API void le_physics_get_debug_counts(const le_world *world,
@@ -2457,6 +2738,17 @@ typedef struct le_physics_stats {
     uint32_t position_iterations;
     uint64_t ray_queries;
     uint64_t events_dropped;
+    /* Phase 30: shape-cast / CCD / character counters
+     * (appended; earlier fields unchanged). */
+    uint64_t shape_casts;
+    uint64_t cast_candidates;
+    uint64_t ccd_casts;
+    uint64_t ccd_impacts;
+    uint64_t character_sweeps;
+    uint64_t character_slides;
+    uint64_t depenetrations;
+    uint64_t ground_probes;
+    uint64_t step_attempts;
 } le_physics_stats;
 
 LE_API void le_physics_get_stats(le_world *world,

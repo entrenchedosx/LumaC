@@ -38,6 +38,7 @@ static void le_slot_init_live(le_object_slot *slot, uint32_t generation) {
     slot->body_index = LE_NO_LINK;
     slot->collider_index = LE_NO_LINK;
     slot->animator_index = LE_NO_LINK;
+    slot->character_index = LE_NO_LINK;
 }
 
 le_result le_object_create(le_world *world, le_object *out_object) {
@@ -188,6 +189,12 @@ static void le_remove_slot_components(le_world *world, uint32_t slot) {
         le_anim_remove_slot_animator(world, slot);
         s->animator_index = LE_NO_LINK;
         s->present &= ~LE_PRESENT_ANIMATOR;
+    }
+    /* Phase 30: character controller retires with the slot. */
+    if ((s->present & LE_PRESENT_CHARACTER) != 0u) {
+        le_character_remove_slot(world, slot);
+        s->character_index = LE_NO_LINK;
+        s->present &= ~LE_PRESENT_CHARACTER;
     }
 }
 

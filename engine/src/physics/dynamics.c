@@ -444,3 +444,60 @@ void le_physics_get_iterations(const le_world *world,
         *out_position = world->physics->position_iters;
     }
 }
+
+/* Collision mode (Phase 30 CCD foundation). Default DISCRETE;
+ * only dynamic bodies meaningfully use CONTINUOUS (accepted for
+ * any body, stored regardless — the stepper only sweeps
+ * dynamics). */
+le_result le_physics_set_collision_mode(
+    le_world *world, const le_object *object,
+    le_collision_mode mode) {
+    uint32_t slot;
+    le_result code = LE_SUCCESS;
+    int idx;
+
+    if (world == NULL || object == NULL) {
+        return LE_ERROR_INVALID_ARGUMENT;
+    }
+    if (world->physics == NULL) {
+        return LE_ERROR_NOT_INITIALIZED;
+    }
+    if (mode != LE_COLLISION_DISCRETE &&
+        mode != LE_COLLISION_CONTINUOUS) {
+        return LE_ERROR_INVALID_ARGUMENT;
+    }
+    if (!le_resolve_live(world, object, &slot, &code)) {
+        return code;
+    }
+    idx = le_physics_body_index(world, slot);
+    if (idx < 0) {
+        return LE_ERROR_INVALID_ARGUMENT;
+    }
+    world->physics->bodies[(uint32_t)idx].ccd =
+        (mode == LE_COLLISION_CONTINUOUS) ? 1 : 0;
+    return LE_SUCCESS;
+}
+
+le_collision_mode le_physics_get_collision_mode(
+    const le_world *world, const le_object *object) {
+    uint32_t slot;
+    le_result code = LE_SUCCESS;
+    int idx;
+
+    if (world == NULL || object == NULL) {
+        return LE_COLLISION_DISCRETE;
+    }
+    if (world->physics == NULL) {
+        return LE_COLLISION_DISCRETE;
+    }
+    if (!le_resolve_live(world, object, &slot, &code)) {
+        return LE_COLLISION_DISCRETE;
+    }
+    idx = le_physics_body_index((le_world *)world, slot);
+    if (idx < 0) {
+        return LE_COLLISION_DISCRETE;
+    }
+    return world->physics->bodies[(uint32_t)idx].ccd
+               ? LE_COLLISION_CONTINUOUS
+               : LE_COLLISION_DISCRETE;
+}

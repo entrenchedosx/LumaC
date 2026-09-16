@@ -456,6 +456,26 @@ lifecycle with host-owned loop, Input/Time Lua bindings
 (gamepad OS backends deferred — see `docs/INPUT_ARCHITECTURE.md`
 and `examples/lua_input/`).
 
+Physics — done (Phase 28): engine-owned rigid bodies
+(static/dynamic/kinematic), sphere/box colliders, SAP broad
+phase, exact narrow phase, sequential-impulse solver,
+ENTER/STAY/EXIT events, fixed-step PASS2, scene persistence —
+see `docs/PHYSICS_ARCHITECTURE.md`.
+
+Animation — done (Phase 29): skeleton/clip assets, animator
+component, sampling/playback/crossfade, CPU pose + GPU skinning
+palette, glTF import, scene persistence — see
+`docs/ANIMATION_ARCHITECTURE.md` and `docs/GPU_SKINNING.md`.
+
+Character controller — done (Phase 30): kinematic capsule
+controller (sweep/slide/ground-probe/slope/step, platform ride,
+crate push), capsule colliders (all pairs), shape casts
+(sphere/capsule/box sweeps), continuous collision
+(`CONTINUOUS` opt-in for spheres/capsules), Lua character +
+cast bindings — see `docs/CHARACTER_CONTROLLER.md`,
+`docs/PHYSICS_SHAPE_CASTS.md`, `docs/PHYSICS_CCD.md`, and
+`docs/LUA_CHARACTER_API.md`.
+
 Lighting — done (Phase 15/16): Cook-Torrance PBR (metallic workflow,
 normal mapping, emissive, occlusion), directional/point/spot lights,
 and PCF shadow mapping (fitted directional + cone spot, opt-in

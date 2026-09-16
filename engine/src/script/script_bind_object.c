@@ -728,6 +728,9 @@ void le_lua_register_object(lua_State *L) {
     /* Phase 29: animation playback methods ride the same table
      * (thin over le_anim_*; no Lua-side state). */
     le_lua_register_anim_methods(L);
+    /* Phase 30: character controller methods ride the same table
+     * (thin over le_character_*; no Lua-side state). */
+    le_lua_register_character_methods(L);
     lua_setfield(L, -2, "__methods");
     lua_pushcfunction(L, le_o_index);
     lua_setfield(L, -2, "__index");

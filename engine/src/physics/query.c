@@ -74,6 +74,169 @@ int le_physics_ray_narrow(le_world *world,
     if (c == NULL || !c->aabb_valid) {
         return 0;
     }
+    if (c->shape == LE_COLLIDER_CAPSULE) {
+        /* Ray vs capsule: ray vs the segment's cylinder clipped
+         * to the segment range, plus ray vs the two cap spheres.
+         * Earliest t in [0, max_t] wins. Direction is unit
+         * (callers normalize). */
+        float best_t = max_t + 1.0f;
+        int found = 0;
+        float rr = c->world_cap_radius;
+
+        {
+            float abx = c->world_p1[0] - c->world_p0[0];
+            float aby = c->world_p1[1] - c->world_p0[1];
+            float abz = c->world_p1[2] - c->world_p0[2];
+            float len2 = abx * abx + aby * aby + abz * abz;
+
+            if (len2 > 1e-18f) {
+                float ul = sqrtf(len2);
+                float ux = abx / ul;
+                float uy = aby / ul;
+                float uz = abz / ul;
+                float ocx = ox - c->world_center[0];
+                float ocy = oy - c->world_center[1];
+                float ocz = oz - c->world_center[2];
+                float d_u = dx * ux + dy * uy + dz * uz;
+                float o_u = ocx * ux + ocy * uy + ocz * uz;
+                float ex = dx - ux * d_u;
+                float ey = dy - uy * d_u;
+                float ez = dz - uz * d_u;
+                float fx = ocx - ux * o_u;
+                float fy = ocy - uy * o_u;
+                float fz = ocz - uz * o_u;
+                float A = ex * ex + ey * ey + ez * ez;
+                float B = ex * fx + ey * fy + ez * fz;
+                float C =
+                    fx * fx + fy * fy + fz * fz - rr * rr;
+
+                if (A > 1e-18f) {
+                    float disc = B * B - A * C;
+
+                    if (disc >= 0.0f) {
+                        float sq = sqrtf(disc);
+                        float tc[2] = { (-B - sq) / A,
+                                        (-B + sq) / A };
+                        int k;
+
+                        for (k = 0; k < 2; k++) {
+                            float t = tc[k];
+                            float hx;
+                            float hy;
+                            float hz;
+                            float s;
+
+                            if (t < 0.0f || t > max_t) {
+                                continue;
+                            }
+                            hx = ox + dx * t -
+                                 c->world_center[0];
+                            hy = oy + dy * t -
+                                 c->world_center[1];
+                            hz = oz + dz * t -
+                                 c->world_center[2];
+                            s = hx * ux + hy * uy + hz * uz;
+                            if (s < -c->world_cap_half ||
+                                s > c->world_cap_half) {
+                                continue;
+                            }
+                            if (!found || t < best_t) {
+                                found = 1;
+                                best_t = t;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        {
+            const float *caps[2] = { c->world_p0,
+                                     c->world_p1 };
+            int k;
+
+            for (k = 0; k < 2; k++) {
+                float ocx = ox - caps[k][0];
+                float ocy = oy - caps[k][1];
+                float ocz = oz - caps[k][2];
+                float b = ocx * dx + ocy * dy + ocz * dz;
+                float cc = ocx * ocx + ocy * ocy + ocz * ocz -
+                           rr * rr;
+                float disc = b * b - cc;
+                float t;
+
+                if (disc < 0.0f) {
+                    continue;
+                }
+                disc = sqrtf(disc);
+                t = -b - disc;
+                if (t < 0.0f) {
+                    t = -b + disc;
+                }
+                if (t < 0.0f || t > max_t) {
+                    continue;
+                }
+                if (!found || t < best_t) {
+                    found = 1;
+                    best_t = t;
+                }
+            }
+        }
+        if (!found) {
+            return 0;
+        }
+        if (out_t != NULL) {
+            *out_t = best_t;
+        }
+        if (out_n != NULL) {
+            /* Normal = (hit - closest segment point); axis-hit
+             * fallback is -direction. */
+            float hx = ox + dx * best_t;
+            float hy = oy + dy * best_t;
+            float hz = oz + dz * best_t;
+            float abx = c->world_p1[0] - c->world_p0[0];
+            float aby = c->world_p1[1] - c->world_p0[1];
+            float abz = c->world_p1[2] - c->world_p0[2];
+            float len2 =
+                abx * abx + aby * aby + abz * abz;
+            float tseg = 0.0f;
+            float qx;
+            float qy;
+            float qz;
+            float nx;
+            float ny;
+            float nz;
+            float nl;
+
+            if (len2 >= 1e-18f) {
+                tseg = ((hx - c->world_p0[0]) * abx +
+                        (hy - c->world_p0[1]) * aby +
+                        (hz - c->world_p0[2]) * abz) /
+                       len2;
+                if (tseg < 0.0f) {
+                    tseg = 0.0f;
+                } else if (tseg > 1.0f) {
+                    tseg = 1.0f;
+                }
+            }
+            qx = c->world_p0[0] + abx * tseg;
+            qy = c->world_p0[1] + aby * tseg;
+            qz = c->world_p0[2] + abz * tseg;
+            nx = hx - qx;
+            ny = hy - qy;
+            nz = hz - qz;
+            nl = sqrtf(nx * nx + ny * ny + nz * nz);
+            if (nl < 1e-9f) {
+                out_n[0] = -dx;
+                out_n[1] = -dy;
+                out_n[2] = -dz;
+            } else {
+                out_n[0] = nx / nl;
+                out_n[1] = ny / nl;
+                out_n[2] = nz / nl;
+            }
+        }
+        return 1;
+    }
     if (c->shape == LE_COLLIDER_SPHERE) {
         /* Analytic ray-sphere. */
         float ocx = ox - c->world_center[0];
@@ -574,6 +737,9 @@ void le_physics_get_debug_counts(const le_world *world,
         for (i = 0; i < pw->collider_count; i++) {
             if (pw->colliders[i].shape == LE_COLLIDER_SPHERE) {
                 out->spheres++;
+            } else if (pw->colliders[i].shape ==
+                       LE_COLLIDER_CAPSULE) {
+                out->capsules++;
             } else {
                 out->boxes++;
             }
@@ -625,7 +791,6 @@ uint32_t le_physics_extract_debug_lines(const le_world *world,
                 continue;
             }
             if (c->shape == LE_COLLIDER_BOX) {
-                /* 8 corners -> 12 edges. */
                 float v[8][3];
                 int e;
                 static const int kEdges[12][2] = {
@@ -668,6 +833,93 @@ uint32_t le_physics_extract_debug_lines(const le_world *world,
                                 v[kEdges[e][1]][0],
                                 v[kEdges[e][1]][1],
                                 v[kEdges[e][1]][2]);
+                }
+            } else if (c->shape == LE_COLLIDER_CAPSULE) {
+                /* Capsule wireframe: 2 cap rings (in the plane
+                 * perpendicular to the segment axis) + 4 axial
+                 * rails connecting the ring vertices. */
+                float ax0 = c->world_axis[0];
+                float ax1 = c->world_axis[1];
+                float ax2 = c->world_axis[2];
+                float t0[3];
+                float t1[3];
+                float px;
+                float py;
+                float pz;
+                float pl;
+                int s;
+
+                /* Pick a stable perpendicular. */
+                if (ax0 * ax0 + ax2 * ax2 > 1e-12f) {
+                    px = -ax2;
+                    py = 0.0f;
+                    pz = ax0;
+                } else {
+                    px = 0.0f;
+                    py = -ax2;
+                    pz = ax1;
+                }
+                pl = sqrtf(px * px + py * py + pz * pz);
+                if (pl < 1e-9f) {
+                    px = 1.0f;
+                    py = 0.0f;
+                    pz = 0.0f;
+                    pl = 1.0f;
+                }
+                t0[0] = px / pl;
+                t0[1] = py / pl;
+                t0[2] = pz / pl;
+                /* t1 = axis x t0. */
+                t1[0] = ax1 * t0[2] - ax2 * t0[1];
+                t1[1] = ax2 * t0[0] - ax0 * t0[2];
+                t1[2] = ax0 * t0[1] - ax1 * t0[0];
+                for (s = 0; s < 8; s++) {
+                    float a0 = 6.2831853f * (float)s / 8.0f;
+                    float b0 = 6.2831853f * (float)(s + 1) /
+                               8.0f;
+                    float c0 = cosf(a0);
+                    float s0 = sinf(a0);
+                    float c1 = cosf(b0);
+                    float s1 = sinf(b0);
+                    float r = c->world_cap_radius;
+                    int cap;
+
+                    for (cap = 0; cap < 2; cap++) {
+                        const float *ctr =
+                            (cap == 0) ? c->world_p0
+                                       : c->world_p1;
+                        float q0[3];
+                        float q1[3];
+
+                        q0[0] = ctr[0] +
+                                (t0[0] * c0 + t1[0] * s0) * r;
+                        q0[1] = ctr[1] +
+                                (t0[1] * c0 + t1[1] * s0) * r;
+                        q0[2] = ctr[2] +
+                                (t0[2] * c0 + t1[2] * s0) * r;
+                        q1[0] = ctr[0] +
+                                (t0[0] * c1 + t1[0] * s1) * r;
+                        q1[1] = ctr[1] +
+                                (t0[1] * c1 + t1[1] * s1) * r;
+                        q1[2] = ctr[2] +
+                                (t0[2] * c1 + t1[2] * s1) * r;
+                        LE_PUSH_SEG(q0[0], q0[1], q0[2],
+                                    q1[0], q1[1], q1[2]);
+                    }
+                    if ((s % 2) == 0) {
+                        float dx0 = t0[0] * c0 + t1[0] * s0;
+                        float dy0 = t0[1] * c0 + t1[1] * s0;
+                        float dz0 = t0[2] * c0 + t1[2] * s0;
+                        float r = c->world_cap_radius;
+
+                        LE_PUSH_SEG(
+                            c->world_p0[0] + dx0 * r,
+                            c->world_p0[1] + dy0 * r,
+                            c->world_p0[2] + dz0 * r,
+                            c->world_p1[0] + dx0 * r,
+                            c->world_p1[1] + dy0 * r,
+                            c->world_p1[2] + dz0 * r);
+                    }
                 }
             } else {
                 /* 3 axis rings, 8 segments each. */
@@ -801,5 +1053,14 @@ void le_physics_get_stats(le_world *world,
         out_stats->position_iterations = pw->position_iters;
         out_stats->ray_queries = pw->stat_ray_queries;
         out_stats->events_dropped = pw->events_dropped_total;
+        out_stats->shape_casts = pw->stat_shape_casts;
+        out_stats->cast_candidates = pw->stat_cast_candidates;
+        out_stats->ccd_casts = pw->stat_ccd_casts;
+        out_stats->ccd_impacts = pw->stat_ccd_impacts;
+        out_stats->character_sweeps = pw->stat_character_sweeps;
+        out_stats->character_slides = pw->stat_character_slides;
+        out_stats->depenetrations = pw->stat_depenetrations;
+        out_stats->ground_probes = pw->stat_ground_probes;
+        out_stats->step_attempts = pw->stat_step_attempts;
     }
 }

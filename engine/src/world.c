@@ -227,6 +227,7 @@ le_result le_ensure_object_capacity(le_world *world) {
                 fresh[i].body_index = LE_NO_LINK;
                 fresh[i].collider_index = LE_NO_LINK;
                 fresh[i].animator_index = LE_NO_LINK;
+                fresh[i].character_index = LE_NO_LINK;
             }
             if (world->capacity < grown) {
                 world->free_head = (int32_t)world->capacity;
@@ -253,6 +254,7 @@ le_result le_ensure_object_capacity(le_world *world) {
             fresh[i].body_index = LE_NO_LINK;
             fresh[i].collider_index = LE_NO_LINK;
             fresh[i].animator_index = LE_NO_LINK;
+            fresh[i].character_index = LE_NO_LINK;
         }
         world->free_head = 0;
     }
@@ -595,6 +597,7 @@ le_result le_world_create(le_engine *engine, const le_world_desc *desc,
         world->slots[i].body_index = LE_NO_LINK;
         world->slots[i].collider_index = LE_NO_LINK;
         world->slots[i].animator_index = LE_NO_LINK;
+        world->slots[i].character_index = LE_NO_LINK;
         world->slots[i].script_index = LE_NO_LINK;
     }
     world->engine = engine;
@@ -664,6 +667,9 @@ void le_world_destroy(le_world *world) {
      * (dense entries + per-animator pose/palette scratch; clip
      * and skeleton ASSETS stay registry-owned). */
     le_anim_destroy_world(world);
+    /* Phase 30: character controller state dies with the world
+     * (dense entries; no cross-world state). */
+    le_character_destroy_world(world);
     /* Borrowed renderer mesh/material handles are untouched
      * (application keeps them alive per the renderer contract);
      * asset HANDLES die with their slots while registry backing

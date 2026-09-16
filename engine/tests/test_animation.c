@@ -182,7 +182,7 @@ int main(void) {
     setvbuf(stderr, NULL, _IONBF, 0);
     printf("Running Luma Engine Phase 29 headless tests...\n");
 
-    TEST_CHECK(LE_COMPONENT_COUNT == 8, "component count is 8");
+    TEST_CHECK(LE_COMPONENT_COUNT == 9, "component count is 9");
     TEST_CHECK(LE_COMPONENT_ANIMATOR == 7, "animator component is 7");
 
     /* NULL-safety of every new API. */

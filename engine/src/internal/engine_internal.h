@@ -51,6 +51,8 @@
 #define LE_PRESENT_COLLIDER ((uint32_t)(1u << 6))
 /* Phase 29: animator component (at most one per object). */
 #define LE_PRESENT_ANIMATOR ((uint32_t)(1u << 7))
+/* Phase 30: character controller (at most one per object). */
+#define LE_PRESENT_CHARACTER ((uint32_t)(1u << 8))
 
 typedef struct le_object_slot {
     uint32_t generation;
@@ -81,6 +83,8 @@ typedef struct le_object_slot {
     int32_t collider_index;
     /* Phase 29: animator component entry index (or LE_NO_LINK). */
     int32_t animator_index;
+    /* Phase 30: character controller entry index (or LE_NO_LINK). */
+    int32_t character_index;
 } le_object_slot;
 
 typedef struct le_renderable_entry {
@@ -267,6 +271,13 @@ struct le_world {
     /* Phase 28: per-world physics state (bodies, colliders, broad
      * phase, contacts, events). Created with the world. */
     struct le_physics_world *physics;
+    /* Phase 30: character controller entries (dense array, same
+     * swap-remove discipline as every other component). Defined
+     * in src/physics/character.c; general engine sources touch
+     * controllers only through the le_character_* API. */
+    struct le_character_entry *characters;
+    uint32_t character_capacity;
+    uint32_t character_count;
 };
 
 /* ---- shared helpers (defined per-TU where used) ---- */
@@ -456,6 +467,27 @@ le_result le_physics_validate_record(const le_scene_object *rec);
 le_result le_physics_apply_record(le_world *world,
                                   const le_object *obj,
                                   const le_scene_object *rec);
+
+/* ---- Phase 30 character hooks (defined in src/physics/) ---- */
+
+struct le_character_entry;
+
+/* Swap-remove a slot's character entry (object destroy /
+ * component strip path). Struct-blind hook so object.c never
+ * touches character layout. */
+void le_character_remove_slot(le_world *world, uint32_t slot);
+/* Destroy all character state for a dying world. */
+void le_character_destroy_world(le_world *world);
+
+/* Scene capture/apply/validate for character records. */
+void le_character_capture_for_record(le_world *world,
+                                     uint32_t slot,
+                                     le_scene_object *rec);
+le_result le_character_validate_record(
+    const le_scene_object *rec);
+le_result le_character_apply_record(le_world *world,
+                                    const le_object *obj,
+                                    const le_scene_object *rec);
 
 /* ---- Phase 29 animation hooks (defined in src/animation/) ---- */
 

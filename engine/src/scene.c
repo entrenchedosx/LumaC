@@ -151,6 +151,13 @@ le_result le_scene_add_object(le_engine *engine, const le_asset *scene,
             return LE_ERROR_INVALID_ARGUMENT;
         }
     }
+    /* Character records validate the same way. */
+    if (object->has_character) {
+        if (le_character_validate_record(object) !=
+            LE_SUCCESS) {
+            return LE_ERROR_INVALID_ARGUMENT;
+        }
+    }
     for (i = 0; i < s->scene_count; i++) {
         if (le_scene_id_equal(&s->scene_objects[i].id,
                               &object->id)) {
@@ -400,6 +407,10 @@ le_result le_scene_capture(le_world *world, const le_asset *scene,
          * or palettes). Animator-less objects keep has_animator
          * 0. */
         le_anim_capture_for_record(world, i, &rec);
+        /* Character: authoring config only (never ground cache
+         * or velocities). Controller-less objects keep
+         * has_character 0. */
+        le_character_capture_for_record(world, i, &rec);
         /* Append (capacity checked inside add path — inline here
          * for speed; failure aborts capture with prior records
          * intact? No: capture replaced wholesale, so OOM leaves
@@ -640,11 +651,18 @@ le_result le_scene_instantiate(le_world *world, const le_asset *scene,
                     goto fail_invalid;
                 }
             }
+            /* Character records validate here (range checks;
+             * transactional like physics/animator). */
+            if (rec->has_character) {
+                if (le_character_validate_record(rec) !=
+                    LE_SUCCESS) {
+                    goto fail_invalid;
+                }
+            }
             /* Animator records validate here (loop/speed/range;
              * asset IDs resolve at commit — missing IDs fail
              * there with MISSING_ASSET). */
-            if (rec->has_animator) {
-                uint32_t aslot;
+            if (rec->has_animator) {                uint32_t aslot;
 
                 if (le_anim_validate_record(rec) != LE_SUCCESS) {
                     goto fail_invalid;
@@ -838,6 +856,15 @@ le_result le_scene_instantiate(le_world *world, const le_asset *scene,
         if (rec->has_animator) {
             if (le_anim_apply_record(world, &handles[i], rec) !=
                 LE_SUCCESS) {
+                goto fail_rollback;
+            }
+        }
+        /* Characters attach after physics+animators (root rule
+         * + dynamic-body conflict validate against live state)
+         * and before scripts (start() observes the controller). */
+        if (rec->has_character) {
+            if (le_character_apply_record(world, &handles[i],
+                                          rec) != LE_SUCCESS) {
                 goto fail_rollback;
             }
         }

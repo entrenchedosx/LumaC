@@ -181,6 +181,12 @@ function trigger_enter(self, other, contact) end
   `add_collider{...}` (thin over `le_physics_*`; see
   `SCRIPT_BINDING_API.md`).
 - `Physics.gravity()/set_gravity()`, `Physics.raycast(...)`.
+- Character + sweeps (Phase 30): `self:character_move/
+  is_grounded/ground_normal/ground_object/velocity/speed/
+  set_vertical_velocity/vertical_velocity/teleport/gravity`,
+  `Physics.sphere_cast/capsule_cast/box_cast/set_collision_mode`
+  — see `LUA_CHARACTER_API.md` (walk/idle select by
+  `character_speed()` composes Phases 29 + 30).
 - Physics always steps on the fixed schedule (configured rate
   or 60 Hz default) — even with zero scripts. `fixed_update`
   callbacks run before each physics sub-step (forces first).

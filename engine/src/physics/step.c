@@ -275,6 +275,59 @@ void le_physics_step(le_world *world, float dt) {
                 b->inv_inertia[0] = b->inv_inertia[1] =
                     b->inv_inertia[2] = 0.0f;
             }
+            /* Phase 30 CCD: CONTINUOUS sphere/capsule bodies
+             * sweep instead of blindly integrating (gravity +
+             * forces already applied above by the caller loop?
+             * No — gravity applies inside le_integrate_body.
+             * CCD needs velocities first: replicate the
+             * velocity update here, then sweep the position. */
+            {
+                int is_ccd =
+                    b->ccd &&
+                    ci >= 0 &&
+                    (pw->colliders[(uint32_t)ci].shape ==
+                         LE_COLLIDER_SPHERE ||
+                     pw->colliders[(uint32_t)ci].shape ==
+                         LE_COLLIDER_CAPSULE);
+
+                if (is_ccd) {
+                    /* Velocity update (same model as
+                     * le_integrate_body: gravity + forces +
+                     * damping + sanitize, forces cleared). */
+                    b->linear_velocity[0] +=
+                        (pw->gravity[0] * b->gravity_scale +
+                         b->force[0] * b->inv_mass) *
+                        dt;
+                    b->linear_velocity[1] +=
+                        (pw->gravity[1] * b->gravity_scale +
+                         b->force[1] * b->inv_mass) *
+                        dt;
+                    b->linear_velocity[2] +=
+                        (pw->gravity[2] * b->gravity_scale +
+                         b->force[2] * b->inv_mass) *
+                        dt;
+                    {
+                        float kl = 1.0f /
+                                   (1.0f +
+                                    b->linear_damping * dt);
+
+                        b->linear_velocity[0] *= kl;
+                        b->linear_velocity[1] *= kl;
+                        b->linear_velocity[2] *= kl;
+                    }
+                    if (!isfinite(b->linear_velocity[0]) ||
+                        !isfinite(b->linear_velocity[1]) ||
+                        !isfinite(b->linear_velocity[2])) {
+                        b->linear_velocity[0] =
+                            b->linear_velocity[1] =
+                                b->linear_velocity[2] = 0.0f;
+                    }
+                    memset(b->force, 0, sizeof(b->force));
+                    memset(b->torque, 0, sizeof(b->torque));
+                    le_ccd_sweep_body(world, b, dt);
+                    continue;
+                }
+            }
             le_integrate_body(world, b, dt);
         } else if (b->type == LE_BODY_KINEMATIC) {
             le_follow_kinematic(world, b, dt);

@@ -192,6 +192,11 @@ void le_lua_register_physics_methods(lua_State *L);
 /* Appends animation object methods (same pattern; no global
  * table — animation is per-object playback). */
 void le_lua_register_anim_methods(lua_State *L);
+/* Appends character controller methods (same pattern). */
+void le_lua_register_character_methods(lua_State *L);
+/* Registers Physics.sphere_cast/capsule_cast/box_cast +
+ * set_collision_mode on the global Physics table. */
+void le_lua_register_cast_queries(lua_State *L);
 void le_lua_push_object(lua_State *L, le_world *world,
                         const le_object *obj);
 int le_lua_check_object(lua_State *L, int idx, le_world **out_world,

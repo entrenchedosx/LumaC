@@ -108,7 +108,8 @@ order — verify against `engine/src/script/script_bind_*.c`.)
   `"dynamic"` (default) / `"kinematic"`; parented dynamics error.
 - `self:add_collider{shape=, radius=, half_extents=,
   is_trigger=, friction=, restitution=}` — shape is `"box"`
-  (default, 0.5 half extents) / `"sphere"`.
+  (default, 0.5 half extents) / `"sphere"` / `"capsule"`
+  (radius + `capsule_half_height`, Phase 30).
 - `Physics.gravity() -> x, y, z` /
   `Physics.set_gravity(x, y, z)` — per-world gravity.
 - `Physics.raycast(ox, oy, oz, dx, dy, dz, max_dist[, mask,
@@ -119,6 +120,23 @@ order — verify against `engine/src/script/script_bind_*.c`.)
   `trigger_enter/stay/exit(self, other, contact)` — `contact` is
   `{normal={x,y,z}, point={x,y,z}, penetration=n}` (A=self ->
   B=other sense), **nil for EXIT** events.
+
+## Character + shape casts (Phase 30; `script_bind_character.c`,
+thin over `le_character_*` / `le_physics_*cast`)
+
+- `self:character_move(dx, dy, dz)` -> grounded;
+  `self:character_is_grounded()`, `self:character_ground_normal()`,
+  `self:character_ground_object()`, `self:character_velocity()`,
+  `self:character_speed()`,
+  `self:character_set_vertical_velocity(v)` /
+  `self:character_vertical_velocity()`,
+  `self:character_teleport(x, y, z)`,
+  `self:character_gravity(dt)`.
+- `Physics.sphere_cast/capsule_cast/box_cast(...)` -> hit table
+  (`{object, fraction, distance, point, normal,
+  started_overlapping, penetration}`) or nil;
+  `Physics.set_collision_mode(self, "discrete"|"continuous")`.
+- Full semantics in `LUA_CHARACTER_API.md`.
 
 ## Animation (Phase 29; `script_bind_anim.c`, thin over `le_anim_*`)
 

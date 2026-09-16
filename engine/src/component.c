@@ -51,6 +51,9 @@ int le_object_has_component(const le_world *world, const le_object *object,
     case LE_COMPONENT_ANIMATOR:
         return (world->slots[slot].present & LE_PRESENT_ANIMATOR) !=
                0u;
+    case LE_COMPONENT_CHARACTER_CONTROLLER:
+        return (world->slots[slot].present & LE_PRESENT_CHARACTER) !=
+               0u;
     default:
         return 0;
     }

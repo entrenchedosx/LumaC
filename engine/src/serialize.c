@@ -892,6 +892,8 @@ le_result le_scene_save_text(le_engine *engine, const le_asset *scene,
          * and `collider <shape> <dims...> <off...> <quat...>
          * <trigger> <layer> <mask> <friction> <restitution>`
          * (authoring state only — never accumulators/contacts).
+         * Phase 30 adds `collider capsule <r> <half> ...` (16
+         * tokens; half = half cylinder length, 0 = sphere).
          * Deterministic %.9g floats (float32 round-trip). */
         if (rec->has_rigid_body) {
             const char *t =
@@ -960,6 +962,21 @@ le_result le_scene_save_text(le_engine *engine, const le_asset *scene,
                          rec->collider_is_trigger ? 1 : 0,
                          rec->collider_layer, rec->collider_mask,
                          fr, re);
+            } else if (rec->collider_shape ==
+                       LE_COLLIDER_CAPSULE) {
+                le_fmt_float(dims[0], sizeof(dims[0]),
+                             rec->collider_capsule_radius);
+                le_fmt_float(dims[1], sizeof(dims[1]),
+                             rec->collider_capsule_half);
+                snprintf(line, sizeof(line),
+                         "collider capsule %s %s %s %s %s %s "
+                         "%s %s %s %d %u %u %s %s\n",
+                         dims[0], dims[1], off[0], off[1],
+                         off[2], quat[0], quat[1], quat[2],
+                         quat[3],
+                         rec->collider_is_trigger ? 1 : 0,
+                         rec->collider_layer, rec->collider_mask,
+                         fr, re);
             } else {
                 for (k = 0; k < 3; k++) {
                     le_fmt_float(dims[k], sizeof(dims[k]),
@@ -1014,6 +1031,61 @@ le_result le_scene_save_text(le_engine *engine, const le_asset *scene,
                      "animator %s %s %d %s %s %s\n", sk, cl,
                      rec->animator_autoplay ? 1 : 0, loop, sp,
                      st);
+            if (!le_buf_puts(&buf, &len, &cap, line)) {
+                goto oom;
+            }
+        }
+        /* Character controller (Phase 30): `character <radius>
+         * <height> <upx> <upy> <upz> <skin> <slope_deg>
+         * <step> <gravity> <terminal> <snap> <push> <layer>
+         * <mask>` (15 tokens; authoring config only — never
+         * runtime ground/velocities). slope_deg is DEGREES
+         * (storage is radians). Deterministic %.9g. */
+        if (rec->has_character) {
+            char ra[32];
+            char he[32];
+            char ux[32];
+            char uy[32];
+            char uz[32];
+            char sk[32];
+            char sl[32];
+            char st[32];
+            char gr[32];
+            char te[32];
+            char sn[32];
+            char pu[32];
+
+            le_fmt_float(ra, sizeof(ra),
+                         rec->character_radius);
+            le_fmt_float(he, sizeof(he),
+                         rec->character_height);
+            le_fmt_float(ux, sizeof(ux),
+                         rec->character_up[0]);
+            le_fmt_float(uy, sizeof(uy),
+                         rec->character_up[1]);
+            le_fmt_float(uz, sizeof(uz),
+                         rec->character_up[2]);
+            le_fmt_float(sk, sizeof(sk),
+                         rec->character_skin_width);
+            le_fmt_float(sl, sizeof(sl),
+                         rec->character_slope_angle *
+                         57.29577951308232f);
+            le_fmt_float(st, sizeof(st),
+                         rec->character_step_height);
+            le_fmt_float(gr, sizeof(gr),
+                         rec->character_gravity);
+            le_fmt_float(te, sizeof(te),
+                         rec->character_terminal_velocity);
+            le_fmt_float(sn, sizeof(sn),
+                         rec->character_snap_distance);
+            le_fmt_float(pu, sizeof(pu),
+                         rec->character_push_strength);
+            snprintf(line, sizeof(line),
+                     "character %s %s %s %s %s %s %s %s %s "
+                     "%s %s %s %u %u\n",
+                     ra, he, ux, uy, uz, sk, sl, st, gr, te,
+                     sn, pu, rec->character_layer,
+                     rec->character_mask);
             if (!le_buf_puts(&buf, &len, &cap, line)) {
                 goto oom;
             }
@@ -1905,9 +1977,12 @@ le_result le_scene_load_text(le_engine *engine, const le_asset *scene,
                     } else if (strcmp(tok[0], "collider") == 0) {
                         /* collider sphere <r> <off x3> <quat x4>
                          * <trigger> <layer> <mask> <fr> <re>
-                         * (15 tokens) or collider box <he x3>
+                         * (15 tokens), collider box <he x3>
                          * <off x3> <quat x4> <trigger> <layer>
-                         * <mask> <fr> <re> (17 tokens).
+                         * <mask> <fr> <re> (17 tokens), or collider
+                         * capsule <r> <half> <off x3> <quat x4>
+                         * <trigger> <layer> <mask> <fr> <re>
+                         * (16 tokens; Phase 30).
                          * Duplicate lines malformed. */
                         if (recs[cur].rec.has_collider) {
                             lr = LE_ERROR_PARSE;
@@ -2112,6 +2187,113 @@ le_result le_scene_load_text(le_engine *engine, const le_asset *scene,
                                     }
                                 }
                             }
+                        } else if (ntok >= 2 &&
+                                   strcmp(tok[1], "capsule") ==
+                                       0) {
+                            /* collider capsule <r> <half> <off x3>
+                             * <quat x4> <trigger> <layer> <mask>
+                             * <fr> <re> (16 tokens). */
+                            float cr;
+                            float ch;
+                            float off[3];
+                            float q[4];
+                            long trig;
+                            unsigned long layer;
+                            unsigned long long mask;
+                            float fr;
+                            float re;
+                            char *ep = NULL;
+
+                            if (ntok != 16) {
+                                lr = LE_ERROR_PARSE;
+                            } else if (
+                                !le_parse_float_checked(
+                                    tok[2], &cr) ||
+                                !le_parse_float_checked(
+                                    tok[3], &ch) ||
+                                !le_parse_float_checked(
+                                    tok[4], &off[0]) ||
+                                !le_parse_float_checked(
+                                    tok[5], &off[1]) ||
+                                !le_parse_float_checked(
+                                    tok[6], &off[2]) ||
+                                !le_parse_float_checked(
+                                    tok[7], &q[0]) ||
+                                !le_parse_float_checked(
+                                    tok[8], &q[1]) ||
+                                !le_parse_float_checked(
+                                    tok[9], &q[2]) ||
+                                !le_parse_float_checked(
+                                    tok[10], &q[3]) ||
+                                !le_parse_float_checked(
+                                    tok[14], &fr) ||
+                                !le_parse_float_checked(
+                                    tok[15], &re)) {
+                                lr = LE_ERROR_PARSE;
+                            } else {
+                                trig =
+                                    strtol(tok[11], &ep, 10);
+                                if (ep == tok[11] ||
+                                    *ep != '\0' ||
+                                    (trig != 0 && trig != 1)) {
+                                    lr = LE_ERROR_PARSE;
+                                } else {
+                                    ep = NULL;
+                                    layer = strtoul(tok[12],
+                                                    &ep, 10);
+                                    if (ep == tok[12] ||
+                                        *ep != '\0' ||
+                                        layer > 31u) {
+                                        lr = LE_ERROR_PARSE;
+                                    } else {
+                                        ep = NULL;
+                                        mask = strtoull(
+                                            tok[13], &ep, 10);
+                                        if (ep == tok[13] ||
+                                            *ep != '\0' ||
+                                            mask > 0xFFFFFFFFull) {
+                                            lr = LE_ERROR_PARSE;
+                                        } else {
+                                            recs[cur]
+                                                .rec.has_collider =
+                                                1;
+                                            recs[cur]
+                                                .rec.collider_shape =
+                                                LE_COLLIDER_CAPSULE;
+                                            recs[cur]
+                                                .rec.collider_capsule_radius =
+                                                cr;
+                                            recs[cur]
+                                                .rec.collider_capsule_half =
+                                                ch;
+                                            memcpy(
+                                                recs[cur]
+                                                    .rec.collider_offset,
+                                                off,
+                                                sizeof(off));
+                                            memcpy(
+                                                recs[cur]
+                                                    .rec.collider_orientation,
+                                                q, sizeof(q));
+                                            recs[cur]
+                                                .rec.collider_is_trigger =
+                                                (trig != 0);
+                                            recs[cur]
+                                                .rec.collider_layer =
+                                                (uint32_t)layer;
+                                            recs[cur]
+                                                .rec.collider_mask =
+                                                (uint32_t)mask;
+                                            recs[cur]
+                                                .rec.collider_friction =
+                                                fr;
+                                            recs[cur]
+                                                .rec.collider_restitution =
+                                                re;
+                                        }
+                                    }
+                                }
+                            }
                         } else {
                             lr = LE_ERROR_PARSE;
                         }
@@ -2196,6 +2378,122 @@ le_result le_scene_load_text(le_engine *engine, const le_asset *scene,
                             }
                         animator_done:;
                         }
+                    } else if (strcmp(tok[0], "character") == 0) {
+                        /* character <radius> <height> <upx> <upy>
+                         * <upz> <skin> <slope_deg> <step>
+                         * <gravity> <terminal> <snap> <push>
+                         * <layer> <mask>: 15 tokens. Duplicate
+                         * lines malformed. slope_deg is DEGREES
+                         * here (storage is radians); values
+                         * re-validate at commit via
+                         * le_character_validate_record. */
+                        if (ntok != 15) {
+                            lr = LE_ERROR_PARSE;
+                        } else if (recs[cur].rec.has_character) {
+                            lr = LE_ERROR_PARSE;
+                        } else {
+                            float ra;
+                            float he;
+                            float up[3];
+                            float sk;
+                            float sldeg;
+                            float st;
+                            float gr;
+                            float te;
+                            float sn;
+                            float pu;
+                            unsigned long layer;
+                            unsigned long long mask;
+                            char *ep = NULL;
+
+                            if (!le_parse_float_checked(
+                                    tok[1], &ra) ||
+                                !le_parse_float_checked(
+                                    tok[2], &he) ||
+                                !le_parse_float_checked(
+                                    tok[3], &up[0]) ||
+                                !le_parse_float_checked(
+                                    tok[4], &up[1]) ||
+                                !le_parse_float_checked(
+                                    tok[5], &up[2]) ||
+                                !le_parse_float_checked(
+                                    tok[6], &sk) ||
+                                !le_parse_float_checked(
+                                    tok[7], &sldeg) ||
+                                !le_parse_float_checked(
+                                    tok[8], &st) ||
+                                !le_parse_float_checked(
+                                    tok[9], &gr) ||
+                                !le_parse_float_checked(
+                                    tok[10], &te) ||
+                                !le_parse_float_checked(
+                                    tok[11], &sn) ||
+                                !le_parse_float_checked(
+                                    tok[12], &pu)) {
+                                lr = LE_ERROR_PARSE;
+                            } else {
+                                ep = NULL;
+                                layer = strtoul(tok[13], &ep,
+                                                10);
+                                if (ep == tok[13] ||
+                                    *ep != '\0' ||
+                                    layer > 31u) {
+                                    lr = LE_ERROR_PARSE;
+                                } else {
+                                    ep = NULL;
+                                    mask = strtoull(tok[14],
+                                                    &ep, 10);
+                                    if (ep == tok[14] ||
+                                        *ep != '\0' ||
+                                        mask >
+                                            0xFFFFFFFFull) {
+                                        lr = LE_ERROR_PARSE;
+                                    } else {
+                                        recs[cur]
+                                            .rec.has_character =
+                                            1;
+                                        recs[cur]
+                                            .rec.character_radius =
+                                            ra;
+                                        recs[cur]
+                                            .rec.character_height =
+                                            he;
+                                        memcpy(recs[cur]
+                                                   .rec.character_up,
+                                               up,
+                                               sizeof(up));
+                                        recs[cur]
+                                            .rec.character_skin_width =
+                                            sk;
+                                        recs[cur]
+                                            .rec.character_slope_angle =
+                                            sldeg *
+                                            0.017453292519943295f;
+                                        recs[cur]
+                                            .rec.character_step_height =
+                                            st;
+                                        recs[cur]
+                                            .rec.character_gravity =
+                                            gr;
+                                        recs[cur]
+                                            .rec.character_terminal_velocity =
+                                            te;
+                                        recs[cur]
+                                            .rec.character_snap_distance =
+                                            sn;
+                                        recs[cur]
+                                            .rec.character_push_strength =
+                                            pu;
+                                        recs[cur]
+                                            .rec.character_layer =
+                                            (uint32_t)layer;
+                                        recs[cur]
+                                            .rec.character_mask =
+                                            (uint32_t)mask;
+                                    }
+                                }
+                            }
+                        }
                     } else {
                         /* Unknown LINE KIND inside an object:
                          * tolerate only `shadowdist`-style
@@ -2229,6 +2527,7 @@ le_result le_scene_load_text(le_engine *engine, const le_asset *scene,
                             strcmp(tok[0], "physics") == 0 ||
                             strcmp(tok[0], "animator") == 0 ||
                             strcmp(tok[0], "animation") == 0 ||
+                            strcmp(tok[0], "character") == 0 ||
                             strcmp(tok[0], "audio") == 0 ||
                             strcmp(tok[0], "component") == 0) {
                             /* NOTE: "script"/"sprop" are handled as

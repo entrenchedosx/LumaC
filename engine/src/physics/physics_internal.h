@@ -53,6 +53,8 @@ typedef struct le_body_entry {
     /* World-space inverse inertia diagonal (sphere/box closed
      * forms, rotated per orientation each step). */
     float inv_inertia[3];
+    /* Phase 30: continuous collision mode (default DISCRETE). */
+    int ccd;
 } le_body_entry;
 
 /* Dense collider entry. */
@@ -61,6 +63,8 @@ typedef struct le_collider_entry {
     le_collider_shape shape;
     float radius;         /* sphere */
     float half_extents[3];/* box (local, pre-scale) */
+    float capsule_radius; /* capsule (local, pre-scale) */
+    float capsule_half;   /* capsule: half cylinder length (local) */
     float offset[3];
     float orientation[4]; /* local quat, unit */
     int is_trigger;
@@ -76,6 +80,11 @@ typedef struct le_collider_entry {
     float world_basis[3][3]; /* columns = local axes in world */
     float world_radius;      /* sphere: scaled radius */
     float world_half[3];     /* box: scaled half extents */
+    float world_cap_radius;  /* capsule: scaled radius */
+    float world_cap_half;    /* capsule: scaled half cylinder len */
+    float world_axis[3];     /* capsule: unit segment dir (world) */
+    float world_p0[3];       /* capsule: segment endpoint A (world) */
+    float world_p1[3];       /* capsule: segment endpoint B (world) */
     int aabb_valid;
 } le_collider_entry;
 
@@ -157,6 +166,16 @@ struct le_physics_world {
     uint32_t stat_candidates;
     uint32_t stat_narrow_tests;
     uint64_t stat_ray_queries;
+    /* Phase 30: shape-cast / CCD / character counters. */
+    uint64_t stat_shape_casts;
+    uint64_t stat_cast_candidates;
+    uint64_t stat_ccd_casts;
+    uint64_t stat_ccd_impacts;
+    uint64_t stat_character_sweeps;
+    uint64_t stat_character_slides;
+    uint64_t stat_depenetrations;
+    uint64_t stat_ground_probes;
+    uint64_t stat_step_attempts;
 };
 
 /* Lifecycle (physics.c). */
@@ -203,8 +222,28 @@ int le_physics_narrow_pair(le_world *world,
                            const le_collider_entry *b,
                            le_contact_point *out);
 
+/* Segment helpers shared by the narrow phase and sweep
+ * clearance (narrowphase.c definitions): */
+float le_seg_closest_point(const float a[3], const float b[3],
+                           const float p[3], float q[3]);
+float le_seg_seg_closest(const float p1[3], const float q1[3],
+                         const float p2[3], const float q2[3],
+                         float c1[3], float c2[3]);
+float le_seg_obb_closest(const float p0[3], const float p1[3],
+                         const float bc[3], const float bu[3],
+                         const float bv[3], const float bw[3],
+                         const float hh[3], float sq[3],
+                         float bq[3]);
+
 /* Solver (solver.c): sequential impulse over contacts. */
 void le_physics_solve(le_world *world, float dt);
+
+/* CCD (ccd.c): sweep one CONTINUOUS dynamic sphere/capsule
+ * body along v*dt vs static/kinematic geometry. Returns 1 when
+ * handled (caller skips discrete integrate), 0 to integrate
+ * discretely. */
+int le_ccd_sweep_body(le_world *world, le_body_entry *b,
+                      float dt);
 
 /* Events (events.c): diff overlaps vs contacts, queue ENTER/
  * STAY/EXIT + trigger variants, retire destroyed slots. */

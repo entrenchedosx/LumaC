@@ -59,6 +59,8 @@ void le_physics_capture_for_record(le_world *world, uint32_t slot,
             rec->has_collider = 1;
             rec->collider_shape = c->shape;
             rec->collider_radius = c->radius;
+            rec->collider_capsule_radius = c->capsule_radius;
+            rec->collider_capsule_half = c->capsule_half;
             memcpy(rec->collider_half_extents, c->half_extents,
                    sizeof(rec->collider_half_extents));
             memcpy(rec->collider_offset, c->offset,
@@ -117,12 +119,23 @@ le_result le_physics_validate_record(const le_scene_object *rec) {
     }
     if (rec->has_collider) {
         if (rec->collider_shape != LE_COLLIDER_SPHERE &&
-            rec->collider_shape != LE_COLLIDER_BOX) {
+            rec->collider_shape != LE_COLLIDER_BOX &&
+            rec->collider_shape != LE_COLLIDER_CAPSULE) {
             return LE_ERROR_INVALID_ARGUMENT;
         }
         if (rec->collider_shape == LE_COLLIDER_SPHERE) {
             if (!(rec->collider_radius > 0.0f) ||
                 !(rec->collider_radius <= 1e6f)) {
+                return LE_ERROR_INVALID_ARGUMENT;
+            }
+        } else if (rec->collider_shape ==
+                   LE_COLLIDER_CAPSULE) {
+            if (!(rec->collider_capsule_radius > 0.0f) ||
+                !(rec->collider_capsule_radius <= 1e6f)) {
+                return LE_ERROR_INVALID_ARGUMENT;
+            }
+            if (!(rec->collider_capsule_half >= 0.0f) ||
+                !(rec->collider_capsule_half <= 1e6f)) {
                 return LE_ERROR_INVALID_ARGUMENT;
             }
         } else {
@@ -198,6 +211,8 @@ le_result le_physics_apply_record(le_world *world,
         memset(&d, 0, sizeof(d));
         d.shape = rec->collider_shape;
         d.radius = rec->collider_radius;
+        d.capsule_radius = rec->collider_capsule_radius;
+        d.capsule_half_height = rec->collider_capsule_half;
         memcpy(d.half_extents, rec->collider_half_extents,
                sizeof(d.half_extents));
         memcpy(d.offset, rec->collider_offset,

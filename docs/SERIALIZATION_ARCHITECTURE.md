@@ -31,10 +31,22 @@ collider sphere <r> <off...> <quat...> <trig> <layer> <mask>
   <friction> <restitution>                      (Phase 28: 15)
 collider box <he...> <off...> <quat...> <trig> <layer> <mask>
   <friction> <restitution>                      (Phase 28: 17)
+collider capsule <r> <half> <off...> <quat...> <trig> <layer>
+  <mask> <friction> <restitution>             (Phase 30: 16)
+character <radius> <height> <upx> <upy> <upz> <skin> <slope_deg>
+  <step> <gravity> <terminal> <snap> <push> <layer> <mask>
+                                            (Phase 30: 15)
 animator <skelhex|nil> <cliphex|nil> <autoplay> <once|loop|
   pingpong> <speed> <start>                     (Phase 29: 7)
 end
 ```
+
+Phase 30 notes: character lines carry AUTHORING config only
+(never runtime ground/velocities); slope is DEGREES on the wire
+(radians in memory). Capsule `half` = half cylinder length
+(0 = sphere). Value validation runs at commit/instantiate
+(`le_physics_validate_record` / `le_character_validate_record`);
+malformed values fail the load transactionally.
 
 Phase 28 notes: physics lines carry AUTHORING state only (never
 accumulators/contacts/caches); velocities persist as explicit

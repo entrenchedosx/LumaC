@@ -416,4 +416,6 @@ void le_lua_register_physics(lua_State *L) {
     lua_newtable(L);
     luaL_setfuncs(L, physics_fn, 0);
     lua_setglobal(L, "Physics");
+    /* Phase 30: shape-cast queries share the Physics table. */
+    le_lua_register_cast_queries(L);
 }

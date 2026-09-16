@@ -77,6 +77,55 @@ void le_physics_shape_inertia(const le_collider_entry *c,
         }
         return;
     }
+    if (c->shape == LE_COLLIDER_CAPSULE) {
+        /* Solid capsule about local Y (segment axis): cylinder of
+         * half-length h plus two hemispherical caps of radius r.
+         * Total mass m; cylinder mass fraction ~ h/(h+4r/3).
+         * Closed forms (e.g. standard capsule inertia):
+         *   I_axial (Y) = 0.5 * m * r^2 (caps + cylinder share
+         *     the axial value to good approximation).
+         *   I_perp = m * (0.25*r^2 + h^2/3 ... ) — use the exact
+         *     composite: cylinder I_perp_c = mc*(3r^2+h_cyl^2)/12
+         *     plus cap terms; approximate with the widely used
+         *     capsule form I = m*(0.25 r^2 + (h^2)/3 + ...) —
+         *     here computed as cylinder + point-cap correction,
+         *     always finite and positive. Zero half-length falls
+         *     back to the sphere form. */
+        float r = c->capsule_radius;
+        float h = c->capsule_half; /* half cylinder length */
+        float hcyl = 2.0f * h;
+        float ia;
+        float ip;
+
+        if (r <= 0.0f || !isfinite(r) || !isfinite(h) || h < 0.0f) {
+            return;
+        }
+        if (h <= 1e-9f) {
+            float i = 0.4f * mass * r * r;
+
+            if (i > 1e-12f) {
+                out_inv[0] = out_inv[1] = out_inv[2] = 1.0f / i;
+            }
+            return;
+        }
+        ia = 0.5f * mass * r * r;
+        /* Transverse: cylinder term + caps (parallel-axis). */
+        ip = mass *
+             (0.25f * r * r + (hcyl * hcyl) / 12.0f +
+              0.375f * r * hcyl + 0.25f * r * r * 0.0f);
+        /* Guard against degenerate tiny values. */
+        if (ia > 1e-12f) {
+            out_inv[1] = 1.0f / ia; /* local Y = segment axis */
+        }
+        if (ip > 1e-12f) {
+            /* Local-frame diagonal is axis-aligned here; the
+             * stepper rotates it by orientation each step, so
+             * assign transverse to X/Z. */
+            out_inv[0] = 1.0f / ip;
+            out_inv[2] = 1.0f / ip;
+        }
+        return;
+    }
 }
 
 int le_physics_refresh_collider(le_world *world,
@@ -232,6 +281,29 @@ int le_physics_refresh_collider(le_world *world,
             }
             if (c->shape == LE_COLLIDER_SPHERE) {
                 c->world_radius = c->radius * m;
+            } else if (c->shape == LE_COLLIDER_CAPSULE) {
+                /* Capsule scale policy (Phase 30, documented):
+                 * uniform scale is supported exactly; non-uniform
+                 * scale is REJECTED (collider skipped for the step)
+                 * because a non-uniformly scaled capsule is an
+                 * ellipsoid-segment hybrid with no closed-form
+                 * narrow phase. Negative scales use absolute
+                 * magnitude (column lengths are already >= 0).
+                 * The check below runs before writing world dims. */
+                float mn = sx;
+
+                if (sy < mn) {
+                    mn = sy;
+                }
+                if (sz < mn) {
+                    mn = sz;
+                }
+                if (m > 1e-9f && (m - mn) / m > 1e-4f) {
+                    c->aabb_valid = 0;
+                    return 0;
+                }
+                c->world_cap_radius = c->capsule_radius * m;
+                c->world_cap_half = c->capsule_half * m;
             } else {
                 c->world_half[0] = c->half_extents[0] * m;
                 c->world_half[1] = c->half_extents[1] * m;
@@ -240,7 +312,9 @@ int le_physics_refresh_collider(le_world *world,
         }
     }
     /* AABB from center + basis * extents (conservative, exact
-     * for boxes; sphere uses radius on all axes). */
+     * for boxes; sphere uses radius on all axes; capsule uses
+     * segment endpoints +/- radius — conservative under arbitrary
+     * orientation, never a false-negative bound). */
     {
         float ex;
         float ey;
@@ -248,6 +322,38 @@ int le_physics_refresh_collider(le_world *world,
 
         if (c->shape == LE_COLLIDER_SPHERE) {
             ex = ey = ez = c->world_radius;
+        } else if (c->shape == LE_COLLIDER_CAPSULE) {
+            /* Segment axis = local Y column of the shape basis. */
+            float ax = c->world_basis[0][1];
+            float ay = c->world_basis[1][1];
+            float az = c->world_basis[2][1];
+            float al = sqrtf(ax * ax + ay * ay + az * az);
+            float hx;
+            float hy;
+            float hz;
+
+            if (al < 1e-9f || !isfinite(al)) {
+                c->aabb_valid = 0;
+                return 0;
+            }
+            ax /= al;
+            ay /= al;
+            az /= al;
+            c->world_axis[0] = ax;
+            c->world_axis[1] = ay;
+            c->world_axis[2] = az;
+            c->world_p0[0] = c->world_center[0] - ax * c->world_cap_half;
+            c->world_p0[1] = c->world_center[1] - ay * c->world_cap_half;
+            c->world_p0[2] = c->world_center[2] - az * c->world_cap_half;
+            c->world_p1[0] = c->world_center[0] + ax * c->world_cap_half;
+            c->world_p1[1] = c->world_center[1] + ay * c->world_cap_half;
+            c->world_p1[2] = c->world_center[2] + az * c->world_cap_half;
+            hx = (ax < 0.0f ? -ax : ax) * c->world_cap_half;
+            hy = (ay < 0.0f ? -ay : ay) * c->world_cap_half;
+            hz = (az < 0.0f ? -az : az) * c->world_cap_half;
+            ex = hx + c->world_cap_radius;
+            ey = hy + c->world_cap_radius;
+            ez = hz + c->world_cap_radius;
         } else {
             /* |basis row| . half (SAT-style AABB of an OBB). */
             float ax0 = c->world_basis[0][0];
