@@ -144,10 +144,20 @@ if(UNIX AND NOT APPLE)
 endif()
 add_test(NAME test_project COMMAND test_project)
 
+# Phase 32 import/reimport/browser/delete.
+add_executable(test_import tests/test_import.c)
+target_link_libraries(test_import PRIVATE luma_editor)
+target_include_directories(test_import PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_import PRIVATE m)
+endif()
+add_test(NAME test_import COMMAND test_import)
+
 # Shared Windows builds place lumac.dll beside the top-level tests;
 # editor tests live deeper, so extend their DLL search path
 # explicitly (no-op for static builds).
 if(WIN32)
-    set_tests_properties(test_editor_core test_editor_history test_editor_play test_editor_viewport test_editor_reflect test_prefab_smoke test_project PROPERTIES
+    set_tests_properties(test_editor_core test_editor_history test_editor_play test_editor_viewport test_editor_reflect test_prefab_smoke test_project test_import PROPERTIES
         ENVIRONMENT "PATH=$<TARGET_FILE_DIR:lumac>\;$ENV{PATH}")
 endif()
