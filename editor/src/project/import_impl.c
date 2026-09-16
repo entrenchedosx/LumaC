@@ -253,6 +253,24 @@ static led_result led_import_gltf(led_session *s, led_db_record *r,
                    ? LED_ERROR_OUT_OF_MEMORY
                    : LED_ERROR_VALIDATION;
     }
+    /* Import publishes the FULL sub-asset table (not a delta):
+     * clear any prior table first (reimport must not duplicate
+     * rows — stable count across identical reimports). */
+    {
+        uint32_t k;
+
+        if (r->sub_keys != NULL) {
+            for (k = 0; k < r->sub_count; k++) {
+                free(r->sub_keys[k]);
+            }
+            free(r->sub_keys);
+            r->sub_keys = NULL;
+        }
+        free(r->sub_ids);
+        r->sub_ids = NULL;
+        r->sub_count = 0;
+        r->sub_cap = 0;
+    }
     /* Bridge the runtime IDs into name-keyed sub-asset table
      * (FIXES the positional debt: materials keyed by
      * mat<index>:<sanitized-factors>? No — by model material

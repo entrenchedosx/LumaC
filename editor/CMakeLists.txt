@@ -174,10 +174,26 @@ if(UNIX AND NOT APPLE)
 endif()
 add_test(NAME test_project_editor COMMAND test_project_editor)
 
+# Phase 32 glTF identity (Vulkan-gated; SKIP without a device).
+add_executable(test_gltf_identity tests/test_gltf_identity.c)
+target_link_libraries(test_gltf_identity PRIVATE luma_editor luma_assets luma_renderer lumac Vulkan::Vulkan)
+target_include_directories(test_gltf_identity PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../engine/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../renderer/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../assets/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_definitions(test_gltf_identity PRIVATE
+    LE_BOX_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../assets/BoxTextured.glb")
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_gltf_identity PRIVATE m)
+endif()
+add_test(NAME test_gltf_identity COMMAND test_gltf_identity)
+
 # Shared Windows builds place lumac.dll beside the top-level tests;
 # editor tests live deeper, so extend their DLL search path
 # explicitly (no-op for static builds).
 if(WIN32)
-    set_tests_properties(test_editor_core test_editor_history test_editor_play test_editor_viewport test_editor_reflect test_prefab_smoke test_project test_import test_assetdb test_project_editor PROPERTIES
+    set_tests_properties(test_editor_core test_editor_history test_editor_play test_editor_viewport test_editor_reflect test_prefab_smoke test_project test_import test_assetdb test_project_editor test_gltf_identity PROPERTIES
         ENVIRONMENT "PATH=$<TARGET_FILE_DIR:lumac>\;$ENV{PATH}")
 endif()
