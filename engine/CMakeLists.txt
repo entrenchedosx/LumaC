@@ -108,6 +108,29 @@ add_library(luma_engine STATIC
     src/input/input.c
     src/input/actions.c
     src/time/time.c
+    src/physics/physics.c
+    src/physics/body.c
+    src/physics/dynamics.c
+    src/physics/collider_pose.c
+    src/physics/broadphase.c
+    src/physics/narrowphase.c
+    src/physics/solver.c
+    src/physics/step.c
+    src/physics/events.c
+    src/physics/query.c
+    src/physics/scene_physics.c
+    src/animation/anim_asset.c
+    src/animation/anim_sample.c
+    src/animation/anim_pose.c
+    src/animation/animator.c
+    src/animation/anim_playback.c
+    src/animation/anim_step.c
+    src/animation/anim_api.c
+    src/animation/anim_gltf.c
+    src/animation/anim_serialize.c
+    src/gltf_bridge_anim.c
+    src/script/script_bind_anim.c
+    src/script/script_bind_physics.c
     src/script/script_runtime.c
     src/script/script_lua.c
     src/script/script_bind_world.c
@@ -272,10 +295,92 @@ if(UNIX AND NOT APPLE)
 endif()
 add_test(NAME test_input_bench COMMAND test_input_bench)
 
+# Phase 28: headless physics & collision foundation tests.
+add_executable(test_physics tests/test_physics.c)
+target_link_libraries(test_physics PRIVATE luma_engine)
+target_include_directories(test_physics PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_physics PRIVATE m)
+endif()
+add_test(NAME test_physics COMMAND test_physics)
+
+# Phase 28: Lua physics bindings + collision callbacks (headless).
+add_executable(test_physics_script tests/test_physics_script.c)
+target_link_libraries(test_physics_script PRIVATE luma_engine)
+target_include_directories(test_physics_script PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_physics_script PRIVATE m)
+endif()
+add_test(NAME test_physics_script COMMAND test_physics_script)
+
+# Phase 28: physics-driven renderables through the render path.
+add_executable(test_physics_vulkan tests/test_physics_vulkan.c)
+target_link_libraries(test_physics_vulkan PRIVATE luma_engine luma_renderer lumac Vulkan::Vulkan)
+target_include_directories(test_physics_vulkan PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../renderer/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_physics_vulkan PRIVATE m)
+endif()
+add_test(NAME test_physics_vulkan COMMAND test_physics_vulkan)
+
+# Phase 28 micro-benchmarks (informative; always exits 0).
+add_executable(test_physics_bench tests/test_physics_bench.c)
+target_link_libraries(test_physics_bench PRIVATE luma_engine)
+target_include_directories(test_physics_bench PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_physics_bench PRIVATE m)
+endif()
+add_test(NAME test_physics_bench COMMAND test_physics_bench)
+
+# Phase 29: headless animation & skinning foundation tests.
+add_executable(test_animation tests/test_animation.c)
+target_link_libraries(test_animation PRIVATE luma_engine)
+target_include_directories(test_animation PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_animation PRIVATE m)
+endif()
+add_test(NAME test_animation COMMAND test_animation)
+
+# Phase 29: Lua animation playback bindings (headless).
+add_executable(test_animation_script tests/test_animation_script.c)
+target_link_libraries(test_animation_script PRIVATE luma_engine)
+target_include_directories(test_animation_script PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_animation_script PRIVATE m)
+endif()
+add_test(NAME test_animation_script COMMAND test_animation_script)
+
+# Phase 29: animated + skinned renderables through the render
+# path (static regression, motion proof, CPU/GPU oracle, glTF
+# bridge import over the skinned fixture).
+add_executable(test_animation_vulkan tests/test_animation_vulkan.c)
+target_link_libraries(test_animation_vulkan PRIVATE luma_engine luma_assets luma_renderer lumac Vulkan::Vulkan)
+target_include_directories(test_animation_vulkan PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../renderer/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../assets/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../assets/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(test_animation_vulkan PRIVATE
+    LE_ANIM_GLB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../assets/tests/fixtures/skinned.glb")
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_animation_vulkan PRIVATE m)
+endif()
+add_test(NAME test_animation_vulkan COMMAND test_animation_vulkan)
+
 # Shared Windows builds place lumac.dll beside the top-level tests;
 # engine tests live one directory deeper, so extend their DLL search
 # path explicitly (no-op for static builds).
 if(WIN32)
-    set_tests_properties(test_engine test_engine_stress test_engine_vulkan test_scene test_scene_vulkan test_script test_script_vulkan test_input test_input_script test_input_vulkan test_input_bench PROPERTIES
+    set_tests_properties(test_engine test_engine_stress test_engine_vulkan test_scene test_scene_vulkan test_script test_script_vulkan test_input test_input_script test_input_vulkan test_input_bench test_physics test_physics_script test_physics_vulkan test_physics_bench test_animation test_animation_script test_animation_vulkan PROPERTIES
         ENVIRONMENT "PATH=$<TARGET_FILE_DIR:lumac>\;$ENV{PATH}")
 endif()

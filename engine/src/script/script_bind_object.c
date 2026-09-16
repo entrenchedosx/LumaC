@@ -722,6 +722,12 @@ void le_lua_register_object(lua_State *L) {
     luaL_newmetatable(L, LE_LUA_OBJECT_MT);
     lua_newtable(L);
     luaL_setfuncs(L, methods, 0);
+    /* Phase 28: physics methods share the object method table
+     * (same userdata, same staleness discipline). */
+    le_lua_register_physics_methods(L);
+    /* Phase 29: animation playback methods ride the same table
+     * (thin over le_anim_*; no Lua-side state). */
+    le_lua_register_anim_methods(L);
     lua_setfield(L, -2, "__methods");
     lua_pushcfunction(L, le_o_index);
     lua_setfield(L, -2, "__index");

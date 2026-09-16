@@ -410,6 +410,211 @@ static la_result la_read_indices(const cgltf_accessor *accessor,
 }
 
 /* ------------------------------------------------------------------
+ * Skin attributes (Phase 29): JOINTS_0/WEIGHTS_0 decode.
+ *
+ * glTF 2.0 fixes JOINTS_0 to VEC4 UNSIGNED_BYTE/UNSIGNED_SHORT
+ * (scalar-per-component, never normalized) and WEIGHTS_0 to
+ * VEC4 FLOAT (or normalized u8/u16). Four influences max:
+ * JOINTS_1/WEIGHTS_1 presence fails the import loudly (never
+ * silently dropped). Missing JOINTS_0/WEIGHTS_0 selects rigid
+ * defaults ({0,0,0,0} + {1,0,0,0}); when exactly one is present
+ * the other defaults. Weights normalize per vertex (all-zero
+ * falls back to rigid; never NaN).
+ * ------------------------------------------------------------------ */
+
+/* Widen one JOINTS_0 accessor to uint32 per component. */
+la_result la_decode_joints(const cgltf_accessor *accessor,
+                           uint32_t vertex_count, uint32_t *out) {
+    const unsigned char *base;
+    size_t buf_size;
+    size_t elem_size;
+    size_t stride;
+    size_t view_off;
+    size_t i;
+    la_result res;
+    uint32_t comp_size;
+
+    if (accessor == NULL || out == NULL) {
+        return LA_ERROR_INVALID_ARGUMENT;
+    }
+    if (accessor->type != cgltf_type_vec4 ||
+        accessor->count != (cgltf_size)vertex_count) {
+        return LA_ERROR_IMPORT;
+    }
+    if (accessor->normalized ||
+        (accessor->component_type != cgltf_component_type_r_8u &&
+         accessor->component_type != cgltf_component_type_r_16u)) {
+        /* JOINTS are indices, never normalized floats: any other
+         * component type (or a normalized flag) is a spec
+         * violation in the component-type sense. */
+        return LA_ERROR_UNSUPPORTED;
+    }
+    res = la_accessor_bytes(accessor, &base, &buf_size);
+    if (res != LA_SUCCESS) {
+        return res;
+    }
+    comp_size = la_component_size(accessor->component_type);
+    elem_size = (size_t)comp_size * 4u;
+    /* cgltf sets stride 0 for tightly packed accessors. */
+    if (accessor->stride == 0) {
+        stride = elem_size;
+    } else {
+        stride = accessor->stride;
+    }
+    if (stride < elem_size) {
+        return LA_ERROR_IMPORT;
+    }
+    view_off = accessor->buffer_view->offset + accessor->offset;
+    for (i = 0; i < (size_t)vertex_count; i++) {
+        size_t at = view_off + i * stride;
+        uint32_t c;
+
+        if (at > buf_size || elem_size > buf_size - at) {
+            return LA_ERROR_IMPORT;
+        }
+        for (c = 0; c < 4u; c++) {
+            const unsigned char *p =
+                base + at + (size_t)c * comp_size;
+
+            if (comp_size == 1u) {
+                out[i * 4u + c] = p[0];
+            } else {
+                out[i * 4u + c] =
+                    (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+            }
+        }
+    }
+    return LA_SUCCESS;
+}
+
+/* Normalize one vertex's 4 weights to sum 1. All-zero sums fall
+ * back to rigid {1,0,0,0} (never NaN); callers finite-check
+ * first so NaN/Inf inputs never arrive. */
+void la_normalize_weights(float w[4]) {
+    float sum;
+
+    if (w == NULL) {
+        return;
+    }
+    sum = w[0] + w[1] + w[2] + w[3];
+    if (!(sum > 0.0f)) {
+        /* Zero (or denormal/negative-cancellation) sum: rigid. */
+        w[0] = 1.0f;
+        w[1] = 0.0f;
+        w[2] = 0.0f;
+        w[3] = 0.0f;
+        return;
+    }
+    w[0] /= sum;
+    w[1] /= sum;
+    w[2] /= sum;
+    w[3] /= sum;
+}
+
+/* Decode one primitive's skinning streams. Either accessor may be
+ * NULL (rigid defaults for that stream); both NULL is the common
+ * unskinned case. WEIGHTS reuses the normalized-float path
+ * (float32 or normalized u8/u16); anything else is UNSUPPORTED.
+ * Non-finite weights are IMPORT errors (they would poison the
+ * normalize step). */
+la_result la_decode_skin_vertex(const cgltf_accessor *joints,
+                                const cgltf_accessor *weights,
+                                uint32_t vertex_count, uint32_t *out_joints,
+                                float *out_weights) {
+    uint32_t i;
+    la_result res;
+
+    if (out_joints == NULL || out_weights == NULL) {
+        return LA_ERROR_INVALID_ARGUMENT;
+    }
+    if (vertex_count == 0) {
+        return LA_ERROR_INVALID_ARGUMENT;
+    }
+    if (joints != NULL) {
+        if (joints->is_sparse) {
+            return LA_ERROR_UNSUPPORTED;
+        }
+        res = la_decode_joints(joints, vertex_count, out_joints);
+        if (res != LA_SUCCESS) {
+            return res;
+        }
+    } else {
+        for (i = 0; i < vertex_count; i++) {
+            out_joints[i * 4u + 0] = 0;
+            out_joints[i * 4u + 1] = 0;
+            out_joints[i * 4u + 2] = 0;
+            out_joints[i * 4u + 3] = 0;
+        }
+    }
+    if (weights != NULL) {
+        float *tmp;
+
+        if (weights->type != cgltf_type_vec4 ||
+            weights->count != (cgltf_size)vertex_count ||
+            weights->is_sparse) {
+            if (weights->is_sparse) {
+                return LA_ERROR_UNSUPPORTED;
+            }
+            return LA_ERROR_IMPORT;
+        }
+        if (weights->component_type != cgltf_component_type_r_32f &&
+            !(weights->normalized &&
+              (weights->component_type == cgltf_component_type_r_8u ||
+               weights->component_type ==
+                   cgltf_component_type_r_16u))) {
+            return LA_ERROR_UNSUPPORTED;
+        }
+        tmp = (float *)malloc(sizeof(float) * (size_t)vertex_count *
+                              4u);
+        if (tmp == NULL) {
+            return LA_ERROR_OUT_OF_MEMORY;
+        }
+        res = la_read_float_attr(weights, 4u, tmp);
+        if (res != LA_SUCCESS) {
+            free(tmp);
+            return res;
+        }
+        for (i = 0; i < vertex_count; i++) {
+            float w[4];
+
+            w[0] = tmp[i * 4u + 0];
+            w[1] = tmp[i * 4u + 1];
+            w[2] = tmp[i * 4u + 2];
+            w[3] = tmp[i * 4u + 3];
+            if (!(w[0] == w[0] && w[1] == w[1] && w[2] == w[2] &&
+                  w[3] == w[3])) {
+                /* NaN poisons normalization: reject, never store. */
+                free(tmp);
+                return LA_ERROR_IMPORT;
+            }
+            if (w[0] > 3.4028235e38f || w[0] < -3.4028235e38f ||
+                w[1] > 3.4028235e38f || w[1] < -3.4028235e38f ||
+                w[2] > 3.4028235e38f || w[2] < -3.4028235e38f ||
+                w[3] > 3.4028235e38f || w[3] < -3.4028235e38f) {
+                /* Inf (float32 has no larger finite value):
+                 * same policy as NaN. */
+                free(tmp);
+                return LA_ERROR_IMPORT;
+            }
+            la_normalize_weights(w);
+            out_weights[i * 4u + 0] = w[0];
+            out_weights[i * 4u + 1] = w[1];
+            out_weights[i * 4u + 2] = w[2];
+            out_weights[i * 4u + 3] = w[3];
+        }
+        free(tmp);
+    } else {
+        for (i = 0; i < vertex_count; i++) {
+            out_weights[i * 4u + 0] = 1.0f;
+            out_weights[i * 4u + 1] = 0.0f;
+            out_weights[i * 4u + 2] = 0.0f;
+            out_weights[i * 4u + 3] = 0.0f;
+        }
+    }
+    return LA_SUCCESS;
+}
+
+/* ------------------------------------------------------------------
  * Node transforms (PART G): TRS or raw matrix, column-major in and
  * out, quaternions (x, y, z, w) both sides — no transposition, no
  * reordering, ever.
@@ -772,12 +977,16 @@ static la_result la_import_primitive(la_import *imp,
     const cgltf_accessor *nrm;
     const cgltf_accessor *tan;
     const cgltf_accessor *uv;
+    const cgltf_accessor *joints;
+    const cgltf_accessor *weights;
     uint32_t vertex_count;
     uint32_t index_count;
     float *positions = NULL;
     float *normals = NULL;
     float *tangents = NULL;
     float *uvs = NULL;
+    uint32_t *skin_joints = NULL;
+    float *skin_weights = NULL;
     uint32_t *indices = NULL;
     lr_vertex *verts = NULL;
     lr_mesh *rmesh = NULL;
@@ -789,6 +998,25 @@ static la_result la_import_primitive(la_import *imp,
         la_set_error(imp->manager,
                      "unsupported primitive mode (only TRIANGLES)");
         return LA_ERROR_UNSUPPORTED;
+    }
+    /* Four-influence limit: extra joint/weight sets never silently
+     * drop — the whole import fails. (Scans raw attributes so
+     * JOINTS_2+ without JOINTS_1 cannot slip through either.) */
+    {
+        cgltf_size a;
+
+        for (a = 0; a < prim->attributes_count; a++) {
+            if ((prim->attributes[a].type ==
+                     cgltf_attribute_type_joints ||
+                 prim->attributes[a].type ==
+                     cgltf_attribute_type_weights) &&
+                prim->attributes[a].index != 0) {
+                la_set_error(imp->manager,
+                             "JOINTS_1/WEIGHTS_1 unsupported "
+                             "(four-influence limit)");
+                return LA_ERROR_UNSUPPORTED;
+            }
+        }
     }
     pos = la_find_attr(prim, cgltf_attribute_type_position, 0);
     if (pos == NULL) {
@@ -830,10 +1058,15 @@ static la_result la_import_primitive(la_import *imp,
     tangents =
         (float *)malloc(sizeof(float) * (size_t)vertex_count * 4u);
     uvs = (float *)malloc(sizeof(float) * (size_t)vertex_count * 2u);
+    skin_joints = (uint32_t *)malloc(sizeof(uint32_t) *
+                                     (size_t)vertex_count * 4u);
+    skin_weights =
+        (float *)malloc(sizeof(float) * (size_t)vertex_count * 4u);
     indices = (uint32_t *)malloc(sizeof(uint32_t) * (size_t)index_count);
     verts = (lr_vertex *)malloc(sizeof(lr_vertex) * (size_t)vertex_count);
     if (positions == NULL || normals == NULL || tangents == NULL ||
-        uvs == NULL || indices == NULL || verts == NULL) {
+        uvs == NULL || skin_joints == NULL || skin_weights == NULL ||
+        indices == NULL || verts == NULL) {
         res = LA_ERROR_OUT_OF_MEMORY;
         goto done;
     }
@@ -929,6 +1162,21 @@ static la_result la_import_primitive(la_import *imp,
             tangents[i * 4u + 3] = 1.0f;
         }
     }
+    joints = la_find_attr(prim, cgltf_attribute_type_joints, 0);
+    weights = la_find_attr(prim, cgltf_attribute_type_weights, 0);
+    res = la_decode_skin_vertex(joints, weights, vertex_count,
+                                skin_joints, skin_weights);
+    if (res != LA_SUCCESS) {
+        if (res == LA_ERROR_UNSUPPORTED) {
+            la_set_error(imp->manager,
+                         "unsupported JOINTS_0/WEIGHTS_0 component type "
+                         "(joints need u8/u16, weights float or "
+                         "normalized u8/u16)");
+        } else {
+            la_set_error(imp->manager, "bad JOINTS_0/WEIGHTS_0 data");
+        }
+        goto done;
+    }
     for (i = 0; i < vertex_count; i++) {
         verts[i].position[0] = positions[i * 3u + 0];
         verts[i].position[1] = positions[i * 3u + 1];
@@ -942,6 +1190,14 @@ static la_result la_import_primitive(la_import *imp,
         verts[i].tangent[3] = tangents[i * 4u + 3];
         verts[i].texcoord[0] = uvs[i * 2u + 0];
         verts[i].texcoord[1] = uvs[i * 2u + 1];
+        verts[i].joints[0] = skin_joints[i * 4u + 0];
+        verts[i].joints[1] = skin_joints[i * 4u + 1];
+        verts[i].joints[2] = skin_joints[i * 4u + 2];
+        verts[i].joints[3] = skin_joints[i * 4u + 3];
+        verts[i].weights[0] = skin_weights[i * 4u + 0];
+        verts[i].weights[1] = skin_weights[i * 4u + 1];
+        verts[i].weights[2] = skin_weights[i * 4u + 2];
+        verts[i].weights[3] = skin_weights[i * 4u + 3];
     }
     memset(&mdesc, 0, sizeof(mdesc));
     mdesc.vertices = verts;
@@ -962,6 +1218,8 @@ done:
     free(normals);
     free(tangents);
     free(uvs);
+    free(skin_joints);
+    free(skin_weights);
     free(indices);
     free(verts);
     return res;
@@ -1376,6 +1634,24 @@ static la_result la_build_nodes(la_import *imp) {
             } else {
                 n->mesh_index = -1;
             }
+            /* Skin link mirrors the mesh link above (pointer to
+             * file-order index, -1 when unskinned). Skins
+             * themselves decode later (la_build_skins), once
+             * every node index is known. */
+            if (src->skin != NULL) {
+                ptrdiff_t sd = src->skin - data->skins;
+
+                if (src->skin < data->skins ||
+                    (size_t)sd >= data->skins_count ||
+                    data->skins_count > (cgltf_size)INT32_MAX) {
+                    la_set_error(imp->manager, "node skin out of range");
+                    res = LA_ERROR_IMPORT;
+                    goto done;
+                }
+                n->skin_index = (int32_t)sd;
+            } else {
+                n->skin_index = -1;
+            }
             res = la_node_local(src, &n->local_transform, n->local_matrix);
             if (res != LA_SUCCESS) {
                 la_set_error(imp->manager, "bad node transform");
@@ -1480,6 +1756,569 @@ done:
         ;
     }
     return res;
+}
+
+/* ------------------------------------------------------------------
+ * Skins (Phase 29): joint-node lists + inverse-bind matrices.
+ *
+ * Each file skin becomes one model skin (file order preserved).
+ * Joint pointers become node indices (in range, unique within
+ * the skin — the engine keys skeleton joints by node, so a
+ * duplicate would collapse two joints into one and is rejected
+ * here, loudly). Inverse-bind matrices decode ONCE into
+ * model-owned column-major floats (identity per joint when the
+ * file omits the accessor); every float is finite-checked.
+ * Zero-joint skins are malformed. The skin's `skeleton` root
+ * hint is intentionally ignored: parents always derive from
+ * the node hierarchy (documented in GLTF_ANIMATION_IMPORT.md).
+ * ------------------------------------------------------------------ */
+
+/* Decode one MAT4 float32 accessor into `out` (column-major
+ * passthrough; `count` matrices). */
+static la_result la_read_mat4_attr(const cgltf_accessor *accessor,
+                                   uint32_t count, float *out) {
+    const unsigned char *base;
+    size_t buf_size;
+    size_t elem_size;
+    size_t stride;
+    size_t view_off;
+    size_t i;
+    la_result res;
+
+    if (accessor == NULL || out == NULL) {
+        return LA_ERROR_INVALID_ARGUMENT;
+    }
+    if (accessor->type != cgltf_type_mat4 ||
+        accessor->component_type != cgltf_component_type_r_32f ||
+        accessor->count != (cgltf_size)count) {
+        return LA_ERROR_IMPORT;
+    }
+    if (accessor->is_sparse) {
+        return LA_ERROR_UNSUPPORTED;
+    }
+    res = la_accessor_bytes(accessor, &base, &buf_size);
+    if (res != LA_SUCCESS) {
+        return res;
+    }
+    elem_size = sizeof(float) * 16u;
+    /* cgltf sets stride 0 for tightly packed accessors. */
+    if (accessor->stride == 0) {
+        stride = elem_size;
+    } else {
+        stride = accessor->stride;
+    }
+    if (stride < elem_size) {
+        return LA_ERROR_IMPORT;
+    }
+    view_off = accessor->buffer_view->offset + accessor->offset;
+    for (i = 0; i < (size_t)count; i++) {
+        size_t at = view_off + i * stride;
+        uint32_t c;
+
+        if (at > buf_size || elem_size > buf_size - at) {
+            return LA_ERROR_IMPORT;
+        }
+        for (c = 0; c < 16u; c++) {
+            float v;
+
+            memcpy(&v, base + at + (size_t)c * 4u, 4u);
+            if (!(v == v) || v > 3.4028235e38f ||
+                v < -3.4028235e38f) {
+                /* NaN/Inf inverse bind would poison every
+                 * skinned vertex: reject, never store. */
+                return LA_ERROR_IMPORT;
+            }
+            out[i * 16u + c] = v;
+        }
+    }
+    return LA_SUCCESS;
+}
+
+static la_result la_build_skins(la_import *imp) {
+    cgltf_data *data = imp->data;
+    la_model *model = imp->model;
+    size_t s;
+
+    if (data->skins_count == 0) {
+        model->skins = NULL;
+        model->skin_count = 0;
+        return LA_SUCCESS;
+    }
+    if (data->skins_count > UINT32_MAX) {
+        la_set_error(imp->manager, "skin count out of range");
+        return LA_ERROR_IMPORT;
+    }
+    /* skin_count is published before filling so teardown frees
+     * partial rows (calloc zeroes the tail; free(NULL) is safe). */
+    model->skins =
+        (la_model_skin *)calloc(data->skins_count, sizeof(la_model_skin));
+    if (model->skins == NULL) {
+        return LA_ERROR_OUT_OF_MEMORY;
+    }
+    model->skin_count = (uint32_t)data->skins_count;
+    for (s = 0; s < data->skins_count; s++) {
+        const cgltf_skin *src = &data->skins[s];
+        la_model_skin *dst = &model->skins[s];
+        cgltf_size j;
+
+        if (src->joints_count == 0 ||
+            src->joints_count > UINT32_MAX) {
+            la_set_error(imp->manager, "skin has no joints");
+            return LA_ERROR_IMPORT;
+        }
+        dst->joint_nodes = (int32_t *)malloc(sizeof(int32_t) *
+                                             src->joints_count);
+        dst->inv_bind = (float *)malloc(sizeof(float) * 16u *
+                                        src->joints_count);
+        if (dst->joint_nodes == NULL || dst->inv_bind == NULL) {
+            la_set_error(imp->manager, "out of memory decoding skin");
+            return LA_ERROR_OUT_OF_MEMORY;
+        }
+        dst->joint_count = (uint32_t)src->joints_count;
+        for (j = 0; j < src->joints_count; j++) {
+            int ni = la_node_index(imp, src->joints[j]);
+            cgltf_size k;
+
+            if (ni < 0 ||
+                (uint64_t)ni >= (uint64_t)model->node_count) {
+                la_set_error(imp->manager, "skin joint out of range");
+                return LA_ERROR_IMPORT;
+            }
+            for (k = 0; k < j; k++) {
+                if (dst->joint_nodes[k] == ni) {
+                    la_set_error(imp->manager,
+                                 "duplicate joint node in skin");
+                    return LA_ERROR_IMPORT;
+                }
+            }
+            dst->joint_nodes[j] = ni;
+        }
+        if (src->inverse_bind_matrices != NULL) {
+            la_result res = la_read_mat4_attr(
+                src->inverse_bind_matrices, dst->joint_count,
+                dst->inv_bind);
+
+            if (res != LA_SUCCESS) {
+                if (res == LA_ERROR_UNSUPPORTED) {
+                    la_set_error(imp->manager,
+                                 "sparse inverseBindMatrices "
+                                 "unsupported");
+                } else {
+                    la_set_error(imp->manager,
+                                 "bad inverseBindMatrices accessor");
+                }
+                return res;
+            }
+        } else {
+            /* Spec default: identity per joint. */
+            for (j = 0; j < src->joints_count; j++) {
+                uint32_t c;
+
+                for (c = 0; c < 16u; c++) {
+                    dst->inv_bind[j * 16u + c] =
+                        (c % 5u == 0) ? 1.0f : 0.0f;
+                }
+            }
+        }
+    }
+    return LA_SUCCESS;
+}
+
+/* ------------------------------------------------------------------
+ * Animations (Phase 29): decoded, engine-ready key tracks.
+ *
+ * Each file animation becomes at most one model animation:
+ * morph-target (weights) channels are SKIPPED (morph targets
+ * are a deferred feature), and an animation left with zero
+ * importable channels is excluded from the model entirely
+ * (count, indices, and durations only ever describe kept
+ * data). Anything else malformed — bad accessors, negative or
+ * non-finite times, out-of-range target nodes, count
+ * mismatches — fails the whole import (transactional).
+ *
+ * Times decode from scalar-float inputs (finite, >= 0,
+ * non-decreasing; strict increase is NOT required — the engine
+ * samples duplicates last-wins). Outputs are float vec3 (T/S)
+ * or vec4 (R), finite-checked (quats are normalized by the
+ * engine, not here). CUBICSPLINE outputs hold key_count * 3
+ * vectors (in/value/out Hermite triples); `key_count` always
+ * equals the input count. Duration is the max last-key time
+ * across the animation's KEPT channels.
+ * ------------------------------------------------------------------ */
+
+/* Decode one sampler input (times): scalar float, finite, >= 0. */
+static la_result la_read_anim_times(const cgltf_accessor *accessor,
+                                    float *out) {
+    const unsigned char *base;
+    size_t buf_size;
+    size_t elem_size;
+    size_t stride;
+    size_t view_off;
+    size_t i;
+    la_result res;
+
+    if (accessor == NULL || out == NULL) {
+        return LA_ERROR_INVALID_ARGUMENT;
+    }
+    if (accessor->type != cgltf_type_scalar ||
+        accessor->component_type != cgltf_component_type_r_32f ||
+        accessor->count == 0 || accessor->count > UINT32_MAX ||
+        accessor->normalized || accessor->is_sparse) {
+        return LA_ERROR_IMPORT;
+    }
+    res = la_accessor_bytes(accessor, &base, &buf_size);
+    if (res != LA_SUCCESS) {
+        return res;
+    }
+    elem_size = sizeof(float);
+    /* cgltf sets stride 0 for tightly packed accessors. */
+    if (accessor->stride == 0) {
+        stride = elem_size;
+    } else {
+        stride = accessor->stride;
+    }
+    if (stride < elem_size) {
+        return LA_ERROR_IMPORT;
+    }
+    view_off = accessor->buffer_view->offset + accessor->offset;
+    for (i = 0; i < accessor->count; i++) {
+        size_t at = view_off + i * stride;
+        float v;
+
+        if (at > buf_size || elem_size > buf_size - at) {
+            return LA_ERROR_IMPORT;
+        }
+        memcpy(&v, base + at, 4u);
+        if (!(v == v) || v > 3.4028235e38f) {
+            /* NaN/Inf key times are un-sampleable. */
+            return LA_ERROR_IMPORT;
+        }
+        if (v < 0.0f) {
+            return LA_ERROR_IMPORT;
+        }
+        if (i > 0 && v < out[i - 1u]) {
+            /* Decreasing times break segment search. */
+            return LA_ERROR_IMPORT;
+        }
+        out[i] = v;
+    }
+    return LA_SUCCESS;
+}
+
+/* Decode one sampler output (values): float vec3/vec4,
+ * finite-checked. `count` is the ELEMENT count (vectors, not
+ * floats — keys, or keys * 3 under CUBICSPLINE); each element
+ * holds `comps` floats. */
+static la_result la_read_anim_values(const cgltf_accessor *accessor,
+                                     uint32_t comps, uint32_t count,
+                                     float *out) {
+    const unsigned char *base;
+    size_t buf_size;
+    size_t elem_size;
+    size_t stride;
+    size_t view_off;
+    size_t i;
+    la_result res;
+
+    if (accessor == NULL || out == NULL) {
+        return LA_ERROR_INVALID_ARGUMENT;
+    }
+    if ((comps != 3u && comps != 4u) ||
+        la_type_components(accessor->type) != comps ||
+        accessor->component_type != cgltf_component_type_r_32f ||
+        accessor->count != (cgltf_size)count || accessor->normalized ||
+        accessor->is_sparse) {
+        return LA_ERROR_IMPORT;
+    }
+    res = la_accessor_bytes(accessor, &base, &buf_size);
+    if (res != LA_SUCCESS) {
+        return res;
+    }
+    elem_size = sizeof(float) * comps;
+    /* cgltf sets stride 0 for tightly packed accessors. */
+    if (accessor->stride == 0) {
+        stride = elem_size;
+    } else {
+        stride = accessor->stride;
+    }
+    if (stride < elem_size) {
+        return LA_ERROR_IMPORT;
+    }
+    view_off = accessor->buffer_view->offset + accessor->offset;
+    for (i = 0; i < (size_t)count; i++) {
+        size_t at = view_off + i * stride;
+        uint32_t c;
+
+        if (at > buf_size || elem_size > buf_size - at) {
+            return LA_ERROR_IMPORT;
+        }
+        for (c = 0; c < comps; c++) {
+            float v;
+
+            memcpy(&v, base + at + (size_t)c * 4u, 4u);
+            if (!(v == v) || v > 3.4028235e38f ||
+                v < -3.4028235e38f) {
+                return LA_ERROR_IMPORT;
+            }
+            out[i * comps + c] = v;
+        }
+    }
+    return LA_SUCCESS;
+}
+
+/* Decode one channel into `dst` (owns fresh times/values on
+ * success; frees them before reporting failure). Returns 1 when
+ * the channel is morph-targeted (skip it — NOT an error), 0 on
+ * a decoded channel, and the la_result code (as int) on
+ * malformed data. */
+static void la_free_channel(la_model_anim_channel *ch) {
+    if (ch == NULL) {
+        return;
+    }
+    free(ch->times);
+    free(ch->values);
+    ch->times = NULL;
+    ch->values = NULL;
+}
+
+static int la_decode_channel(la_import *imp,
+                             const cgltf_animation_channel *ch,
+                             la_model_anim_channel *dst) {
+    const cgltf_animation_sampler *sampler;
+    uint32_t comps;
+    uint32_t keys;
+    uint64_t out_count;
+    la_result res;
+
+    memset(dst, 0, sizeof(*dst));
+    if (ch == NULL || ch->sampler == NULL) {
+        la_set_error(imp->manager, "animation channel has no sampler");
+        return (int)LA_ERROR_IMPORT;
+    }
+    sampler = ch->sampler;
+    if (ch->target_path == cgltf_animation_path_type_weights) {
+        /* Morph targets deferred: skip the channel (loud at the
+         * engine layer, which counts surviving tracks). */
+        return 1;
+    }
+    if (ch->target_node == NULL) {
+        la_set_error(imp->manager, "animation channel has no target");
+        return (int)LA_ERROR_IMPORT;
+    }
+    {
+        int ni = la_node_index(imp, ch->target_node);
+
+        if (ni < 0 || (uint64_t)ni >= (uint64_t)imp->model->node_count) {
+            la_set_error(imp->manager, "animation target out of range");
+            return (int)LA_ERROR_IMPORT;
+        }
+        dst->target_node = ni;
+    }
+    switch (ch->target_path) {
+    case cgltf_animation_path_type_translation:
+        dst->path = 0;
+        comps = 3u;
+        break;
+    case cgltf_animation_path_type_rotation:
+        dst->path = 1;
+        comps = 4u;
+        break;
+    case cgltf_animation_path_type_scale:
+        dst->path = 2;
+        comps = 3u;
+        break;
+    default:
+        la_set_error(imp->manager, "unknown animation path");
+        return (int)LA_ERROR_IMPORT;
+    }
+    switch (sampler->interpolation) {
+    case cgltf_interpolation_type_step:
+        dst->interpolation = 0;
+        break;
+    case cgltf_interpolation_type_linear:
+        dst->interpolation = 1;
+        break;
+    case cgltf_interpolation_type_cubic_spline:
+        dst->interpolation = 2;
+        break;
+    default:
+        la_set_error(imp->manager, "unknown animation interpolation");
+        return (int)LA_ERROR_IMPORT;
+    }
+    if (sampler->input == NULL || sampler->output == NULL) {
+        la_set_error(imp->manager, "animation sampler has no keys");
+        return (int)LA_ERROR_IMPORT;
+    }
+    if (sampler->input->count == 0 ||
+        sampler->input->count > UINT32_MAX) {
+        la_set_error(imp->manager, "animation sampler has no keys");
+        return (int)LA_ERROR_IMPORT;
+    }
+    keys = (uint32_t)sampler->input->count;
+    /* Output ELEMENT count (cgltf counts elements, not floats:
+     * keys vectors, or keys * 3 under CUBICSPLINE). The values
+     * buffer holds out_count * comps floats. */
+    out_count = (uint64_t)keys;
+    if (dst->interpolation == 2u) {
+        out_count *= 3u; /* in/value/out triples */
+    }
+    if (out_count > (uint64_t)UINT32_MAX) {
+        la_set_error(imp->manager, "animation output count out of range");
+        return (int)LA_ERROR_IMPORT;
+    }
+    if ((uint64_t)sampler->output->count != out_count) {
+        la_set_error(imp->manager, "animation output count mismatch");
+        return (int)LA_ERROR_IMPORT;
+    }
+    if (out_count > (uint64_t)UINT32_MAX / comps) {
+        la_set_error(imp->manager, "animation output count out of range");
+        return (int)LA_ERROR_OUT_OF_MEMORY;
+    }
+    dst->times = (float *)malloc(sizeof(float) * (size_t)keys);
+    dst->values = (float *)malloc(sizeof(float) * (size_t)out_count *
+                                  comps);
+    if (dst->times == NULL || dst->values == NULL) {
+        la_set_error(imp->manager, "out of memory decoding animation");
+        return (int)LA_ERROR_OUT_OF_MEMORY;
+    }
+    dst->key_count = keys;
+    res = la_read_anim_times(sampler->input, dst->times);
+    if (res != LA_SUCCESS) {
+        la_set_error(imp->manager, "bad animation key times");
+        la_free_channel(dst);
+        return (int)res;
+    }
+    res = la_read_anim_values(sampler->output, comps,
+                              (uint32_t)out_count, dst->values);
+    if (res != LA_SUCCESS) {
+        la_set_error(imp->manager, "bad animation key values");
+        la_free_channel(dst);
+        return (int)res;
+    }
+    return 0;
+}
+
+static la_result la_build_anims(la_import *imp) {
+    cgltf_data *data = imp->data;
+    la_model_animation *kept = NULL;
+    uint32_t kept_count = 0;
+    size_t a;
+
+    if (data->animations_count == 0) {
+        imp->model->anims = NULL;
+        imp->model->anim_count = 0;
+        return LA_SUCCESS;
+    }
+    if (data->animations_count > UINT32_MAX) {
+        la_set_error(imp->manager, "animation count out of range");
+        return LA_ERROR_IMPORT;
+    }
+    /* Scratch holds every file animation's kept channels; only
+     * animations with >= 1 kept channel publish to the model.
+     * Nothing publishes until the whole file decodes (any error
+     * frees the scratch outright — transactional). */
+    kept = (la_model_animation *)calloc(data->animations_count,
+                                        sizeof(la_model_animation));
+    if (kept == NULL) {
+        return LA_ERROR_OUT_OF_MEMORY;
+    }
+    for (a = 0; a < data->animations_count; a++) {
+        const cgltf_animation *src = &data->animations[a];
+        la_model_anim_channel *channels = NULL;
+        uint32_t n_kept = 0;
+        float duration = 0.0f;
+        cgltf_size c;
+        la_result res = LA_SUCCESS;
+
+        if (src->channels_count > UINT32_MAX) {
+            la_set_error(imp->manager,
+                         "animation channel count out of range");
+            res = LA_ERROR_IMPORT;
+        } else if (src->channels_count > 0) {
+            channels = (la_model_anim_channel *)calloc(
+                src->channels_count, sizeof(la_model_anim_channel));
+            if (channels == NULL) {
+                res = LA_ERROR_OUT_OF_MEMORY;
+            }
+        }
+        for (c = 0; res == LA_SUCCESS && c < src->channels_count;
+             c++) {
+            la_model_anim_channel ch;
+            int dc = la_decode_channel(imp, &src->channels[c], &ch);
+
+            if (dc == 1) {
+                continue; /* morph-target channel: skipped */
+            }
+            if (dc != 0) {
+                res = (la_result)dc;
+                break;
+            }
+            channels[n_kept] = ch;
+            if (ch.key_count > 0 &&
+                ch.times[ch.key_count - 1u] > duration) {
+                duration = ch.times[ch.key_count - 1u];
+            }
+            n_kept++;
+        }
+        if (res != LA_SUCCESS) {
+            uint32_t k;
+            size_t p;
+
+            for (k = 0; k < n_kept; k++) {
+                la_free_channel(&channels[k]);
+            }
+            free(channels);
+            for (p = 0; p < (size_t)kept_count; p++) {
+                uint32_t k;
+
+                for (k = 0; k < kept[p].channel_count; k++) {
+                    la_free_channel(&kept[p].channels[k]);
+                }
+                free(kept[p].channels);
+            }
+            free(kept);
+            return res;
+        }
+        if (n_kept == 0) {
+            /* Morph-only (or empty) animation: excluded. */
+            free(channels);
+            continue;
+        }
+        if (n_kept < src->channels_count) {
+            /* Shrink to the kept prefix (keeps borrowing math
+             * exact; a shrink failure keeps the valid oversize
+             * array — queries still bound by channel_count). */
+            la_model_anim_channel *smaller =
+                (la_model_anim_channel *)realloc(
+                    channels,
+                    sizeof(la_model_anim_channel) * n_kept);
+
+            if (smaller != NULL) {
+                channels = smaller;
+            }
+        }
+        kept[kept_count].channels = channels;
+        kept[kept_count].channel_count = n_kept;
+        kept[kept_count].duration = duration;
+        kept_count++;
+    }
+    if (kept_count == 0) {
+        free(kept);
+        imp->model->anims = NULL;
+        imp->model->anim_count = 0;
+        return LA_SUCCESS;
+    }
+    if (kept_count < (uint32_t)data->animations_count) {
+        la_model_animation *smaller = (la_model_animation *)realloc(
+            kept, sizeof(la_model_animation) * kept_count);
+
+        if (smaller != NULL) {
+            kept = smaller;
+        }
+    }
+    imp->model->anims = kept;
+    imp->model->anim_count = kept_count;
+    return LA_SUCCESS;
 }
 
 /* ------------------------------------------------------------------
@@ -1848,7 +2687,8 @@ la_result la_import_gltf(la_asset_manager *manager, const char *path,
         goto done;
     }
     if (pres != cgltf_result_success) {
-        la_set_error(manager, "cannot parse '%s'", path);
+        la_set_error(manager, "cannot parse '%s' (cgltf %d)", path,
+                     (int)pres);
         res = LA_ERROR_IMPORT;
         goto done;
     }
@@ -1871,6 +2711,8 @@ la_result la_import_gltf(la_asset_manager *manager, const char *path,
         imp.data->materials_count > UINT32_MAX ||
         imp.data->images_count > UINT32_MAX ||
         imp.data->samplers_count > UINT32_MAX ||
+        imp.data->skins_count > UINT32_MAX ||
+        imp.data->animations_count > UINT32_MAX ||
         imp.data->nodes_count > (cgltf_size)INT32_MAX) {
         la_set_error(manager, "asset counts out of range");
         res = LA_ERROR_IMPORT;
@@ -1897,6 +2739,17 @@ la_result la_import_gltf(la_asset_manager *manager, const char *path,
     model->source_texture_count = (uint32_t)imp.data->images_count;
     model->source_sampler_count = (uint32_t)imp.data->samplers_count;
     res = la_build_nodes(&imp);
+    if (res != LA_SUCCESS) {
+        goto done;
+    }
+    res = la_build_skins(&imp);
+    if (res != LA_SUCCESS) {
+        goto done;
+    }
+    /* Animations decode before any mesh uploads so malformed
+     * tracks fail pre-GPU (headless-testable, no partial GPU
+     * state to unwind). */
+    res = la_build_anims(&imp);
     if (res != LA_SUCCESS) {
         goto done;
     }

@@ -743,7 +743,10 @@ lr_result lr_gpu_prepare(lr_renderer *renderer,
     renderer->gpu_stats.indirect_commands = 0;
     renderer->gpu_stats.gpu_driven_batches = 0;
     /* Group every live PBR item (CPU culling skipped: the GPU
-     * decides visibility; shadows re-cull per light themselves). */
+     * decides visibility; shadows re-cull per light themselves).
+     * Phase 29: skinned items NEVER group (they always draw via
+     * the CPU loop with per-draw palettes); they stay queued and
+     * the CPU loop below covers them. */
     for (i = 0; i < renderer->queued; i++) {
         lr_queued_item *item = &renderer->queue[i];
         lr_gpu_group *group = NULL;
@@ -751,6 +754,9 @@ lr_result lr_gpu_prepare(lr_renderer *renderer,
 
         if (!lr_mesh_is_live(renderer, item->mesh) ||
             !lr_material_is_live(renderer, item->material)) {
+            continue;
+        }
+        if (item->skinned) {
             continue;
         }
         if (item->material->type !=

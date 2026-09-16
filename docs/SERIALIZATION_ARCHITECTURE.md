@@ -1,4 +1,4 @@
-# Serialization Architecture (Phase 25; script lines Phase 26)
+# Serialization Architecture (Phase 25; script lines Phase 26; physics lines Phase 28; animator lines Phase 29)
 
 Canonical versioned TEXT format (UTF-8, LF). Memory-first
 (`le_scene_save_text` / `le_scene_load_text`); file helpers
@@ -25,8 +25,22 @@ shadow 0 | shadow 1 res dbias nbias near far dist
 script <scriphex>              (Phase 26: at most one per object)
 sprop bool|int <name> <value>  (Phase 26: exported values)
 sprop number|string|vec3|asset <name> <value>
+rigid_body <static|dynamic|kinematic> <mass> <lindamp> <angdamp>
+  <gscale> <lvx> <lvy> <lvz> <avx> <avy> <avz>   (Phase 28: 12)
+collider sphere <r> <off...> <quat...> <trig> <layer> <mask>
+  <friction> <restitution>                      (Phase 28: 15)
+collider box <he...> <off...> <quat...> <trig> <layer> <mask>
+  <friction> <restitution>                      (Phase 28: 17)
+animator <skelhex|nil> <cliphex|nil> <autoplay> <once|loop|
+  pingpong> <speed> <start>                     (Phase 29: 7)
 end
 ```
+
+Phase 28 notes: physics lines carry AUTHORING state only (never
+accumulators/contacts/caches); velocities persist as explicit
+authoring values. Floats use `%.9g` (float32 round-trip).
+Duplicate `rigid_body`/`collider` lines on one object are
+rejected; the box tokenizer needs 17+ slots (24 provided).
 
 Phase 26 notes: `script` resolves the asset ID to a READY
 `LE_ASSET_SCRIPT` handle (unready/missing fails the

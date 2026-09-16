@@ -1,4 +1,4 @@
-# Luma Engine Architecture (Phase 24; scripting Phase 26; input/time/lifecycle Phase 27)
+# Luma Engine Architecture (Phase 24; scripting Phase 26; input/time/lifecycle Phase 27; physics Phase 28; animation Phase 29)
 
 Luma Engine (`engine/`, `le_*`, static library) is the scene layer:
 generational objects, hierarchy, transforms, lightweight components,
@@ -135,6 +135,34 @@ handles → renderer backing per frame), glTF bridge (adopt, dedup).
 Reparent now takes an explicit mode (`LE_REPARENT_KEEP_LOCAL` /
 `LE_REPARENT_KEEP_WORLD`); the modeless Phase 24 spelling keeps
 local.
+
+## Phase 28 additions
+
+Engine-owned rigid-body physics (`PHYSICS_ARCHITECTURE.md`,
+`PHYSICS_SOLVER.md`): per-world physics state (bodies,
+colliders, SAP broad phase, sequential-impulse solver,
+ENTER/STAY/EXIT events), fixed-step ordered
+(scripts -> forces -> integrate -> detect -> solve -> sync ->
+events), `LE_COMPONENT_RIGID_BODY` / `LE_COMPONENT_COLLIDER`,
+`rigid_body` + `collider` scene lines, `Physics` + velocity/
+force/impulse Lua bindings, `collision_*/trigger_*` callbacks,
+queries (raycast near->far, overlaps), debug line soup + stats.
+No CCD/sleeping/joints (deferred); capsule colliders deferred.
+
+## Phase 29 additions
+
+Engine-owned keyframe animation (`ANIMATION_ARCHITECTURE.md`):
+immutable skeleton/clip assets (`LE_ASSET_SKELETON`,
+`LE_ASSET_ANIMATION_CLIP`) + mutable `LE_COMPONENT_ANIMATOR`
+runtime (playback, crossfade, evaluated pose), STEP/LINEAR/
+CUBICSPLINE sampling (pure function of clip+time), visual
+advance after scripts in the frame order (no second clock),
+OBJECT-vs-JOINT transform ownership against dynamic bodies,
+`animator` scene line, animation Lua methods, renderer-owned
+GPU skinning (`GPU_SKINNING.md`, palette rides the submit
+item), glTF skin/animation import
+(`GLTF_ANIMATION_IMPORT.md`). No state machines/IK/
+retargeting/morph (deferred).
 
 ## Phase 27 additions
 

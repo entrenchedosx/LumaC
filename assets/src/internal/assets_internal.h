@@ -51,6 +51,37 @@ typedef struct la_model_material {
     lr_material *material; /* owned */
 } la_model_material;
 
+/* One imported skin (file order): joint nodes + inverse-bind
+ * matrices, both model-owned. `joint_nodes[j]` is a model node
+ * index; `inv_bind` holds joint_count column-major 4x4 matrices
+ * (identity per joint when the file omits inverseBindMatrices). */
+typedef struct la_model_skin {
+    int32_t *joint_nodes; /* owned [joint_count] */
+    float *inv_bind; /* owned [joint_count * 16] */
+    uint32_t joint_count;
+} la_model_skin;
+
+/* One imported animation channel: decoded key times + values,
+ * both model-owned. CUBICSPLINE values hold key_count * 3
+ * vectors (in/value/out triples); other modes hold key_count. */
+typedef struct la_model_anim_channel {
+    int32_t target_node;
+    uint32_t path; /* 0 = T, 1 = R, 2 = S */
+    uint32_t interpolation; /* 0 = STEP, 1 = LINEAR, 2 = CUBICSPLINE */
+    uint32_t key_count;
+    float *times; /* owned [key_count] */
+    float *values; /* owned [key_count * comps] (x3 vectors if cubic) */
+} la_model_anim_channel;
+
+/* One imported animation (morph-only animations never reach
+ * here — they are excluded at import). `duration` is the max
+ * last-key time across kept channels. */
+typedef struct la_model_animation {
+    la_model_anim_channel *channels; /* owned [channel_count] */
+    uint32_t channel_count;
+    float duration;
+} la_model_animation;
+
 /* One cached HDR environment source (manager-owned, shared by
  * path). Half-float GPU image, single mip level, sampled by
  * renderer-side equirectangular preprocessing. */
@@ -84,6 +115,10 @@ struct la_model {
     uint32_t mesh_count;
     la_model_material *materials; /* owned */
     uint32_t material_count;
+    la_model_skin *skins; /* owned, file order */
+    uint32_t skin_count;
+    la_model_animation *anims; /* owned (morph-only excluded) */
+    uint32_t anim_count;
     la_texture_asset **textures; /* borrowed refs */
     uint32_t texture_count;
     la_sampler_asset **samplers; /* borrowed refs */
@@ -150,5 +185,20 @@ la_result la_sampler_from_gltf(const cgltf_sampler *sampler,
 
 /* Model helpers (model.c). */
 void la_model_teardown(la_model *model);
+
+/* Skin-vertex decode helpers (gltf_import.c; white-box tested).
+ * la_decode_joints widens a JOINTS_0 accessor (VEC4 u8/u16,
+ * UNnormalized) to uint32 per component. la_normalize_weights
+ * rescales one vertex's 4 weights to sum 1 (all-zero sum falls
+ * back to {1,0,0,0}; never NaN). la_decode_skin_vertex runs both
+ * (NULL joints/weights accessors select rigid defaults) and is
+ * the single policy point used by primitive import. */
+la_result la_decode_joints(const cgltf_accessor *accessor,
+                           uint32_t vertex_count, uint32_t *out);
+void la_normalize_weights(float w[4]);
+la_result la_decode_skin_vertex(const cgltf_accessor *joints,
+                                const cgltf_accessor *weights,
+                                uint32_t vertex_count, uint32_t *out_joints,
+                                float *out_weights);
 
 #endif /* LUMA_ASSETS_INTERNAL_H */

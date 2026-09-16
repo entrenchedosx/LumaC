@@ -227,3 +227,18 @@ CPU fallback is always available. Proofs live in
 edge cases, multi-draw) and `examples/gpu_driven_scene`.
 
 Phase 23: renderer adds Hi-Z pyramid, occlusion culling, mesh LODs (LR_MESH_MAX_LODS), visibility settings/stats, and a minimal render graph; see HIZ/OCCLUSION_CULLING/GPU_LOD/RENDER_GRAPH_ARCHITECTURE.md.
+
+Phase 29 GPU skinning (see GPU_SKINNING.md): 'lr_draw_item' carries
+an appended borrowed skin palette ('skin_palette'/'skin_joint_count',
+NULL/0 = rigid; copied synchronously at submit, never retained).
+Meshes scan source verts once at creation ('lr_mesh_is_skinned').
+Skinned draws route through skinned pipeline variants (PBR slot 3,
+unlit slot 1, depth slot 1; same buffers, same stride) with the
+per-draw arena window in the push tail (PBR 124B, unlit 88B,
+shadow 72B); rigid draws are byte-identical. One host-visible
+storage buffer + one set upload per frame; skinned items skip
+frustum culling (conservative bounds) and GPU-driven/visibility
+grouping (always CPU-drawn). Stats gain trailing
+'skinned_draw_calls'/'skinned_triangles'. Proofs live in
+'test_skin_vulkan' (bind-pose regression, translated-joint oracle,
+flag queries, both render modes).

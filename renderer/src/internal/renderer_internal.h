@@ -52,17 +52,40 @@ typedef struct lr_shadows_gpu {
     lr_shadow_slot_gpu slots[LR_MAX_SHADOWS];
 } lr_shadows_gpu;
 
-/* PBR push block: model + normal matrix + receive flags (116B). */
+/* PBR push block: model + normal matrix + receive flags + skin
+ * window (124B, under the 128B push-constant limit). skin_offset
+ * is the joint index of this draw's first palette entry inside the
+ * frame skin arena (in mat4 units); skin_joints is the palette
+ * joint count. Both zero = rigid (shader takes the unskinned
+ * path, byte-identical to the pre-skin pipeline). */
 typedef struct lr_pbr_push {
     float model[16];
     float normal_matrix[12];
     uint32_t flags; /* bit0: receives shadows */
+    uint32_t skin_offset;
+    uint32_t skin_joints;
 } lr_pbr_push;
 
-/* Shadow depth push block: model matrix only (64B). */
+/* Shadow depth push block: model matrix + skin window (72B). */
 typedef struct lr_shadow_push {
     float model[16];
+    uint32_t skin_offset;
+    uint32_t skin_joints;
 } lr_shadow_push;
+
+/* Unlit push block: model matrix + material color + skin window
+ * (88 bytes, under the 128B push-constant limit). skin_offset is
+ * the joint index of this draw's first palette entry inside the
+ * frame skin arena (in mat4 units); skin_joints is the palette
+ * joint count. Both zero = rigid (shader takes the unskinned
+ * path, byte-identical to the pre-skin pipeline). Shared by
+ * renderer.c (draws) and skin.c (skinned pipeline creation). */
+typedef struct lr_unlit_push {
+    float model[16];
+    float color[4];
+    uint32_t skin_offset;
+    uint32_t skin_joints;
+} lr_unlit_push;
 
 /* One shadow depth-pass VP (64B, mapped write per light). */
 typedef struct lr_depth_vp_gpu {
@@ -85,7 +108,11 @@ typedef struct lr_material_gpu {
 /* One queued submission (flattened at submit time). Shadow flags
  * ride along for the depth passes (opt-in, nonzero participates).
  * main_visible marks main-frustum survivors; culled entries stay
- * queued (up to max_objects) so off-screen casters still shadow. */
+ * queued (up to max_objects) so off-screen casters still shadow.
+ * Phase 29: skinned marks a draw routed through the skinned
+ * pipelines (palette already copied into the frame arena at
+ * skin_offset); unskinned entries keep offset/count zero and
+ * draw through the untouched rigid pipelines. */
 typedef struct lr_queued_item {
     lr_mesh *mesh;
     lr_material *material;
@@ -97,6 +124,9 @@ typedef struct lr_queued_item {
     int main_visible;
     int mirrored; /* 1 when det(upper 3x3) < 0 (Stage 40 mirrored fix) */
     uint64_t instance_id; /* stable temporal key from lr_draw_item (0 = none) */
+    int skinned;          /* 1 when this draw uses the skin arena window */
+    uint32_t skin_offset; /* first arena joint (mat4 units) for this draw */
+    uint32_t skin_joints; /* joint count copied for this draw */
 } lr_queued_item;
 
 /* One submitted light (public copy + shadow assignment). Slot is
@@ -501,6 +531,42 @@ struct lr_renderer {
     uint32_t vis_prepared_flight;       /* v2 prepare slot */
     int vis_params_primed;              /* params buffer transitioned */
     lr_visibility_stats vis_stats;      /* last update_* snapshot */
+    /* Phase 29 GPU skinning (renderer-owned, per-frame arena).
+     * The CPU arena holds one concatenated float array of joint
+     * mat4s (16 floats each, column-major) copied synchronously
+     * at submit; skin_buffer is its host-visible GPU mirror
+     * (STORAGE usage, persistently mapped like light_buffer),
+     * uploaded once per frame before draws via lc_buffer_write.
+     * skin_set binds the whole buffer (one set, buffer holds the
+     * whole frame arena); per-draw offsets ride the push block.
+     * skin_layouts/pipelines/shaders are renderer-global (created
+     * lazily on first skinned submit, destroyed with the
+     * renderer); the set is (re)written once per frame before
+     * draws and bound for every skinned draw — never rebuilt per
+     * draw. skin_used counts arena joints consumed this frame
+     * (reset every begin). */
+    float *skin_cpu;                 /* [skin_cpu_cap * 16] floats */
+    uint32_t skin_cpu_used;          /* joints consumed this frame */
+    uint32_t skin_cpu_cap;           /* joints allocated */
+    lc_buffer *skin_buffer;          /* GPU mirror, STORAGE */
+    void *skin_mapped;               /* persistent map (may be NULL) */
+    uint32_t skin_buffer_cap;        /* joints allocated on the GPU */
+    lc_binding_layout *skin_pbr_layout;   /* PBR slot 3: storage */
+    lc_binding_layout *skin_unlit_layout; /* unlit slot 1: storage */
+    lc_binding_layout *skin_depth_layout; /* depth slot 1: storage */
+    lc_binding_set *skin_set;        /* one set over skin_buffer */
+    uint32_t skin_set_cap;           /* buffer cap (joints) last written */
+    int skin_ready;                  /* layouts/shaders created */
+    int skin_uploaded_frame;         /* frame_number uploaded (0 none) */
+    lc_shader *skin_pbr_vertex_shader;
+    lc_shader *skin_unlit_vertex_shader;
+    lc_shader *skin_depth_vertex_shader;
+    lr_cached_pipeline skin_pbr_pipelines[LR_PIPELINE_CACHE_MAX];
+    uint32_t skin_pbr_pipeline_count;
+    lr_cached_pipeline skin_unlit_pipelines[LR_PIPELINE_CACHE_MAX];
+    uint32_t skin_unlit_pipeline_count;
+    lr_cached_pipeline skin_depth_pipelines[4];
+    uint32_t skin_depth_pipeline_count;
 };
 
 /* Phase 23 Hi-Z pyramid (renderer/src/hiz.c). Opaque handle owned
@@ -579,6 +645,11 @@ struct lr_mesh {
     float lod_min_px[LR_MESH_MAX_LODS];
     lc_buffer *lod_index_buffers[LR_MESH_MAX_LODS];
     uint32_t lod_index_counts[LR_MESH_MAX_LODS];
+    /* Phase 29: nonzero when at least one source vertex deviates
+     * from the rigid convention (joints {0,0,0,0} + weights
+     * {1,0,0,0}); scanned once at creation (see
+     * lr_mesh_is_skinned). */
+    int skinned;
     lr_mesh *next;
     lr_mesh *prev;
 };
@@ -770,5 +841,45 @@ lr_result lr_renderer_instanced_pipeline_for(
     lr_renderer *renderer, const lc_render_target_desc *signature,
     lr_material_type material_type, lc_cull_mode cull_mode,
     lc_front_face front_face, lc_pipeline **out_pipeline);
+
+/* Phase 29 GPU skinning (renderer/src/skin.c). The CPU arena is
+ * filled synchronously at submit; the GPU buffer + one set are
+ * uploaded/bound once per frame before draws. All functions are
+ * renderer-private (no backend types cross). */
+/* Scan source vertices for skinning data (1 when any vertex
+ * deviates from the rigid convention; exact float compare). */
+int lr_skin_scan_vertices(const lr_vertex *vertices,
+                           uint32_t vertex_count);
+/* Copy one palette into the frame arena (grows geometrically in
+ * 64-joint chunks). Returns LR_ERROR_OUT_OF_MEMORY on arena OOM;
+ * rejects joint_count == 0 or > 4096 or palette NULL with
+ * INVALID_ARGUMENT. *out_offset receives the first arena joint. */
+lr_result lr_skin_arena_push(lr_renderer *renderer,
+                             const float (*palette)[16],
+                             uint32_t joint_count,
+                             uint32_t *out_offset);
+/* Lazily create skin layouts/shaders (idempotent). */
+lr_result lr_skin_ensure_shared(lr_renderer *renderer);
+/* Destroy all skin resources (NULL-safe, retirement-safe). */
+void lr_skin_destroy(lr_renderer *renderer);
+/* Upload the frame arena + (re)write the one skin set before
+ * draws (idempotent per frame; no-op with no skinned draws). */
+lr_result lr_skin_upload_frame(lr_renderer *renderer);
+/* Skinned pipeline variants (mini-caches mirroring
+ * lr_renderer_pipeline_for / lr_renderer_depth_pipeline_for;
+ * same signature/cull/front discipline + the skin slot). */
+lr_result lr_renderer_skinned_pbr_pipeline_for(
+    lr_renderer *renderer, const lc_render_target_desc *signature,
+    lc_cull_mode cull_mode, lc_front_face front_face,
+    lc_pipeline **out_pipeline);
+lr_result lr_renderer_skinned_unlit_pipeline_for(
+    lr_renderer *renderer, const lc_render_target_desc *signature,
+    lc_cull_mode cull_mode, lc_front_face front_face,
+    lc_pipeline **out_pipeline);
+lr_result lr_renderer_skinned_depth_pipeline_for(
+    lr_renderer *renderer, const lc_render_target_desc *signature,
+    lc_pipeline **out_pipeline);
+/* Public mesh query (0 for NULL/dead). */
+int lr_mesh_is_skinned(const lr_mesh *mesh);
 
 #endif /* LUMA_RENDERER_INTERNAL_H */

@@ -223,6 +223,10 @@ le_result le_ensure_object_capacity(le_world *world) {
                 fresh[i].renderable_index = LE_NO_LINK;
                 fresh[i].camera_index = LE_NO_LINK;
                 fresh[i].light_index = LE_NO_LINK;
+                fresh[i].script_index = LE_NO_LINK;
+                fresh[i].body_index = LE_NO_LINK;
+                fresh[i].collider_index = LE_NO_LINK;
+                fresh[i].animator_index = LE_NO_LINK;
             }
             if (world->capacity < grown) {
                 world->free_head = (int32_t)world->capacity;
@@ -245,6 +249,10 @@ le_result le_ensure_object_capacity(le_world *world) {
             fresh[i].renderable_index = LE_NO_LINK;
             fresh[i].camera_index = LE_NO_LINK;
             fresh[i].light_index = LE_NO_LINK;
+            fresh[i].script_index = LE_NO_LINK;
+            fresh[i].body_index = LE_NO_LINK;
+            fresh[i].collider_index = LE_NO_LINK;
+            fresh[i].animator_index = LE_NO_LINK;
         }
         world->free_head = 0;
     }
@@ -584,6 +592,10 @@ le_result le_world_create(le_engine *engine, const le_world_desc *desc,
         world->slots[i].renderable_index = LE_NO_LINK;
         world->slots[i].camera_index = LE_NO_LINK;
         world->slots[i].light_index = LE_NO_LINK;
+        world->slots[i].body_index = LE_NO_LINK;
+        world->slots[i].collider_index = LE_NO_LINK;
+        world->slots[i].animator_index = LE_NO_LINK;
+        world->slots[i].script_index = LE_NO_LINK;
     }
     world->engine = engine;
     world->salt = le_world_make_salt();
@@ -600,6 +612,14 @@ le_result le_world_create(le_engine *engine, const le_world_desc *desc,
     world->script_accum = 0.0;
     world->scripts_firing = 0;
     world->scripts_tearing_down = 0;
+    /* Phase 28: per-world physics state (OOM fails creation —
+     * no half-born world). */
+    world->physics = le_physics_create();
+    if (world->physics == NULL) {
+        free(world->slots);
+        free(world);
+        return LE_ERROR_OUT_OF_MEMORY;
+    }
     /* Engine-owned: link into the engine's world list. */
     world->next = engine->worlds;
     world->prev = NULL;
@@ -635,6 +655,15 @@ void le_world_destroy(le_world *world) {
         world->script_capacity = 0;
     }
     le_script_free_world(world);
+    /* Phase 28: physics state dies with the world (bodies,
+     * colliders, contacts, overlaps, events — no leaks; the
+     * renderer never owned any of it). */
+    le_physics_destroy(world->physics);
+    world->physics = NULL;
+    /* Phase 29: animator runtime state dies with the world
+     * (dense entries + per-animator pose/palette scratch; clip
+     * and skeleton ASSETS stay registry-owned). */
+    le_anim_destroy_world(world);
     /* Borrowed renderer mesh/material handles are untouched
      * (application keeps them alive per the renderer contract);
      * asset HANDLES die with their slots while registry backing

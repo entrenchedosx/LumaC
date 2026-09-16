@@ -1558,7 +1558,9 @@ lr_result lr_vis_prepare(lr_renderer *renderer,
     for (i = 0; i < renderer->vis_group_count; i++) {
         renderer->vis_groups[i].count = 0;
     }
-    /* Group PBR items (same key discipline as the legacy path). */
+    /* Group PBR items (same key discipline as the legacy path).
+     * Phase 29: skinned items NEVER group (CPU loop draws them
+     * with per-draw palettes, unculled by conservative policy). */
     for (i = 0; i < renderer->queued; i++) {
         lr_queued_item *item = &renderer->queue[i];
         lr_vis_group *group = NULL;
@@ -1566,6 +1568,9 @@ lr_result lr_vis_prepare(lr_renderer *renderer,
 
         if (!lr_mesh_is_live(renderer, item->mesh) ||
             !lr_material_is_live(renderer, item->material)) {
+            continue;
+        }
+        if (item->skinned) {
             continue;
         }
         if (item->material->type !=

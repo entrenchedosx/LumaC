@@ -1,4 +1,4 @@
-# Lua Scripting (Phase 26; Input/Time Phase 27)
+# Lua Scripting (Phase 26; Input/Time Phase 27; Physics 28; Animation 29)
 
 Lua 5.4.8 (vendored in `third_party/lua/`) is the gameplay
 scripting language. Scripts are engine assets
@@ -160,6 +160,60 @@ state. See `examples/lua_input/scripts/player.lua`.
 `Time.fixed_delta()`. Pause (`scale 0`) yields `dt == 0` in
 `update` and stops `fixed_update`; rendering and input
 continue. See `docs/TIME_ARCHITECTURE.md`.
+
+## Physics (Phase 28)
+
+```lua
+function fixed_update(self, dt)
+  self:add_force(0, -10 * self:gravity_pull(), 0)
+  local vx, vy, vz = self:linear_velocity()
+end
+function collision_enter(self, other, contact)
+  print(contact.penetration) -- table; nil on EXIT
+end
+function trigger_enter(self, other, contact) end
+-- + collision_stay/exit, trigger_stay/exit
+```
+
+- `self:linear_velocity()/set_linear_velocity()`,
+  `angular_velocity/set_angular_velocity`, `add_force/torque`,
+  `apply_impulse[/at_point]`, `add_rigid_body{...}`,
+  `add_collider{...}` (thin over `le_physics_*`; see
+  `SCRIPT_BINDING_API.md`).
+- `Physics.gravity()/set_gravity()`, `Physics.raycast(...)`.
+- Physics always steps on the fixed schedule (configured rate
+  or 60 Hz default) — even with zero scripts. `fixed_update`
+  callbacks run before each physics sub-step (forces first).
+- Contact tables carry `normal/point/penetration` (A=self ->
+  B=other); EXIT events pass nil. Errors mark the instance
+  failed per the error policy. See `examples/lua_physics/` and
+  `docs/PHYSICS_ARCHITECTURE.md`.
+
+## Animation (Phase 29)
+
+```lua
+-- Clips arrive via Assets.find_by_id (persistent IDs):
+function start(self)
+  local clip = Assets.find_by_id("9f2c...") -- hex, 32 chars
+  self:animation_play(clip)              -- restart at 0
+  self:animation_play(clip, false)       -- continue same-clip time
+end
+function update(self, dt)
+  if not self:animation_is_playing() then
+    self:animation_resume()
+  end
+  print(self:animation_time(), self:animation_duration())
+end
+-- + animation_pause/resume/stop(reset?), animation_seek(t),
+--   animation_speed([s]), animation_crossfade(clip, seconds)
+```
+
+- Thin over `le_anim_*` (see `SCRIPT_BINDING_API.md`); no
+  Lua-side animation state exists. Stale clip handles error.
+- Animators are usually attached in C or via scenes; Lua
+  drives playback (menus, cutscenes, combat timing).
+  See `examples/lua_animation/` and
+  `docs/ANIMATION_ARCHITECTURE.md`.
 
 ## Reload semantics
 

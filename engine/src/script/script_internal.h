@@ -185,6 +185,13 @@ extern const le_script_backend_ops le_lua_backend_ops;
 void le_lua_register_world(lua_State *L);
 void le_lua_register_object(lua_State *L);
 void le_lua_register_input(lua_State *L);
+void le_lua_register_physics(lua_State *L);
+/* Appends physics object methods onto the methods table on top
+ * of the stack (called by the object metatable builder). */
+void le_lua_register_physics_methods(lua_State *L);
+/* Appends animation object methods (same pattern; no global
+ * table — animation is per-object playback). */
+void le_lua_register_anim_methods(lua_State *L);
 void le_lua_push_object(lua_State *L, le_world *world,
                         const le_object *obj);
 int le_lua_check_object(lua_State *L, int idx, le_world **out_world,
@@ -209,6 +216,23 @@ void le_script_prop_to_lua(lua_State *L,
 /* Reload rebind (Lua side of le_script_rebind_instance). */
 void le_lua_rebind(le_script_runtime *rt, le_world *world,
                    le_script_entry *entry);
+
+/* Collision/trigger dispatch (Phase 28, VM-independent contract:
+ * a future native backend implements the same entry against its
+ * own registry). Fires funcs[name](self, other, contact) where
+ * contact is nil for EXIT events. `other` is a live-checked
+ * handle (generation-safe). Returns 0 ok/absent, nonzero on
+ * script error (caller marks failed per the error policy).
+ * Valid names: collision_enter/stay/exit, trigger_enter/stay/
+ * exit. Contact carries normal/point/penetration (world frame,
+ * A->B sense for the SELF side... the mirror call flips). */
+int le_script_fire_collision(le_world *world,
+                             le_script_entry *entry,
+                             const char *name,
+                             const le_object *other,
+                             const float normal[3],
+                             const float point[3],
+                             float penetration);
 
 /* Instruction-budget hook arms (script_runtime.c owns the hook). */
 void le_script_hook_begin(le_script_runtime *rt);

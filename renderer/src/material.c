@@ -22,7 +22,9 @@ typedef char lr_check_shadows_gpu_size
 typedef char lr_check_depth_vp_size
     [(sizeof(lr_depth_vp_gpu) == 64) ? 1 : -1];
 typedef char lr_check_pbr_push_size
-    [(sizeof(lr_pbr_push) == 116) ? 1 : -1];
+    [(sizeof(lr_pbr_push) == 124) ? 1 : -1];
+typedef char lr_check_shadow_push_size
+    [(sizeof(lr_shadow_push) == 72) ? 1 : -1];
 
 void lr_material_list_add(lr_renderer *renderer, lr_material *material) {
     if (renderer == NULL || material == NULL) {

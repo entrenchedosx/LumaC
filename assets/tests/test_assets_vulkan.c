@@ -19,6 +19,7 @@
 #include <luma_renderer/luma_renderer.h>
 #include <luma_assets/luma_assets.h>
 #include "graphics/graphics_internal.h"
+#include "internal/renderer_internal.h"
 #include "internal/assets_internal.h"
 
 #ifndef LA_FIXTURE_DIR
@@ -29,6 +30,9 @@
 #endif
 #ifndef LA_BOX_PATH
 #define LA_BOX_PATH "BoxTextured.glb"
+#endif
+#ifndef LA_SKINNED_PATH
+#define LA_SKINNED_PATH "skinned.glb"
 #endif
 
 static int g_passed = 0;
@@ -143,6 +147,7 @@ int main(void) {
     la_model *gltf = NULL;
     la_model *box = NULL;
     la_model *again = NULL;
+    la_model *skinned = NULL;
     char path[1024];
     int rc;
     int exit_code = 1;
@@ -359,6 +364,125 @@ int main(void) {
                la_asset_manager_get_sampler_count(assets) == 3,
                "reload: identical sources share cache entries");
 
+    /* ---- PART AQ-29: skinned fixture (Phase 29) ----
+     * 2 joints, 1 skin, 2 primitives covering every
+     * JOINTS/WEIGHTS encoding, 1 kept animation (T LINEAR + R
+     * CUBICSPLINE) + 1 morph-only animation excluded at import.
+     * No images: texture/sampler caches must not grow. */
+    if (la_model_load(assets, LA_SKINNED_PATH, &skinned) != LA_SUCCESS) {
+        printf("FAIL: load skinned.glb: %s\n",
+               la_asset_manager_get_last_error(assets));
+        goto cleanup;
+    }
+    TEST_CHECK(la_model_get_node_count(skinned) == 4 &&
+               la_model_get_mesh_count(skinned) == 2 &&
+               la_model_get_material_count(skinned) == 1 &&
+               la_model_get_texture_count(skinned) == 0 &&
+               la_model_get_sampler_count(skinned) == 0 &&
+               la_model_get_instance_count(skinned) == 2 &&
+               la_model_get_skin_count(skinned) == 1 &&
+               la_model_get_animation_count(skinned) == 1,
+               "skinned: nodes/prims/material + 1 skin + 1 anim");
+    TEST_CHECK(la_model_get_skin_joint_count(skinned, 0) == 2 &&
+               la_model_get_skin_joint_node(skinned, 0, 0) == 1 &&
+               la_model_get_skin_joint_node(skinned, 0, 1) == 2 &&
+               la_model_get_node_skin(skinned, 3) == 0 &&
+               la_model_get_node_skin(skinned, 0) == -1 &&
+               la_model_get_node_skin(skinned, 1) == -1,
+               "skinned: joint nodes + node skin links");
+    {
+        float ibm[16];
+
+        la_model_get_skin_inverse_bind(skinned, 0, 0, ibm);
+        TEST_CHECK(feq(ibm[0], 1.0f) && feq(ibm[5], 1.0f) &&
+                   feq(ibm[10], 1.0f) && feq(ibm[15], 1.0f) &&
+                   feq(ibm[12], 0.0f),
+                   "skinned: joint0 inverse bind is identity");
+        la_model_get_skin_inverse_bind(skinned, 0, 1, ibm);
+        TEST_CHECK(feq(ibm[12], 1.0f) && feq(ibm[13], 2.0f) &&
+                   feq(ibm[14], 3.0f) && feq(ibm[15], 1.0f),
+                   "skinned: joint1 inverse bind decodes");
+    }
+    {
+        la_anim_channel ch0;
+        la_anim_channel ch1;
+        int ok = 0;
+
+        memset(&ch0, 0, sizeof(ch0));
+        memset(&ch1, 0, sizeof(ch1));
+        ok = (la_model_get_animation_channel_count(skinned, 0) == 2 &&
+              la_model_get_animation_channel(skinned, 0, 0, &ch0) &&
+              la_model_get_animation_channel(skinned, 0, 1, &ch1));
+        TEST_CHECK(ok, "skinned: Wave keeps 2 channels");
+        TEST_CHECK(ch0.target_node == 1 && ch0.path == 0 &&
+                   ch0.interpolation == 1 && ch0.key_count == 2 &&
+                   feq(ch0.times[1], 1.0f) &&
+                   feq(ch0.values[3], 1.0f),
+                   "skinned: translation track (LINEAR, 2 keys)");
+        TEST_CHECK(ch1.target_node == 2 && ch1.path == 1 &&
+                   ch1.interpolation == 2 && ch1.key_count == 2 &&
+                   feq(ch1.times[1], 2.0f) &&
+                   feq(ch1.values[4 + 3], 1.0f) &&
+                   feq(ch1.values[12 + 6], 0.7071068f),
+                   "skinned: cubic rotation triples (file order)");
+        TEST_CHECK(feq(la_model_get_animation_duration(skinned, 0),
+                       2.0f),
+                   "skinned: duration is max last-key time");
+    }
+    /* Vertex skin decode end-to-end (white-box readback of the
+     * uploaded vertex buffers; idle first like the HDR path). */
+    {
+        lr_mesh *p0 = la_model_borrow_mesh(skinned, 0, 0);
+        lr_mesh *p1 = la_model_borrow_mesh(skinned, 0, 1);
+        lr_vertex *cpu = NULL;
+        int ok = 0;
+
+        test_wait_idle(device);
+        if (p0 != NULL && p1 != NULL &&
+            p0->vertex_buffer != NULL && p1->vertex_buffer != NULL) {
+            cpu = (lr_vertex *)malloc(sizeof(lr_vertex) * 4u);
+            if (cpu != NULL &&
+                lc_buffer_read(p0->vertex_buffer, 0, cpu,
+                               sizeof(lr_vertex) * 4u) == LC_SUCCESS) {
+                /* v0 rigid; v1 half/half; v2 quarter sums
+                 * normalize; v3 all-zero falls back to rigid. */
+                ok = (cpu[0].joints[0] == 0 &&
+                      cpu[0].weights[0] == 1.0f &&
+                      cpu[1].joints[0] == 0 &&
+                      cpu[1].joints[1] == 1 &&
+                      feq(cpu[1].weights[0], 0.5f) &&
+                      feq(cpu[1].weights[1], 0.5f) &&
+                      feq(cpu[2].weights[0], 0.5f) &&
+                      feq(cpu[2].weights[1], 0.5f) &&
+                      cpu[3].weights[0] == 1.0f &&
+                      cpu[3].weights[1] == 0.0f);
+            }
+            TEST_CHECK(ok, "skinned: prim0 joints/weights upload");
+            ok = 0;
+            if (cpu != NULL &&
+                lc_buffer_read(p1->vertex_buffer, 0, cpu,
+                               sizeof(lr_vertex) * 3u) == LC_SUCCESS) {
+                /* u16 joints (incl. 300) + normalized u16
+                 * weights decode; zero weights go rigid. */
+                ok = (cpu[0].joints[0] == 0 &&
+                      cpu[0].weights[0] == 1.0f &&
+                      cpu[1].joints[0] == 1 &&
+                      cpu[1].joints[1] == 1 &&
+                      fabsf(cpu[1].weights[0] - 0.5f) < 1e-4f &&
+                      fabsf(cpu[1].weights[1] - 0.5f) < 1e-4f &&
+                      cpu[2].joints[0] == 300 &&
+                      cpu[2].weights[0] == 1.0f);
+            }
+            TEST_CHECK(ok, "skinned: prim1 u16 joints/weights upload");
+            free(cpu);
+        } else {
+            TEST_CHECK(0, "skinned: prim meshes borrow");
+        }
+    }
+    TEST_CHECK(la_asset_manager_get_texture_count(assets) == 5 &&
+               la_asset_manager_get_sampler_count(assets) == 3,
+               "skinned: imageless import grows no caches");
+
     /* GPU-reaching negatives: valid geometry, failing images. Meshes
      * upload, then the import unwinds — caches must not grow. */
     snprintf(path, sizeof(path), "%s/missing_image.gltf",
@@ -401,11 +525,12 @@ int main(void) {
               la_model_submit(glb, renderer, NULL) == LA_SUCCESS &&
               la_model_submit(gltf, renderer, NULL) == LA_SUCCESS &&
               la_model_submit(box, renderer, NULL) == LA_SUCCESS &&
-              la_model_submit(again, renderer, NULL) == LA_SUCCESS);
+              la_model_submit(again, renderer, NULL) == LA_SUCCESS &&
+              la_model_submit(skinned, renderer, NULL) == LA_SUCCESS);
         lr_renderer_get_stats(renderer, &stats);
-        ok = ok && (stats.submitted_objects == 7 + 7 + 1 + 7);
+        ok = ok && (stats.submitted_objects == 7 + 7 + 1 + 7 + 2);
         lr_renderer_end(renderer);
-        TEST_CHECK(ok, "submit: 22 instances reach the renderer");
+        TEST_CHECK(ok, "submit: 24 instances reach the renderer");
         TEST_CHECK(la_model_submit(glb, NULL, NULL) ==
                        LA_ERROR_INVALID_ARGUMENT,
                    "submit: NULL renderer rejected");
@@ -556,6 +681,7 @@ cleanup:
     /* Idle first: the last presented frame may still reference model
      * and cache resources on the GPU. */
     test_wait_idle(device);
+    la_model_destroy(skinned);
     la_model_destroy(again);
     la_model_destroy(box);
     la_model_destroy(gltf);

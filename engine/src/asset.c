@@ -30,6 +30,18 @@
 #include "luma_engine/luma_engine.h"
 #include "internal/engine_internal.h"
 
+/* Phase 29: animation backing free without pulling the animation
+ * layouts into asset.c (defined in src/animation/anim_asset.c).
+ * Takes the opaque slot pointers (struct-blind). */
+void le_anim_free_slot_backing(struct le_skeleton_data *skeleton,
+                               struct le_clip_data *clip);
+
+/* Phase 29: animator refcount without animator layout
+ * (defined in src/animation/anim_serialize.c). */
+uint32_t le_anim_refcount_slot(const le_world *world,
+                               uint32_t asset_slot,
+                               uint32_t generation);
+
 const le_asset LE_ASSET_INVALID = { LE_ASSET_INDEX_INVALID, 0u };
 
 #define LE_ASSET_INITIAL_CAPACITY 64u
@@ -427,6 +439,12 @@ int32_t le_asset_alloc(le_engine *engine, le_asset_type type,
     case LE_ASSET_SCRIPT:
         engine->asset_scripts++;
         break;
+    case LE_ASSET_SKELETON:
+        engine->asset_skeletons++;
+        break;
+    case LE_ASSET_ANIMATION_CLIP:
+        engine->asset_clips++;
+        break;
     default:
         break;
     }
@@ -459,6 +477,13 @@ static void le_asset_abandon(le_engine *engine, int32_t idx) {
     s->source = NULL;
     free(s->script_source);
     s->script_source = NULL;
+    /* Phase 29 animation backing frees via
+     * le_anim_free_slot_backing (declared at the top; defined
+     * in src/animation/ — asset.c must not learn the struct
+     * layouts). */
+    le_anim_free_slot_backing(s->skeleton, s->clip);
+    s->skeleton = NULL;
+    s->clip = NULL;
     if (s->state == LE_ASSET_READY && engine->asset_ready > 0) {
         engine->asset_ready--;
     } else if (s->state == LE_ASSET_FAILED &&
@@ -489,6 +514,16 @@ static void le_asset_abandon(le_engine *engine, int32_t idx) {
     case LE_ASSET_SCRIPT:
         if (engine->asset_scripts > 0) {
             engine->asset_scripts--;
+        }
+        break;
+    case LE_ASSET_SKELETON:
+        if (engine->asset_skeletons > 0) {
+            engine->asset_skeletons--;
+        }
+        break;
+    case LE_ASSET_ANIMATION_CLIP:
+        if (engine->asset_clips > 0) {
+            engine->asset_clips--;
         }
         break;
     default:
@@ -577,6 +612,18 @@ uint32_t le_asset_refcount(const le_engine *engine, uint32_t slot) {
                     engine->assets[slot].generation) {
                 n++;
             }
+        }
+    }
+    /* Phase 29: animator skeleton/clip users (struct-blind hook;
+     * asset.c never learns animator layout). Unload refuses
+     * while referenced (same discipline as script assets). */
+    if (engine->assets[slot].type == LE_ASSET_SKELETON ||
+        engine->assets[slot].type == LE_ASSET_ANIMATION_CLIP) {
+        const le_world *w;
+
+        for (w = engine->worlds; w != NULL; w = w->next) {
+            n += le_anim_refcount_slot(
+                w, slot, engine->assets[slot].generation);
         }
     }
     return n;
@@ -889,6 +936,13 @@ le_result le_asset_unload(le_engine *engine, const le_asset *asset) {
         free(s->script_source);
         s->script_source = NULL;
         s->script_size = 0;
+    } else if (s->type == LE_ASSET_SKELETON ||
+               s->type == LE_ASSET_ANIMATION_CLIP) {
+        /* Phase 29: animation assets are pure CPU data (no
+         * renderer backing); free the immutable payload. */
+        le_anim_free_slot_backing(s->skeleton, s->clip);
+        s->skeleton = NULL;
+        s->clip = NULL;
     }
     if (s->source != NULL) {
         engine->name_bytes_assets -= strlen(s->source) + 1u;
@@ -925,6 +979,16 @@ le_result le_asset_unload(le_engine *engine, const le_asset *asset) {
     case LE_ASSET_SCRIPT:
         if (engine->asset_scripts > 0) {
             engine->asset_scripts--;
+        }
+        break;
+    case LE_ASSET_SKELETON:
+        if (engine->asset_skeletons > 0) {
+            engine->asset_skeletons--;
+        }
+        break;
+    case LE_ASSET_ANIMATION_CLIP:
+        if (engine->asset_clips > 0) {
+            engine->asset_clips--;
         }
         break;
     default:
@@ -1024,6 +1088,8 @@ void le_engine_get_asset_stats(const le_engine *engine,
     out_stats->material_count = engine->asset_materials;
     out_stats->texture_count = engine->asset_textures;
     out_stats->scene_count = engine->asset_scenes;
+    out_stats->skeleton_count = engine->asset_skeletons;
+    out_stats->clip_count = engine->asset_clips;
     out_stats->ready_count = engine->asset_ready;
     out_stats->failed_count = engine->asset_failed;
     out_stats->name_bytes = engine->name_bytes_assets;

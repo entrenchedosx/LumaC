@@ -390,6 +390,27 @@ void la_model_teardown(la_model *model) {
     }
     free(model->nodes);
     free(model->child_links);
+    if (model->skins != NULL) {
+        for (i = 0; i < model->skin_count; i++) {
+            free(model->skins[i].joint_nodes);
+            free(model->skins[i].inv_bind);
+        }
+        free(model->skins);
+        model->skins = NULL;
+    }
+    if (model->anims != NULL) {
+        for (i = 0; i < model->anim_count; i++) {
+            uint32_t c;
+
+            for (c = 0; c < model->anims[i].channel_count; c++) {
+                free(model->anims[i].channels[c].times);
+                free(model->anims[i].channels[c].values);
+            }
+            free(model->anims[i].channels);
+        }
+        free(model->anims);
+        model->anims = NULL;
+    }
     free(model->source_path);
     model->nodes = NULL;
     model->child_links = NULL;
@@ -608,6 +629,113 @@ const char *la_model_get_source_path(const la_model *model) {
         return NULL;
     }
     return (model->source_path != NULL) ? model->source_path : "";
+}
+
+/* ------------------------------------------------------------------
+ * Skin + animation queries (Phase 29). All NULL-safe; every
+ * out-of-range index yields the documented zero/NULL/-1/
+ * identity/0 instead of touching memory.
+ * ------------------------------------------------------------------ */
+
+uint32_t la_model_get_skin_count(const la_model *model) {
+    return (model != NULL) ? model->skin_count : 0;
+}
+
+uint32_t la_model_get_skin_joint_count(const la_model *model,
+                                       uint32_t skin_index) {
+    if (model == NULL || skin_index >= model->skin_count) {
+        return 0;
+    }
+    return model->skins[skin_index].joint_count;
+}
+
+int32_t la_model_get_skin_joint_node(const la_model *model,
+                                     uint32_t skin_index,
+                                     uint32_t joint) {
+    if (model == NULL || skin_index >= model->skin_count) {
+        return -1;
+    }
+    if (joint >= model->skins[skin_index].joint_count) {
+        return -1;
+    }
+    return model->skins[skin_index].joint_nodes[joint];
+}
+
+void la_model_get_skin_inverse_bind(const la_model *model,
+                                    uint32_t skin_index,
+                                    uint32_t joint,
+                                    float out_inv_bind[16]) {
+    static const float k_identity[16] = { 1.0f, 0.0f, 0.0f, 0.0f,
+                                          0.0f, 1.0f, 0.0f, 0.0f,
+                                          0.0f, 0.0f, 1.0f, 0.0f,
+                                          0.0f, 0.0f, 0.0f, 1.0f };
+
+    if (out_inv_bind == NULL) {
+        return;
+    }
+    if (model == NULL || skin_index >= model->skin_count ||
+        joint >= model->skins[skin_index].joint_count ||
+        model->skins[skin_index].inv_bind == NULL) {
+        memcpy(out_inv_bind, k_identity, sizeof(k_identity));
+        return;
+    }
+    memcpy(out_inv_bind,
+           model->skins[skin_index].inv_bind + (size_t)joint * 16u,
+           sizeof(float) * 16u);
+}
+
+int32_t la_model_get_node_skin(const la_model *model,
+                               uint32_t node_index) {
+    if (model == NULL || node_index >= model->node_count) {
+        return -1;
+    }
+    return model->nodes[node_index].skin_index;
+}
+
+uint32_t la_model_get_animation_count(const la_model *model) {
+    return (model != NULL) ? model->anim_count : 0;
+}
+
+uint32_t la_model_get_animation_channel_count(const la_model *model,
+                                              uint32_t anim_index) {
+    if (model == NULL || anim_index >= model->anim_count) {
+        return 0;
+    }
+    return model->anims[anim_index].channel_count;
+}
+
+int la_model_get_animation_channel(const la_model *model,
+                                   uint32_t anim_index,
+                                   uint32_t channel_index,
+                                   la_anim_channel *out) {
+    const la_model_anim_channel *src;
+
+    if (out != NULL) {
+        memset(out, 0, sizeof(*out));
+    }
+    if (model == NULL || out == NULL) {
+        return 0;
+    }
+    if (anim_index >= model->anim_count ||
+        channel_index >= model->anims[anim_index].channel_count) {
+        return 0;
+    }
+    src = &model->anims[anim_index].channels[channel_index];
+    out->target_node = src->target_node;
+    out->path = src->path;
+    out->interpolation = src->interpolation;
+    out->key_count = src->key_count;
+    out->times = src->times;
+    out->values = src->values;
+    return 1;
+}
+
+float la_model_get_animation_duration(const la_model *model,
+                                      uint32_t anim_index) {
+    if (model == NULL || anim_index >= model->anim_count) {
+        return 0.0f;
+    }
+    return model->anims[anim_index].duration;
 }
 
 la_result la_model_submit(const la_model *model, lr_renderer *renderer,

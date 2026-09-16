@@ -70,6 +70,41 @@ lr_result lr_renderer_submit(lr_renderer *renderer,
     slot->receives_shadow = (item->receives_shadow != 0) ? 1 : 0;
     /* Stable temporal key rides along untouched (0 = none). */
     slot->instance_id = item->instance_id;
+    /* Phase 29 skinning: an item draws SKINNED iff a usable palette
+     * rides the submit AND the mesh itself is skinned. The palette
+     * is copied synchronously into the frame arena here (borrowed,
+     * never retained): the caller may free or mutate it the moment
+     * submit returns. Degenerate palettes (NULL, 0, or > 4096
+     * joints) and palettes on rigid meshes fall back to rigid
+     * silently — the draw stays valid, only unskinned. Arena OOM
+     * is the one loud failure (OUT_OF_MEMORY). */
+    slot->skinned = 0;
+    slot->skin_offset = 0;
+    slot->skin_joints = 0;
+    if (item->skin_palette != NULL && item->skin_joint_count > 0 &&
+        item->mesh->skinned) {
+        uint32_t offset = 0;
+        lr_result skin_res;
+
+        if (item->skin_joint_count > 4096u) {
+            /* Oversized palette: rigid fallback (bounded arena;
+             * mirrors the engine's LE_ANIM_MAX_JOINTS ceiling). */
+        } else {
+            skin_res =
+                lr_skin_arena_push(renderer, item->skin_palette,
+                                   item->skin_joint_count, &offset);
+            if (skin_res == LR_ERROR_OUT_OF_MEMORY) {
+                return LR_ERROR_OUT_OF_MEMORY;
+            }
+            if (skin_res == LR_SUCCESS) {
+                slot->skinned = 1;
+                slot->skin_offset = offset;
+                slot->skin_joints = item->skin_joint_count;
+            }
+            /* Other rejections (NULL/0 — unreachable here) also
+             * fall back to rigid. */
+        }
+    }
     /* Winding parity for mirrored (negative-determinant) transforms
      * (Stage 40 audit fix): decided once at submit so every path
      * (CPU draws, GPU grouping, LOD history) agrees. */
@@ -81,8 +116,14 @@ lr_result lr_renderer_submit(lr_renderer *renderer,
      * casters still reach shadow passes; main-pass visibility is
      * just a flag now. GPU-driven mode skips CPU culling (the GPU
      * decides); every item stays flagged visible for the shadow
-     * path, which re-culls per light itself. */
-    if (renderer->render_mode == LR_RENDER_MODE_GPU_DRIVEN) {
+     * path, which re-culls per light itself. Phase 29: skinned
+     * items ALWAYS stay main-visible (conservative bounds policy:
+     * the authored static bounds cannot bound the animated pose,
+     * so culling against them would pop — see GPU_SKINNING.md). */
+    if (slot->skinned) {
+        slot->main_visible = 1;
+        renderer->stats.visible_objects++;
+    } else if (renderer->render_mode == LR_RENDER_MODE_GPU_DRIVEN) {
         slot->main_visible = 1;
         renderer->stats.visible_objects++;
     } else if (!lr_frustum_test_sphere(renderer->frustum_planes,

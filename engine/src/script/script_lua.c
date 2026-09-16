@@ -36,6 +36,14 @@ static const char *const le_lua_callback_names[] = {
     "start", "update", "fixed_update", "destroy",
 };
 
+/* Phase 28 collision/trigger callbacks (harvested + fired by
+ * name; absent = no-op). Argument shape is (self, other,
+ * contact) — see le_script_fire_collision. */
+static const char *const le_lua_collision_names[] = {
+    "collision_enter", "collision_stay", "collision_exit",
+    "trigger_enter", "trigger_stay", "trigger_exit",
+};
+
 void le_lua_push_object(lua_State *L, le_world *world,
                         const le_object *obj) {
     le_lua_object *u;
@@ -813,6 +821,18 @@ static int le_lua_instantiate(struct le_script_runtime *rt,
                     lua_pop(L, 1);
                 }
             }
+            /* Phase 28: collision/trigger callbacks ride the
+             * same return-table shape. */
+            for (k = 0; k < 6; k++) {
+                lua_getfield(L, base + 2,
+                             le_lua_collision_names[k]);
+                if (lua_isfunction(L, -1)) {
+                    lua_setfield(L, base + 3,
+                                 le_lua_collision_names[k]);
+                } else {
+                    lua_pop(L, 1);
+                }
+            }
             lua_pop(L, 1); /* funcs -> [..][state][ret] */
         }
     }
@@ -837,6 +857,23 @@ static int le_lua_instantiate(struct le_script_runtime *rt,
                 lua_pop(L, 1);
                 lua_pushvalue(L, -1);
                 lua_setfield(L, base + 3, le_lua_callback_names[k]);
+            } else {
+                lua_pop(L, 1);
+            }
+        }
+        lua_pop(L, 1);
+    }
+    /* Phase 28: harvest collision/trigger callbacks the same
+     * way (global-function style works for them too). */
+    for (k = 0; k < 6; k++) {
+        lua_getfield(L, base + 2, le_lua_collision_names[k]);
+        if (!lua_isnil(L, -1)) {
+            lua_getfield(L, base + 3, le_lua_collision_names[k]);
+            if (lua_isnil(L, -1)) {
+                lua_pop(L, 1);
+                lua_pushvalue(L, -1);
+                lua_setfield(L, base + 3,
+                             le_lua_collision_names[k]);
             } else {
                 lua_pop(L, 1);
             }
@@ -1045,6 +1082,163 @@ static int le_lua_fire(struct le_script_runtime *rt, le_world *world,
             return -1;
         }
         lua_settop(L, base); /* no results; balance to entry */
+        return 0;
+    }
+}
+
+/* Collision/trigger dispatch (Phase 28): funcs[name](self, other,
+ * contact). `contact` is a plain table {normal={x,y,z},
+ * point={x,y,z}, penetration=n} or nil for EXIT events. The
+ * save/restore + error-record skeleton mirrors le_lua_fire
+ * (nested-dispatch safe via the le_saved_self stack). Absent
+ * functions are no-ops (0). Script errors return nonzero (the
+ * caller marks the instance failed per the error policy). */
+int le_script_fire_collision(le_world *world,
+                             le_script_entry *entry,
+                             const char *name,
+                             const le_object *other,
+                             const float normal[3],
+                             const float point[3],
+                             float penetration) {
+    lua_State *L;
+    le_script_runtime *rt;
+    int base = 0;
+    int stateref = 0;
+    int rc2 = 0;
+    int rc = 0;
+    le_object obj;
+
+    if (world == NULL || entry == NULL || name == NULL ||
+        other == NULL || world->engine == NULL) {
+        return -1;
+    }
+    rt = world->engine->script_runtime;
+    if (rt == NULL || rt->L == NULL ||
+        rt->backend != &le_lua_backend_ops) {
+        return -1;
+    }
+    L = rt->L;
+    if (entry->state_ref == LE_SCRIPT_NOREF) {
+        return -1;
+    }
+    if (entry->slot >= world->capacity ||
+        !world->slots[entry->slot].alive) {
+        return -1;
+    }
+    base = lua_gettop(L);
+    stateref = entry->state_ref;
+    /* [base+1]=state [base+2]=funcs [base+3]=fn? */
+    lua_rawgeti(L, LUA_REGISTRYINDEX, stateref);
+    lua_getfield(L, base + 1, "funcs");
+    lua_getfield(L, base + 2, name);
+    if (lua_gettop(L) < base + 3 ||
+        !lua_isfunction(L, base + 3)) {
+        lua_settop(L, base);
+        return 0; /* absent callback is a no-op (not an error) */
+    }
+    lua_getfield(L, base + 1, "env");  /* base+4 */
+    lua_getfield(L, base + 4, "self"); /* base+5 */
+    /* [state][funcs][fn][env][self] -> [..][fn][self]. */
+    lua_copy(L, base + 3, base + 1);
+    lua_copy(L, base + 5, base + 2);
+    lua_settop(L, base + 2); /* [..][fn][self] */
+    /* Arg 2: other handle (generation-safe userdata). */
+    le_lua_push_object(L, world, other);
+    /* Arg 3: contact table or nil (EXIT events). */
+    if (point == NULL || normal == NULL) {
+        lua_pushnil(L);
+    } else {
+        lua_newtable(L);
+        lua_newtable(L);
+        lua_pushnumber(L, (lua_Number)normal[0]);
+        lua_rawseti(L, -2, 1);
+        lua_pushnumber(L, (lua_Number)normal[1]);
+        lua_rawseti(L, -2, 2);
+        lua_pushnumber(L, (lua_Number)normal[2]);
+        lua_rawseti(L, -2, 3);
+        lua_setfield(L, -2, "normal");
+        lua_newtable(L);
+        lua_pushnumber(L, (lua_Number)point[0]);
+        lua_rawseti(L, -2, 1);
+        lua_pushnumber(L, (lua_Number)point[1]);
+        lua_rawseti(L, -2, 2);
+        lua_pushnumber(L, (lua_Number)point[2]);
+        lua_rawseti(L, -2, 3);
+        lua_setfield(L, -2, "point");
+        lua_pushnumber(L, (lua_Number)penetration);
+        lua_setfield(L, -2, "penetration");
+    }
+    obj.index = entry->slot;
+    obj.generation = world->slots[entry->slot].generation;
+    obj.world_tag = world->tag;
+    {
+        int fbase = lua_gettop(L) - 3 - 1; /* [..][fn][s][o][c] */
+        int savebase;
+
+        /* Save old global self on the registry stack. */
+        savebase = lua_gettop(L);
+        lua_getfield(L, LUA_REGISTRYINDEX, "le_saved_self");
+        if (!lua_istable(L, savebase + 1)) {
+            lua_pop(L, 1);
+            lua_newtable(L);
+            lua_pushvalue(L, savebase + 1);
+            lua_setfield(L, LUA_REGISTRYINDEX,
+                         "le_saved_self");
+        }
+        lua_getglobal(L, "self");
+        lua_seti(L, savebase + 1,
+                 (lua_Integer)(rt->firing_depth + 1));
+        lua_settop(L, savebase);
+        /* Install the self arg as the global. */
+        lua_pushvalue(L, fbase + 2); /* self arg */
+        lua_setglobal(L, "self");
+        rt->firing_world = world;
+        rt->firing_depth++;
+        le_script_hook_begin(rt);
+        rc2 = lua_pcall(L, 3, 0, 0);
+        rc = rc2;
+        le_script_hook_end(rt);
+        rt->firing_depth--;
+        if (rt->firing_depth == 0) {
+            rt->firing_world = NULL;
+        }
+        rt->callbacks_this_frame++;
+        {
+            int rbase = lua_gettop(L);
+
+            lua_getfield(L, LUA_REGISTRYINDEX, "le_saved_self");
+            lua_geti(L, rbase + 1,
+                     (lua_Integer)(rt->firing_depth + 1));
+            lua_setglobal(L, "self");
+            lua_pushnil(L);
+            lua_seti(L, rbase + 1,
+                     (lua_Integer)(rt->firing_depth + 1));
+            lua_settop(L, rbase);
+        }
+        if (rc != LUA_OK) {
+            const char *msg = NULL;
+            char emsg[512];
+            le_asset h = entry->asset;
+            le_asset_slot *as = NULL;
+            uint32_t aslot = 0;
+            le_result code = LE_SUCCESS;
+
+            msg = lua_tostring(L, -1);
+            snprintf(emsg, sizeof(emsg), "%s",
+                     (msg != NULL) ? msg : "callback failed");
+            lua_settop(L, base);
+            if (le_resolve_asset_live(world->engine, &h, &aslot,
+                                      &code)) {
+                as = &world->engine->assets[aslot];
+            }
+            le_script_record_error(
+                rt, name, world, &obj,
+                (as != NULL && as->source != NULL) ? as->source
+                                                  : "",
+                emsg);
+            return -1;
+        }
+        lua_settop(L, base);
         return 0;
     }
 }

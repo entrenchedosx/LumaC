@@ -32,12 +32,6 @@ typedef struct lr_camera_gpu {
     float cam_pos[4];
 } lr_camera_gpu;
 
-/* Unlit push block: model matrix + material color (80 bytes). */
-typedef struct lr_unlit_push {
-    float model[16];
-    float color[4];
-} lr_unlit_push;
-
 /* Shadow defaults (also documented on lr_shadow_desc): negative
  * biases select these; zero disables. */
 #define LR_SHADOW_DEFAULT_DEPTH_BIAS 0.0015f
@@ -960,6 +954,7 @@ void lr_renderer_destroy(lr_renderer *renderer) {
         renderer->instanced_pipelines[i].pipeline = NULL;
     }
     renderer->instanced_pipeline_count = 0;
+    lr_skin_destroy(renderer);
     lr_gpu_destroy_shared(renderer);
     lr_post_destroy(renderer);
     lr_renderer_destroy_env_resources(renderer);
@@ -1034,6 +1029,11 @@ lr_result lr_renderer_begin(lr_renderer *renderer,
     renderer->light_count = 0;
     renderer->shadow_assigned = 0;
     renderer->shadows_prepared = 0;
+    /* Phase 29: the skin arena is per-frame (consumed prefix
+     * uploads once before draws); capacities persist across
+     * frames (no per-frame allocation). */
+    renderer->skin_cpu_used = 0;
+    renderer->skin_uploaded_frame = 0;
     memset(renderer->shadow_slot_active, 0,
            sizeof(renderer->shadow_slot_active));
     /* Zeroed metadata = no shadowed lights until prepare fills
@@ -1618,13 +1618,43 @@ lr_result lr_renderer_render_shadows(lr_renderer *renderer,
         if (cr != LC_SUCCESS) {
             return lr_map_result(cr);
         }
-        /* Casters: every queued caster inside the light volume
-         * (main-camera culling does not apply here). */
-        for (i = 0; i < renderer->queued; i++) {
-            lr_queued_item *item = &renderer->queue[i];
-            lr_shadow_push push;
+        /* Phase 29: the skin arena uploads once before the first
+         * skinned draw of the frame (no-op without skinned
+         * items); the ONE skin set binds per skinned draw below
+         * (same set every time, never rebuilt per draw). Uploads
+         * happen between passes (barriers are illegal inside),
+         * and shadow passes run strictly sequentially, so one
+         * call here covers the whole shadow phase. */
+        {
+            int need_skin = 0;
 
-            if (!item->casts_shadow) {
+            for (i = 0; i < renderer->queued; i++) {
+                if (renderer->queue[i].skinned &&
+                    renderer->queue[i].casts_shadow) {
+                    need_skin = 1;
+                    break;
+                }
+            }
+            if (need_skin &&
+                lr_skin_upload_frame(renderer) != LR_SUCCESS) {
+                return LR_ERROR_RENDER;
+            }
+        }
+        /* Casters: every queued caster inside the light volume
+         * (main-camera culling does not apply here). bound_depth
+         * tracks the currently bound depth pipeline across items
+         * so rigid/skinned switches rebind exactly once (mesh
+         * binds reset on every pipeline switch). */
+        {
+            lc_pipeline *bound_depth = depth_pipeline;
+
+            for (i = 0; i < renderer->queued; i++) {
+                lr_queued_item *item = &renderer->queue[i];
+                lr_shadow_push push;
+                int item_skinned;
+                lc_pipeline *item_pipeline = depth_pipeline;
+
+                if (!item->casts_shadow) {
                 continue;
             }
             if (!lr_mesh_is_live(renderer, item->mesh)) {
@@ -1634,6 +1664,61 @@ lr_result lr_renderer_render_shadows(lr_renderer *renderer,
                                         item->sphere_radius)) {
                 renderer->stats.shadow_casters_culled++;
                 continue;
+            }
+            /* Phase 29: skinned casters take the skinned depth
+             * variant (same signature key, own mini-cache); the
+             * vertex buffer + stride are IDENTICAL — only the
+             * pipeline's attribute declarations differ. */
+            item_skinned = (item->skinned != 0);
+            if (item_skinned) {
+                lr_result skin_res =
+                    lr_renderer_skinned_depth_pipeline_for(
+                        renderer, &signature, &item_pipeline);
+
+                if (skin_res != LR_SUCCESS) {
+                    return skin_res;
+                }
+                if (!lc_render_target_is_compatible_with_pipeline(
+                        renderer->slots[slot].target,
+                        item_pipeline)) {
+                    return LR_ERROR_INCOMPATIBLE;
+                }
+            }
+            if (item_pipeline != bound_depth) {
+                cr = lc_encoder_bind_pipeline(encoder,
+                                              item_pipeline);
+                if (cr != LC_SUCCESS) {
+                    return lr_map_result(cr);
+                }
+                cr = lc_encoder_bind_binding_set(
+                    encoder, item_pipeline, 0,
+                    renderer->depth_set);
+                if (cr != LC_SUCCESS) {
+                    return lr_map_result(cr);
+                }
+                if (item_skinned) {
+                    /* Same skin set for every skinned draw
+                     * (bound fresh after the pipeline switch:
+                     * slots differ per pipeline). */
+                    cr = lc_encoder_bind_binding_set(
+                        encoder, item_pipeline, 1,
+                        renderer->skin_set);
+                    if (cr != LC_SUCCESS) {
+                        return lr_map_result(cr);
+                    }
+                }
+                bound_depth = item_pipeline;
+                bound_mesh = NULL;
+            } else if (item_skinned && bound_mesh == NULL) {
+                /* First skinned draw after a mesh reset on the
+                 * same pipeline still needs the skin slot bound
+                 * (slots are pipeline state, not mesh state). */
+                cr = lc_encoder_bind_binding_set(
+                    encoder, item_pipeline, 1,
+                    renderer->skin_set);
+                if (cr != LC_SUCCESS) {
+                    return lr_map_result(cr);
+                }
             }
             if (item->mesh != bound_mesh) {
                 cr = lc_encoder_bind_vertex_buffer(
@@ -1649,8 +1734,10 @@ lr_result lr_renderer_render_shadows(lr_renderer *renderer,
                 bound_mesh = item->mesh;
             }
             memcpy(push.model, item->matrix, sizeof(push.model));
+            push.skin_offset = item_skinned ? item->skin_offset : 0u;
+            push.skin_joints = item_skinned ? item->skin_joints : 0u;
             cr = lc_encoder_push_constants(
-                encoder, depth_pipeline,
+                encoder, item_pipeline,
                 (uint32_t)LC_SHADER_VISIBILITY_VERTEX, 0, sizeof(push),
                 &push);
             if (cr != LC_SUCCESS) {
@@ -1664,6 +1751,7 @@ lr_result lr_renderer_render_shadows(lr_renderer *renderer,
             renderer->stats.shadow_draw_calls++;
             renderer->stats.shadow_triangles +=
                 item->mesh->index_count / 3u;
+            }
         }
         if (lc_encoder_end_render_pass(encoder) != LC_SUCCESS) {
             return LR_ERROR_RENDER;
@@ -1763,6 +1851,25 @@ static lr_result lr_render_items(lr_renderer *renderer,
         return LR_SUCCESS;
     }
     lr_queue_sort(renderer->queue, renderer->queued);
+    /* Phase 29: the skin arena uploads once before the first
+     * skinned main draw (no-op without skinned items). This runs
+     * inside the caller's open pass, but the upload itself is
+     * host-visible CPU memory traffic (memcpy + flush), never a
+     * recorded barrier — legal anywhere. The set (re)write only
+     * touches descriptor state, likewise legal inside a pass. */
+    {
+        uint32_t qi;
+
+        for (qi = 0; qi < renderer->queued; qi++) {
+            if (renderer->queue[qi].skinned &&
+                renderer->queue[qi].main_visible) {
+                if (lr_skin_upload_frame(renderer) != LR_SUCCESS) {
+                    return LR_ERROR_RENDER;
+                }
+                break;
+            }
+        }
+    }
     /* GPU-driven PBR draws first (prepared groups, one indirect
      * draw each); the CPU loop below then handles only unlit items
      * (and PBR items when no GPU preparation happened). */
@@ -1788,6 +1895,13 @@ static lr_result lr_render_items(lr_renderer *renderer,
             lc_pipeline *pipeline = NULL;
             lc_result cr;
             int want_pbr;
+            /* Phase 29: skinned items always draw via this CPU loop
+             * (never through GPU-driven/visibility grouping — those
+             * paths skip skinned items at group time). The vertex
+             * buffer + stride are IDENTICAL for rigid and skinned
+             * draws; only the pipeline's attribute declarations
+             * and slot count differ. */
+            int want_skinned;
 
             /* Defensive skips (never dereference dead entries). */
             if (!lr_mesh_is_live(renderer, item->mesh) ||
@@ -1797,7 +1911,12 @@ static lr_result lr_render_items(lr_renderer *renderer,
             want_pbr = (item->material->type ==
                         LR_MATERIAL_PBR_METALLIC_ROUGHNESS);
             if (gpu_pbr_done && want_pbr) {
-                continue;
+                /* Skinned PBR items never joined the GPU groups,
+                 * so they must NOT be skipped here even when the
+                 * GPU path ran. */
+                if (!item->skinned) {
+                    continue;
+                }
             }
         /* Main-frustum-culled entries skip main draws but stay
          * queued as shadow casters (prepare already used them). */
@@ -1810,16 +1929,38 @@ static lr_result lr_render_items(lr_renderer *renderer,
             item->material->type != LR_MATERIAL_UNLIT) {
             continue;
         }
-        res = lr_renderer_pipeline_for(
-            renderer, &signature, item->material->type,
-            (want_pbr && item->material->double_sided) ? LC_CULL_NONE
-                                                        : LC_CULL_BACK,
-            /* Mirrored transforms invert winding: flip the raster
-             * front face for this item instead of disabling culling
-             * (Stage 40 audit fix). */
-            item->mirrored ? LC_FRONT_FACE_CLOCKWISE
-                           : LC_FRONT_FACE_COUNTER_CLOCKWISE,
-            &pipeline);
+        want_skinned = (item->skinned != 0);
+        if (want_skinned) {
+            if (want_pbr) {
+                res = lr_renderer_skinned_pbr_pipeline_for(
+                    renderer, &signature,
+                    (item->material->double_sided) ? LC_CULL_NONE
+                                                   : LC_CULL_BACK,
+                    item->mirrored
+                        ? LC_FRONT_FACE_CLOCKWISE
+                        : LC_FRONT_FACE_COUNTER_CLOCKWISE,
+                    &pipeline);
+            } else {
+                res = lr_renderer_skinned_unlit_pipeline_for(
+                    renderer, &signature, LC_CULL_BACK,
+                    item->mirrored
+                        ? LC_FRONT_FACE_CLOCKWISE
+                        : LC_FRONT_FACE_COUNTER_CLOCKWISE,
+                    &pipeline);
+            }
+        } else {
+            res = lr_renderer_pipeline_for(
+                renderer, &signature, item->material->type,
+                (want_pbr && item->material->double_sided)
+                    ? LC_CULL_NONE
+                    : LC_CULL_BACK,
+                /* Mirrored transforms invert winding: flip the
+                 * raster front face for this item instead of
+                 * disabling culling (Stage 40 audit fix). */
+                item->mirrored ? LC_FRONT_FACE_CLOCKWISE
+                               : LC_FRONT_FACE_COUNTER_CLOCKWISE,
+                &pipeline);
+        }
         if (res != LR_SUCCESS) {
             return res;
         }
@@ -1837,7 +1978,7 @@ static lr_result lr_render_items(lr_renderer *renderer,
             bound_material = NULL; /* sets are layout-specific */
             /* A pipeline switch disturbs every slot: force the
              * frame sets below to rebind (slot 1 here, slot 2 in
-             * the environment block). */
+             * the environment block, skin slot for skinned). */
             env_bound = 0;
             if (want_pbr) {
                 /* Frame shadow set rides slot 1 (same object all
@@ -1849,7 +1990,29 @@ static lr_result lr_render_items(lr_renderer *renderer,
                     return lr_map_result(cr);
                 }
             }
+            if (want_skinned) {
+                /* Same skin set for every skinned draw (bound
+                 * fresh after each pipeline switch: slot index
+                 * differs per pipeline family). */
+                uint32_t skin_slot =
+                    want_pbr ? 3u : 1u;
+
+                cr = lc_encoder_bind_binding_set(
+                    encoder, pipeline, skin_slot,
+                    renderer->skin_set);
+                if (cr != LC_SUCCESS) {
+                    return lr_map_result(cr);
+                }
+            }
             renderer->stats.pipeline_binds++;
+        } else if (want_skinned && pipeline != NULL) {
+            /* Rigid/skinned pipelines never alias (separate
+             * mini-caches), so reaching the same pipeline object
+             * with want_skinned set means this IS a skinned
+             * pipeline revisited after a material-only switch
+             * (bound_material reset, slots undisturbed) — the
+             * skin slot binding survives, no rebind needed.
+             * (No-op branch kept explicit for audit clarity.) */
         }
         if (want_pbr) {
             /* Frame environment set rides slot 2 (empty set with
@@ -1908,6 +2071,8 @@ static lr_result lr_render_items(lr_renderer *renderer,
                 return LR_ERROR_RENDER;
             }
             push.flags = (item->receives_shadow != 0) ? 1u : 0u;
+            push.skin_offset = want_skinned ? item->skin_offset : 0u;
+            push.skin_joints = want_skinned ? item->skin_joints : 0u;
             cr = lc_encoder_push_constants(
                 encoder, pipeline,
                 (uint32_t)LC_SHADER_VISIBILITY_VERTEX |
@@ -1921,6 +2086,8 @@ static lr_result lr_render_items(lr_renderer *renderer,
 
             memcpy(push.model, item->matrix, sizeof(push.model));
             memcpy(push.color, item->material->color, sizeof(push.color));
+            push.skin_offset = want_skinned ? item->skin_offset : 0u;
+            push.skin_joints = want_skinned ? item->skin_joints : 0u;
             cr = lc_encoder_push_constants(
                 encoder, pipeline,
                 (uint32_t)LC_SHADER_VISIBILITY_VERTEX |
@@ -1941,6 +2108,11 @@ static lr_result lr_render_items(lr_renderer *renderer,
             renderer->stats.pbr_draw_calls++;
         } else {
             renderer->stats.unlit_draw_calls++;
+        }
+        if (want_skinned) {
+            renderer->stats.skinned_draw_calls++;
+            renderer->stats.skinned_triangles +=
+                item->mesh->index_count / 3u;
         }
     }
     }

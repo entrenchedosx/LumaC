@@ -1,12 +1,14 @@
-# Script Binding API (Phase 26; Input/Time Phase 27)
+# Script Binding API (Phase 26; Input/Time Phase 27; Physics 28; Animation 29)
 
 Lua-visible surface registered at runtime creation
 (`script_bind_world.c`, `script_bind_object.c`,
-`script_bind_input.c`). All bindings
+`script_bind_input.c`, `script_bind_physics.c`,
+`script_bind_anim.c`). All bindings
 are thin over `le_*`; failures raise catchable script errors
 (caught by dispatch per the error policy), never crashes.
-`World.*` / `Assets.*` / `Input.*` / `Time.*` require dispatch
-context (`firing_world`); calling them outside a callback errors.
+`World.*` / `Assets.*` / `Input.*` / `Time.*` / `Physics.*`
+require dispatch context (`firing_world`); calling them outside
+a callback errors.
 
 ## World.*
 
@@ -87,6 +89,54 @@ order — verify against `engine/src/script/script_bind_*.c`.)
   `Time.scale()` / `Time.fixed_delta()`.
 - `Time.set_scale(s)` — invalid scales error; permission is
   gameplay-controlled (example scripts toggle pause with it).
+
+## Physics (Phase 28; `script_bind_physics.c`, thin over `le_physics_*`)
+
+- `self:linear_velocity() -> x, y, z` /
+  `self:set_linear_velocity(x, y, z)` (dynamics; missing body
+  errors; non-finite errors).
+- `self:angular_velocity() -> x, y, z` /
+  `self:set_angular_velocity(x, y, z)` (world axes, rad/s).
+- `self:add_force(fx, fy, fz)` / `self:add_torque(tx, ty, tz)` —
+  accumulate for the next step (static/kinematic/missing ignore
+  with success at the C layer; bindings still require a body).
+- `self:apply_impulse(jx, jy, jz)` /
+  `self:apply_impulse_at_point(jx, jy, jz, px, py, pz)` —
+  immediate velocity change (point form adds `dw`).
+- `self:add_rigid_body{type=, mass=, linear_damping=,
+  angular_damping=, gravity_scale=}` — type is `"static"` /
+  `"dynamic"` (default) / `"kinematic"`; parented dynamics error.
+- `self:add_collider{shape=, radius=, half_extents=,
+  is_trigger=, friction=, restitution=}` — shape is `"box"`
+  (default, 0.5 half extents) / `"sphere"`.
+- `Physics.gravity() -> x, y, z` /
+  `Physics.set_gravity(x, y, z)` — per-world gravity.
+- `Physics.raycast(ox, oy, oz, dx, dy, dz, max_dist[, mask,
+  triggers]) -> hit | nil` — hit is `{object, point={x,y,z},
+  normal={x,y,z}, distance}`.
+- Collision callbacks (absent = no-op; errors mark failed):
+  `collision_enter/stay/exit(self, other, contact)` and
+  `trigger_enter/stay/exit(self, other, contact)` — `contact` is
+  `{normal={x,y,z}, point={x,y,z}, penetration=n}` (A=self ->
+  B=other sense), **nil for EXIT** events.
+
+## Animation (Phase 29; `script_bind_anim.c`, thin over `le_anim_*`)
+
+- `self:animation_play([clip[, restart]])` — nil clip keeps the
+  current clip (continue); restart nonzero forces time 0.
+- `self:animation_pause()` / `self:animation_resume()` /
+  `self:animation_stop([reset])` — reset nonzero returns to
+  bind pose + time 0.
+- `self:animation_seek(t)` — clamped into `[0, duration]`.
+- `self:animation_speed([s])` — no arg returns current speed.
+- `self:animation_crossfade(clip, seconds)` — 0 = immediate.
+- `self:animation_is_playing() -> bool`,
+  `self:animation_time() -> number`,
+  `self:animation_duration() -> number`.
+- Clips are asset userdata via `Assets.find_by_id(hex)`; stale
+  handles error. Mutating calls require dispatch context and a
+  live animator (missing animator errors); queries on missing
+  animators return false/0.
 
 ## Identity userdata model
 

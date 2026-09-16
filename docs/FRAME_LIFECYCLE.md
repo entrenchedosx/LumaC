@@ -93,6 +93,23 @@ Convenience and test spellings:
 - Dispatch order per world: pending starts, fixed steps
   (accumulator, capped catch-up, backlog drop), then
   `update(dt)` in slot order.
+- Phase 28: each fixed interval runs `fixed_update` scripts
+  FIRST, then one physics sub-step (forces -> integrate ->
+  detect -> solve -> sync -> events). Physics shares the same
+  accumulator/schedule (no second timer) and always steps —
+  scriptless worlds simulate at the configured rate (or 60 Hz
+  default) via `le_script_step_physics`.
+- Phase 29: after PASS3 update scripts, the ANIM visual advance
+  runs with the same scaled dt (enabled animators only;
+  `dt <= 0`/NaN/Inf holds pose), then matrices refresh for
+  object-track writes. Extraction borrows evaluated
+  poses/palettes (no re-evaluation). No second animation
+  clock exists — Phase 27 time is the only clock. Note:
+  `le_engine_step` clamps explicit deltas to the engine
+  `max_delta` (default 0.25 s), so one large step advances at
+  most 0.25 s of animation — settle long fades with several
+  small steps (or drive `le_world_update` directly, which is
+  unclamped).
 
 ## Legacy update contract
 

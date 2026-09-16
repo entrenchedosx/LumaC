@@ -149,6 +149,11 @@ lr_result lr_mesh_create(lr_renderer *renderer,
     mesh->lod_count = 1; /* base level only until add_lod */
     mesh->lod_min_px[0] = 0.0f;
     mesh->lod_index_counts[0] = desc->index_count;
+    /* Phase 29: one O(verts) scan decides the skinned flag for the
+     * mesh's lifetime (exact float compare against the rigid
+     * convention; see lr_skin_scan_vertices). */
+    mesh->skinned = lr_skin_scan_vertices(desc->vertices,
+                                          desc->vertex_count);
     if (lr_mesh_compute_bounds(desc, &mesh->bounds) != LR_SUCCESS) {
         free(mesh);
         *out_mesh = NULL;

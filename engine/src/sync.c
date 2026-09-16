@@ -53,6 +53,12 @@ le_result le_world_update(le_world *world, float dt) {
          * matrices), then refresh again for script writes. */
         le_script_step_world(world, dt);
         le_refresh_world_matrices(world);
+        /* Phase 29 animation visual advance (scaled dt, enabled
+         * animators only) AFTER scripts (PASS3 region), then
+         * refresh for object-track writes. Extraction reads the
+         * evaluated poses + palettes (no re-evaluation). */
+        le_anim_step_visual(world, dt);
+        le_refresh_world_matrices(world);
     } else {
         /* NaN/Inf/dt<=0 drive matrices only: render_scene's
          * update(0) never runs scripts. (The engine frame path
@@ -78,6 +84,11 @@ void le_world_simulate_engine(le_world *world, float dt) {
     }
     le_refresh_world_matrices(world);
     le_script_step_world(world, dt);
+    le_refresh_world_matrices(world);
+    /* Phase 29 animation visual advance (engine-contract path:
+     * runs even at dt==0 while paused — same contract as
+     * scripts; the stepper itself holds pose on dt<=0). */
+    le_anim_step_visual(world, dt);
     le_refresh_world_matrices(world);
 }
 
@@ -244,7 +255,6 @@ le_result le_world_extract_renderables(le_world *world,
         int casts_shadow = 0;
         int receives_shadow = 0;
         int visible = 0;
-
         if (!world->slots[i].alive) {
             continue;
         }
@@ -327,6 +337,13 @@ le_result le_world_extract_renderables(le_world *world,
             dst->casts_shadow = casts_shadow;
             dst->receives_shadow = receives_shadow;
             dst->mirrored = le_matrix_is_mirrored(s->world_matrix);
+            /* Phase 29: borrowed skin palette (NULL/0 when no
+             * animator or no evaluated pose; the submit path
+             * copies it — never retained). */
+            dst->skin_palette = NULL;
+            dst->skin_joint_count = 0;
+            le_anim_get_palette(world, i, &dst->skin_palette,
+                                &dst->skin_joint_count);
         }
         n++;
     }
@@ -696,6 +713,10 @@ static void le_submit_frame_contents(le_world *world, lr_renderer *renderer,
                                      uint32_t *skipped_dead) {
     uint32_t i;
 
+    /* Phase 29: ensure animator poses are evaluated before the
+     * submit loop borrows palettes (dirty-gated; static poses
+     * evaluate on demand). */
+    le_anim_submit_palettes(world);
     /* Lights first (renderer requires submits before prepare). */
     for (i = 0; i < world->capacity; i++) {
         le_object_slot *s;
@@ -849,6 +870,12 @@ static void le_submit_frame_contents(le_world *world, lr_renderer *renderer,
         item.casts_shadow = casts_shadow;
         item.receives_shadow = receives_shadow;
         item.instance_id = le_object_stable_id(world, &handle);
+        /* Phase 29: borrowed skin palette (the renderer copies
+         * it synchronously at submit; NULL/0 draws rigid). */
+        item.skin_palette = NULL;
+        item.skin_joint_count = 0;
+        le_anim_get_palette(world, i, &item.skin_palette,
+                            &item.skin_joint_count);
         if (lr_renderer_submit(renderer, &item) != LR_SUCCESS) {
             (*skipped_dead)++;
             continue;

@@ -93,6 +93,16 @@ typedef struct lr_vertex {
     float normal[3];
     float tangent[4];
     float texcoord[2];
+    /* Phase 29 skinning (zero = unskinned/rigid: joint 0 @ weight
+     * 0 must never move a vertex — see weight policy in
+     * GPU_SKINNING.md; unskinned vertices conventionally carry
+     * joints {0,0,0,0} + weights {1,0,0,0} and a mesh with no
+     * skeleton renders identically with or without skinning).
+     * Joints are skeleton joint indices (uint32, NOT normalized);
+     * weights are plain floats (normalized on import, see
+     * lr_skinned spouses below). */
+    uint32_t joints[4];
+    float weights[4];
 } lr_vertex;
 
 /* Static mesh source data. Vertices are copied and uploaded into
@@ -141,6 +151,17 @@ uint32_t lr_mesh_get_vertex_count(const lr_mesh *mesh);
 
 /** Mesh index count (0 for NULL). */
 uint32_t lr_mesh_get_index_count(const lr_mesh *mesh);
+
+/**
+ * Phase 29: nonzero when the mesh carries skinning data — i.e. at
+ * least one vertex deviates from the rigid convention
+ * (joints {0,0,0,0} + weights {1,0,0,0}). Decided once at
+ * creation by scanning the source vertices (O(verts), exact
+ * float compare); 0 for NULL or dead meshes. A skinned draw
+ * additionally needs a per-submit palette (see lr_draw_item); a
+ * palette on a rigid (non-skinned) mesh renders rigid.
+ */
+int lr_mesh_is_skinned(const lr_mesh *mesh);
 
 /** Mesh local bounds (zeros for NULL; out may be NULL for a no-op). */
 void lr_mesh_get_bounds(const lr_mesh *mesh, lr_bounds *out_bounds);
@@ -387,7 +408,17 @@ void lr_quat_multiply(const float a[4], const float b[4],
  * stable identity": LOD runs without hysteresis for that item
  * (deterministic, always safe). IDs must be unique among live
  * submissions sharing one renderer; reuse of an ID for a different
- * logical object reattaches that object's history. */
+ * logical object reattaches that object's history.
+ *
+ * Phase 29 skinning: skin_palette borrows `skin_joint_count`
+ * column-major joint matrices (`joint_global * inverse_bind` in
+ * the mesh's local frame); NULL/0 draws rigid (joints/weights
+ * ignored — a mesh with no skeleton renders identically either
+ * way). The renderer copies the palette synchronously inside
+ * lr_renderer_submit (never retained): the caller may free or
+ * mutate it right after submit returns. A skinned draw additionally
+ * requires a skinned mesh (see lr_mesh_is_skinned); a palette on a
+ * rigid mesh is ignored (rigid path). */
 typedef struct lr_draw_item {
     lr_mesh *mesh;
     lr_material *material;
@@ -395,6 +426,8 @@ typedef struct lr_draw_item {
     int casts_shadow;
     int receives_shadow;
     uint64_t instance_id;
+    const float (*skin_palette)[16];
+    uint32_t skin_joint_count;
 } lr_draw_item;
 
 /* Opaque per-frame queue statistics. Light counts and per-kind
@@ -423,6 +456,8 @@ typedef struct lr_render_stats {
     uint32_t tonemap_passes;
     uint32_t ibl_enabled;          /* 1 when an environment lit the frame */
     uint32_t environment_rebuilds; /* env (re)builds this frame */
+    uint32_t skinned_draw_calls;  /* Phase 29: skinned draws this frame */
+    uint32_t skinned_triangles;   /* Phase 29: skinned triangles drawn */
 } lr_render_stats;
 
 /* Render mode (Phase 21): CPU per-draw submission (default,

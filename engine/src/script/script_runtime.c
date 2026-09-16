@@ -442,6 +442,7 @@ le_result le_script_runtime_ensure(le_engine *engine) {
     le_lua_register_world(rt->L);
     le_lua_register_object(rt->L);
     le_lua_register_input(rt->L);
+    le_lua_register_physics(rt->L);
     engine->script_runtime = rt;
     return LE_SUCCESS;
 }

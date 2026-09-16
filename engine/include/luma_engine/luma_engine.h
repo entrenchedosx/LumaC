@@ -526,7 +526,14 @@ typedef enum le_component_type {
     LE_COMPONENT_CAMERA = 2,
     LE_COMPONENT_LIGHT = 3,
     LE_COMPONENT_SCRIPT = 4,
-    LE_COMPONENT_COUNT = 5
+    /* Phase 28: physics components (appended; earlier values
+     * unchanged). */
+    LE_COMPONENT_RIGID_BODY = 5,
+    LE_COMPONENT_COLLIDER = 6,
+    /* Phase 29: animator component (appended; earlier values
+     * unchanged). */
+    LE_COMPONENT_ANIMATOR = 7,
+    LE_COMPONENT_COUNT = 8
 } le_component_type;
 
 /** Nonzero when the object carries the component (transform is
@@ -737,7 +744,10 @@ LE_API le_result le_world_update(le_world *world, float dt);
 
 /** One extracted renderable (plain data for the render boundary:
  *  world matrix + stable temporal key + borrowed mesh/material +
- *  shadow/visibility flags + source object for debugging). */
+ *  shadow/visibility flags + source object for debugging). Phase
+ *  29 adds the borrowed skin palette (NULL/0 when the object has
+ *  no animator or no evaluated pose; valid until the next update
+ *  or animator mutation — the submit path copies it). */
 typedef struct le_extracted_renderable {
     le_object object;
     float world_matrix[16];
@@ -747,6 +757,8 @@ typedef struct le_extracted_renderable {
     int casts_shadow;
     int receives_shadow;
     int mirrored;
+    const float (*skin_palette)[16];
+    uint32_t skin_joint_count;
 } le_extracted_renderable;
 
 /** One extracted light (renderer-ready lr_light + source object). */
@@ -1091,7 +1103,13 @@ typedef enum le_asset_type {
     LE_ASSET_TEXTURE = 2,
     LE_ASSET_SCENE = 3,
     LE_ASSET_SCRIPT = 4,
-    LE_ASSET_COUNT = 5
+    /* Phase 29: animation assets (appended; earlier values
+     * unchanged). Skeleton = immutable joint hierarchy + bind
+     * pose + inverse bind matrices. Clip = immutable TRS tracks
+     * over joints and/or plain object transforms. */
+    LE_ASSET_SKELETON = 5,
+    LE_ASSET_ANIMATION_CLIP = 6,
+    LE_ASSET_COUNT = 7
 } le_asset_type;
 
 /** Asset load state (synchronous loads only in Phase 25; the model
@@ -1312,6 +1330,49 @@ LE_API le_result le_gltf_import(le_engine *engine, const char *path,
  *  registry; only the listing is freed). NULL-safe no-op. */
 LE_API void le_gltf_import_free(le_gltf_result *import);
 
+/* ---- animated import (Phase 29; needs luma_assets' la_model) ----
+ * A caller-loaded la_model (via luma_assets) yields engine
+ * skeleton + clip assets for one skin. Meshes/materials still
+ * come from le_gltf_import (or la_model_adopt_*); this call
+ * only derives animation data (no GPU work, renderer-less
+ * engines welcome). See GLTF_ANIMATION_IMPORT.md for the
+ * derivation rules. struct la_model is opaque here (forward
+ * declared; include <luma_assets/luma_assets.h> for it). */
+
+struct la_model;
+
+/** One animated import: skeleton + per-animation clips for a
+ *  skin. `joint_nodes[j]` is the model node index of joint j
+ *  (debug/retargeting; valid while the model lives conceptually
+ *  — copied values, no lifetime). `skipped_tracks` counts
+ *  channels that targeted non-skeleton nodes (loud, never
+ *  silent). Animations with zero surviving tracks are excluded
+ *  from `clips`. Free listing arrays with
+ *  le_gltf_animated_free (assets stay live in the registry). */
+typedef struct le_gltf_animated {
+    le_asset skeleton;
+    le_asset *clips;
+    uint32_t clip_count;
+    int32_t *joint_nodes;
+    uint32_t joint_count;
+    uint32_t skipped_tracks;
+} le_gltf_animated;
+
+/** Import skeleton + clips for one skin (transactional:
+ *  malformed data creates NOTHING, registry untouched).
+ *
+ * @return LE_SUCCESS, LE_ERROR_INVALID_ARGUMENT (NULL args,
+ *         skin_index out of range, bad joints/hierarchy),
+ *         LE_ERROR_OUT_OF_MEMORY, LE_ERROR_MISSING_ASSET
+ *         (never for model data — reserved).
+ */
+LE_API le_result le_gltf_import_animated(
+    le_engine *engine, const struct la_model *model,
+    uint32_t skin_index, le_gltf_animated *out_anim);
+
+/** Free an animated import's listing arrays (NULL-safe). */
+LE_API void le_gltf_animated_free(le_gltf_animated *anim);
+
 /** Registry statistics snapshot (plain counts; zeros for NULL). */
 typedef struct le_asset_stats {
     uint32_t assets_alive;
@@ -1320,6 +1381,10 @@ typedef struct le_asset_stats {
     uint32_t material_count;
     uint32_t texture_count;
     uint32_t scene_count;
+    /* Phase 29: animation asset census (appended; earlier fields
+     * unchanged). */
+    uint32_t skeleton_count;
+    uint32_t clip_count;
     uint32_t ready_count;
     uint32_t failed_count;
     uint64_t name_bytes;
@@ -1419,6 +1484,21 @@ typedef struct le_script_property {
  *  persistent asset ID with a project-relative path hint for
  *  relocation; parent by persistent object ID). */
 #define LE_SCRIPT_MAX_PROPS ((uint32_t)16)
+/** Rigid-body motion type (stable ABI; safe to persist). Declared
+ *  here (above le_scene_object) because scene records embed
+ *  physics authoring state. */
+typedef enum le_body_type {
+    LE_BODY_STATIC = 0,   /* infinite mass, never integrated */
+    LE_BODY_DYNAMIC = 1,  /* mass > 0, integrated, collides */
+    LE_BODY_KINEMATIC = 2 /* script/app-driven, pushes dynamics */
+} le_body_type;
+
+/** Collider shape (stable ABI; capsule DEFERRED in Phase 28). */
+typedef enum le_collider_shape {
+    LE_COLLIDER_SPHERE = 0,
+    LE_COLLIDER_BOX = 1
+} le_collider_shape;
+
 typedef struct le_scene_object {
     le_scene_object_id id;
     le_scene_object_id parent;
@@ -1444,6 +1524,40 @@ typedef struct le_scene_object {
     le_asset_id script_id;
     le_script_property script_props[16];
     uint32_t script_prop_count;
+    /* Phase 28: physics components (authoring state only; never
+     * runtime accumulators, contacts, or solver caches). */
+    int has_rigid_body;
+    le_body_type body_type;
+    float body_mass;
+    float body_linear_damping;
+    float body_angular_damping;
+    float body_gravity_scale;
+    float body_linear_velocity[3];
+    float body_angular_velocity[3];
+    int has_collider;
+    le_collider_shape collider_shape;
+    float collider_radius;
+    float collider_half_extents[3];
+    float collider_offset[3];
+    float collider_orientation[4];
+    int collider_is_trigger;
+    uint32_t collider_layer;
+    uint32_t collider_mask;
+    float collider_friction;
+    float collider_restitution;
+    /* Phase 29: animator component (authoring + playback state;
+     * never evaluated poses or palettes). Skeleton/clip ride as
+     * persistent asset IDs (resolved READY-only at instantiate,
+     * like script_id); loop_mode/speed/start_time validate the
+     * same as le_object_add_animator. */
+    int has_animator;
+    le_asset_id skeleton_id;
+    le_asset_id clip_id;
+    int animator_autoplay;
+    int animator_loop; /* le_anim_loop_mode value (int: the enum
+                        * is declared later in this header) */
+    float animator_speed;
+    float animator_start_time;
 } le_scene_object;
 
 /** Create an empty scene payload owned by the engine (also
@@ -2062,6 +2176,588 @@ LE_API int le_engine_is_minimized(le_engine *engine);
  *  hold the game world while its own world runs). */
 LE_API le_result le_world_set_paused(le_world *world, int paused);
 LE_API int le_world_is_paused(const le_world *world);
+
+/** Per-world pause (independent of global time scale; editor can
+ *  hold the game world while its own world runs). */
+LE_API le_result le_world_set_paused(le_world *world, int paused);
+LE_API int le_world_is_paused(const le_world *world);
+
+/* ------------------------------------------------------------------
+ * Physics & collision foundation (Phase 28): engine-owned
+ * rigid-body subsystem, one physics world per le_world.
+ *
+ * Units: 1 distance unit = 1 meter, time = seconds, mass =
+ * kilograms, angles = radians, force = newtons, impulse =
+ * newton-seconds. Coordinates: Y-up right-handed, Vulkan NDC,
+ * quaternions (x,y,z,w); contact normals point A -> B.
+ *
+ * Fixed-step ordering inside each physics step (no second timer;
+ * the Phase 27 engine schedule drives this):
+ *   1. fixed_update scripts run (may apply forces/impulses)
+ *   2. gravity + force accumulators -> velocity change
+ *   3. integrate velocities -> positions (dynamic only)
+ *   4. broad phase (sweep-and-prune) + narrow phase -> contacts
+ *   5. sequential-impulse solve (normal + friction + restitution)
+ *      with Baumgarte/slop penetration correction
+ *   6. physics -> engine transform sync (roots only for dynamics)
+ *   7. ENTER/STAY/EXIT (+ trigger) events finalized for callbacks
+ *
+ * Determinism: same initial world + same input + same explicit dt
+ * sequence on the same build/architecture reproduces results.
+ * Cross-platform bit-identical floats are NOT promised.
+ *
+ * Threading: single-threaded (owning thread, like scripts). No
+ * thread safety is claimed.
+ * ------------------------------------------------------------------ */
+
+/** Rigid-body motion type (stable ABI; safe to persist).
+ *  (Declared above le_scene_object; repeated doc here for the
+ *  physics section reader.) */
+/* (alias kept for doc-pointer; no second enum definition) */
+
+/* Collider shape enum declared above le_scene_object (see top of
+ * the scenes section). Kept here as a section pointer. */
+
+/** Rigid-body authoring + runtime state (zero-init, then fill;
+ *  velocities are live state, readable/writable any time). */
+typedef struct le_rigid_body_desc {
+    le_body_type type;
+    float mass;            /* dynamic: > 0 finite, else rejected */
+    float linear_damping;  /* >= 0 (velocity *= 1/(1+d*dt)) */
+    float angular_damping; /* >= 0, same model */
+    float gravity_scale;   /* 1 = full world gravity */
+    float linear_velocity[3];
+    float angular_velocity[3]; /* rad/s, world axes */
+} le_rigid_body_desc;
+
+/** Collider authoring state (zero-init, then fill). Dimensions
+ *  are LOCAL (pre-scale); world scale applies conservatively at
+ *  solve time (max |axis| multiplies sphere radius AND box
+ *  extents — exact for uniform scale / axis-aligned frames,
+ *  conservative cover otherwise; negative scales never negate
+ *  dimensions; sheared world matrices skip the collider). */
+typedef struct le_collider_desc {
+    le_collider_shape shape;
+    /* Sphere: radius (> 0 finite). Box: half extents (> 0 finite
+     * each axis). Only the shape-selected field is read. */
+    float radius;
+    float half_extents[3];
+    /* Local frame of the shape relative to the object origin. */
+    float offset[3];
+    float orientation[4]; /* quat (x,y,z,w); normalized on store */
+    int is_trigger;       /* overlap events only, no response */
+    uint32_t layer;       /* 0..31 (single bit owner) */
+    uint32_t mask;        /* 32-bit collide-with mask */
+    float friction;       /* >= 0 finite (pair: geometric mean) */
+    float restitution;    /* [0,1] (pair: max) */
+} le_collider_desc;
+
+/** Attach (or replace) a rigid body. Dynamic bodies must be
+ *  world roots (parented dynamics rejected — world/root sync has
+ *  no valid local inversion under arbitrary parents).
+ *
+ * @return LE_SUCCESS, LE_ERROR_INVALID_ARGUMENT (NULL args, bad
+ *         mass/damping/velocity/type), LE_ERROR_WRONG_WORLD,
+ *         LE_ERROR_STALE_HANDLE, LE_ERROR_INVALID_HIERARCHY
+ *         (dynamic + parented), LE_ERROR_OUT_OF_MEMORY.
+ */
+LE_API le_result le_object_add_rigid_body(le_world *world,
+                                          const le_object *object,
+                                          const le_rigid_body_desc *desc);
+/** Remove a rigid body (missing = success/no-op; contacts
+ *  referencing it are retired safely). */
+LE_API le_result le_object_remove_rigid_body(le_world *world,
+                                             const le_object *object);
+/** Copy out body state (zeros for NULL/stale/missing; out may be
+ *  NULL). Returns 1 when present, 0 otherwise. */
+LE_API int le_object_get_rigid_body(const le_world *world,
+                                    const le_object *object,
+                                    le_rigid_body_desc *out_desc);
+
+/** Attach (or replace) a collider (sphere or box). Static and
+ *  kinematic colliders may parent freely; dynamic colliders ride
+ *  their root body (see parenting rule above).
+ *
+ * @return LE_SUCCESS, LE_ERROR_INVALID_ARGUMENT (NULL args, bad
+ *         dimensions/friction/restitution/layer), LE_ERROR_..._WORLD/
+ *         STALE_HANDLE, LE_ERROR_OUT_OF_MEMORY.
+ */
+LE_API le_result le_object_add_collider(le_world *world,
+                                        const le_object *object,
+                                        const le_collider_desc *desc);
+LE_API le_result le_object_remove_collider(le_world *world,
+                                           const le_object *object);
+LE_API int le_object_get_collider(const le_world *world,
+                                  const le_object *object,
+                                  le_collider_desc *out_desc);
+
+/* ---- per-frame dynamics API (forces clear after each step) ---- */
+
+/** Accumulate a world-space force (newtons) for the next step.
+ *  No-op result for static/kinematic/missing (INVALID_ARGUMENT
+ *  only for NULL/stale/non-finite). */
+LE_API le_result le_physics_add_force(le_world *world,
+                                      const le_object *object,
+                                      float fx, float fy, float fz);
+LE_API le_result le_physics_add_torque(le_world *world,
+                                       const le_object *object,
+                                       float tx, float ty, float tz);
+/** Immediate center-of-mass velocity change (dv = J*inv_mass).
+ *  Static/kinematic/missing bodies ignore it (SUCCESS). */
+LE_API le_result le_physics_apply_impulse(le_world *world,
+                                          const le_object *object,
+                                          float jx, float jy,
+                                          float jz);
+/** Off-center impulse (also changes angular velocity via
+ *  r x J with the world inertia tensor). Point is world-space. */
+LE_API le_result le_physics_apply_impulse_at_point(
+    le_world *world, const le_object *object, float jx, float jy,
+    float jz, float px, float py, float pz);
+LE_API le_result le_physics_set_linear_velocity(
+    le_world *world, const le_object *object, float vx, float vy,
+    float vz);
+LE_API le_result le_physics_get_linear_velocity(
+    const le_world *world, const le_object *object, float out_v[3]);
+LE_API le_result le_physics_set_angular_velocity(
+    le_world *world, const le_object *object, float wx, float wy,
+    float wz);
+LE_API le_result le_physics_get_angular_velocity(
+    const le_world *world, const le_object *object, float out_w[3]);
+
+/** Teleport a dynamic body to an explicit local transform
+ *  (recomputes world matrices immediately). When clear_velocity
+ *  is nonzero the velocities zero too; otherwise they are kept.
+ *  Kinematic/static bodies move via plain transform setters
+ *  (physics follows them); this entry exists so dynamic intent
+ *  is explicit and auditable. */
+LE_API le_result le_physics_teleport(le_world *world,
+                                     const le_object *object,
+                                     const float position[3],
+                                     const float rotation[4],
+                                     int clear_velocity);
+
+/* ---- world gravity + solver tuning ---- */
+
+LE_API le_result le_physics_set_gravity(le_world *world, float gx,
+                                        float gy, float gz);
+LE_API void le_physics_get_gravity(const le_world *world,
+                                   float out_g[3]);
+/** Solver iteration counts (defaults 8 velocity / 3 position;
+ *  each clamped to [1,64]; zeros leave the value unchanged). */
+LE_API le_result le_physics_set_iterations(le_world *world,
+                                           uint32_t velocity_iters,
+                                           uint32_t position_iters);
+LE_API void le_physics_get_iterations(const le_world *world,
+                                      uint32_t *out_velocity,
+                                      uint32_t *out_position);
+
+/* ---- collision/trigger events ----
+ * ENTER = first overlapping step, STAY = continued, EXIT = first
+ * clear step (destroying an overlapping object emits EXIT for its
+ * pairs). Order is deterministic: pairs sorted by (min,max) slot
+ * then generation. Callbacks may destroy objects (generation-safe;
+ * iteration is snapshot-driven). */
+
+typedef enum le_collision_event_type {
+    LE_COLLISION_ENTER = 0,
+    LE_COLLISION_STAY = 1,
+    LE_COLLISION_EXIT = 2,
+    LE_TRIGGER_ENTER = 3,
+    LE_TRIGGER_STAY = 4,
+    LE_TRIGGER_EXIT = 5
+} le_collision_event_type;
+
+/** One drained event (plain values; `other` is generation-safe —
+ *  resolution at drain time, never a stored pointer). */
+typedef struct le_collision_event {
+    le_collision_event_type type;
+    le_object self;
+    le_object other;
+    float normal[3];     /* A(self) -> B(other); zero on EXIT */
+    float point[3];      /* world contact point; zero on EXIT */
+    float penetration;   /* meters; zero on EXIT */
+    int is_trigger;
+} le_collision_event;
+
+/** Drain pending events for one object (up to cap; always
+ *  reports the full count; either out may be NULL for a counting
+ *  query). Events drain once — call before they are overwritten
+ *  (ring holds 64 per object; oldest drops under flood, counted
+ *  in stats). */
+LE_API le_result le_physics_drain_events(le_world *world,
+                                         const le_object *object,
+                                         le_collision_event *out,
+                                         uint32_t cap,
+                                         uint32_t *out_count);
+
+/* ---- queries (read-only against stable step state) ---- */
+
+typedef struct le_ray_hit {
+    le_object object;
+    float point[3];
+    float normal[3]; /* surface normal at hit (A->B sense lost;
+                      * points against the ray) */
+    float distance;  /* along direction, meters */
+} le_ray_hit;
+
+/** Closest-hit raycast (1 = hit, 0 = none; out may be NULL for a
+ *  boolean query). Triggers hit only when hit_triggers != 0.
+ *  layer_mask selects collider layers (bit i = layer i). */
+LE_API int le_physics_raycast(
+    le_world *world, float ox, float oy, float oz, float dx,
+    float dy, float dz, float max_distance, uint32_t layer_mask,
+    int hit_triggers, le_ray_hit *out_hit);
+/** All-hits raycast (sorted near -> far; counting query when out
+ *  is NULL). Returns the total hit count. */
+LE_API uint32_t le_physics_raycast_all(
+    le_world *world, float ox, float oy, float oz, float dx,
+    float dy, float dz, float max_distance, uint32_t layer_mask,
+    int hit_triggers, le_ray_hit *out, uint32_t cap);
+/** Sphere overlap (counting query when out is NULL). */
+LE_API uint32_t le_physics_overlap_sphere(
+    le_world *world, float cx, float cy, float cz, float radius,
+    uint32_t layer_mask, int hit_triggers, le_object *out,
+    uint32_t cap);
+/** Axis-aligned box overlap (center + half extents, world
+ *  frame). */
+LE_API uint32_t le_physics_overlap_box(
+    le_world *world, float cx, float cy, float cz, float hx,
+    float hy, float hz, uint32_t layer_mask, int hit_triggers,
+    le_object *out, uint32_t cap);
+
+/* ---- debug extraction (plain data for future editor views;
+ * no renderer involved) ---- */
+
+typedef struct le_physics_debug_counts {
+    uint32_t boxes;    /* 12 edges each */
+    uint32_t spheres;  /* 3 rings each */
+    uint32_t contacts; /* 1 segment each */
+    uint32_t aabbs;    /* 12 edges each */
+} le_physics_debug_counts;
+
+LE_API void le_physics_get_debug_counts(const le_world *world,
+                                        le_physics_debug_counts *out);
+/** Line soup: out_xyz holds 2 points per segment (xyz xyz...).
+ *  Counting query when out is NULL. include_aabbs/contacts toggle
+ *  those segment groups. */
+LE_API uint32_t le_physics_extract_debug_lines(
+    const le_world *world, float *out_xyz, uint32_t float_cap,
+    int include_aabbs, int include_contacts);
+
+/** Structured stats (zeros for NULL; out may be NULL). */
+typedef struct le_physics_stats {
+    uint32_t body_count;
+    uint32_t dynamic_bodies;
+    uint32_t collider_count;
+    uint32_t trigger_count;
+    uint32_t broadphase_candidates;
+    uint32_t narrowphase_tests;
+    uint32_t contact_count;
+    uint32_t velocity_iterations;
+    uint32_t position_iterations;
+    uint64_t ray_queries;
+    uint64_t events_dropped;
+} le_physics_stats;
+
+LE_API void le_physics_get_stats(le_world *world,
+                                 le_physics_stats *out_stats);
+
+/* ------------------------------------------------------------------
+ * Animation, skeleton & GPU skinning foundation (Phase 29):
+ * engine-owned animation over the existing asset registry,
+ * transform hierarchy, time system, and renderer resource model.
+ *
+ * Layers (immutable vs mutable, strictly separated):
+ *   Asset layer (immutable, registry-owned):
+ *     LE_ASSET_SKELETON — joint hierarchy + bind pose + inverse
+ *       bind matrices (compact joint-index identity; names for
+ *       import/debug/Lua only).
+ *     LE_ASSET_ANIMATION_CLIP — duration + TRS tracks (per-joint
+ *       and/or per-object), key times/values, interpolation.
+ *   World layer (mutable, per-animator runtime state):
+ *     LE_COMPONENT_ANIMATOR — clip refs, playback time/speed/
+ *       loop/playing/weight, crossfade state, evaluated pose.
+ *   Renderer: skin palette (joint matrices) + GPU-skinned mesh.
+ *
+ * Units: joint TRS is LOCAL (parent space); time is seconds;
+ * angles are radians; quaternions (x,y,z,w). Skin matrices are
+ * `joint_global * inverse_bind` in the animated object's frame,
+ * reconciled with the renderer convention (see GPU_SKINNING.md).
+ *
+ * Threading: single-threaded (owning thread, like scripts and
+ * physics). No thread safety is claimed.
+ * ------------------------------------------------------------------ */
+
+/** Maximum joints per skeleton asset (architectural ceiling;
+ *  GPU palettes page this in ranges — see Maximum GPU joints).
+ *  CPU evaluation supports the full range iteratively (no
+ *  recursion, so 1000-deep chains are safe). */
+#define LE_ANIM_MAX_JOINTS ((uint32_t)4096)
+/** Maximum tracks per clip. */
+#define LE_ANIM_MAX_TRACKS ((uint32_t)65536)
+/** Maximum keys per track. */
+#define LE_ANIM_MAX_KEYS_PER_TRACK ((uint32_t)1048576)
+/** Maximum influences per vertex (JOINTS_0/WEIGHTS_0). Extra
+ *  JOINTS_1/WEIGHTS_1 sets are explicitly rejected at import
+ *  (documented four-influence limit, never silent). */
+#define LE_ANIM_MAX_INFLUENCES ((uint32_t)4)
+
+/** Skeleton joint description (authoring-time input; the asset
+ *  stores compact arrays, not this struct). */
+typedef struct le_skeleton_joint_desc {
+    char name[64];          /* debug/Lua/import identity (may be "") */
+    int32_t parent;         /* -1 = root, else joint index */
+    float translation[3];   /* bind local TRS */
+    float rotation[4];      /* quat (x,y,z,w), normalized on store */
+    float scale[3];
+    float inverse_bind[16]; /* column-major, finite, invertible-ish */
+} le_skeleton_joint_desc;
+
+/** Skeleton asset description (zero-init, then fill joints). */
+typedef struct le_skeleton_asset_desc {
+    const le_skeleton_joint_desc *joints;
+    uint32_t joint_count;
+} le_skeleton_asset_desc;
+
+/** Track target kind (joint-space or plain object transform). */
+typedef enum le_anim_target_kind {
+    LE_ANIM_TARGET_JOINT = 0,  /* target_index = joint index */
+    LE_ANIM_TARGET_OBJECT = 1, /* object-local TRS (doors/props) */
+    LE_ANIM_TARGET_COUNT = 2
+} le_anim_target_kind;
+
+/** Animated channel (matches glTF channel vocabulary). */
+typedef enum le_anim_channel {
+    LE_ANIM_CHANNEL_TRANSLATION = 0,
+    LE_ANIM_CHANNEL_ROTATION = 1,
+    LE_ANIM_CHANNEL_SCALE = 2,
+    LE_ANIM_CHANNEL_COUNT = 3
+} le_anim_channel;
+
+/** Key interpolation (matches glTF sampler vocabulary). */
+typedef enum le_anim_interpolation {
+    LE_ANIM_INTERP_STEP = 0,
+    LE_ANIM_INTERP_LINEAR = 1,
+    LE_ANIM_INTERP_CUBICSPLINE = 2,
+    LE_ANIM_INTERP_COUNT = 3
+} le_anim_interpolation;
+
+/** One animation track (authoring-time input; keys copied in).
+ *  Times are seconds (finite, >= 0, non-decreasing; duplicates
+ *  allowed with explicit last-wins sampling). Values: vec3 for
+ *  translation/scale, quat (x,y,z,w) for rotation. CUBICSPLINE
+ *  stores glTF Hermite triples per key (in/value/out, tangent
+ *  scale = key interval); the importer expands them. */
+typedef struct le_anim_track_desc {
+    le_anim_target_kind target_kind;
+    uint32_t target_index; /* joint index or 0 (object = owner) */
+    le_anim_channel channel;
+    le_anim_interpolation interpolation;
+    const float *times;   /* [key_count] */
+    const float *values;  /* [key_count * comps] (3 or 4) */
+    uint32_t key_count;
+} le_anim_track_desc;
+
+/** Clip asset description (zero-init, then fill tracks). */
+typedef struct le_animation_clip_desc {
+    float duration; /* seconds, finite, > 0 */
+    const le_anim_track_desc *tracks;
+    uint32_t track_count;
+} le_animation_clip_desc;
+
+/** Create a READY skeleton asset (validates hierarchy: parents
+ *  in range, no self-parent, no cycles, reachable, at least one
+ *  root; duplicate names allowed but documented; matrices finite;
+ *  quats normalizable — malformed input creates NOTHING).
+ *
+ * @return LE_SUCCESS, LE_ERROR_INVALID_ARGUMENT (NULL args, bad
+ *         hierarchy/transforms), LE_ERROR_OUT_OF_MEMORY.
+ */
+LE_API le_result le_asset_create_skeleton(
+    le_engine *engine, const le_skeleton_asset_desc *desc,
+    le_asset *out_asset);
+
+/** Create a READY clip asset (validates times finite/>=0/
+ *  non-decreasing, values finite, rotation quats normalizable,
+ *  counts in range — malformed input creates NOTHING).
+ *
+ * @return LE_SUCCESS, LE_ERROR_INVALID_ARGUMENT,
+ *         LE_ERROR_OUT_OF_MEMORY.
+ */
+LE_API le_result le_asset_create_clip(
+    le_engine *engine, const le_animation_clip_desc *desc,
+    le_asset *out_asset);
+
+/** Skeleton joint count (0 for NULL/stale/wrong-type). */
+LE_API uint32_t le_skeleton_get_joint_count(
+    const le_engine *engine, const le_asset *skeleton);
+
+/** Find a joint index by name (1 found; 0 for NULL/stale/
+ *  wrong-type/absent; first match wins on duplicates). */
+LE_API int le_skeleton_find_joint(const le_engine *engine,
+                                  const le_asset *skeleton,
+                                  const char *name,
+                                  uint32_t *out_index);
+
+/** Clip duration in seconds (0 for NULL/stale/wrong-type). */
+LE_API float le_clip_get_duration(const le_engine *engine,
+                                  const le_asset *clip);
+
+/** Clip track count (0 for NULL/stale/wrong-type). */
+LE_API uint32_t le_clip_get_track_count(const le_engine *engine,
+                                        const le_asset *clip);
+
+/** Loop mode (stable ABI; safe to persist). */
+typedef enum le_anim_loop_mode {
+    LE_ANIM_ONCE = 0, /* clamp at end, stop playing */
+    LE_ANIM_LOOP = 1, /* wrap (time mod duration) */
+    LE_ANIM_PING_PONG = 2, /* alternate direction each pass */
+    LE_ANIM_LOOP_COUNT = 3
+} le_anim_loop_mode;
+
+/** Animator authoring + playback state (zero-init, then fill;
+ *  playback fields are live state, readable any time). */
+typedef struct le_animator_desc {
+    le_asset skeleton; /* LE_ASSET_SKELETON (or INVALID = none) */
+    le_asset clip;     /* LE_ASSET_ANIMATION_CLIP to play */
+    int autoplay;      /* nonzero: start playing on add */
+    le_anim_loop_mode loop_mode;
+    float speed;       /* finite, >= 0 (negative rejected) */
+    float start_time;  /* initial time (clamped into range) */
+} le_animator_desc;
+
+/** Attach (or replace) an animator (validates skeleton/clip
+ *  handles when set: live READY, right type).
+ *
+ *  Transform-ownership policy (explicit, tested):
+ *  - Animator + NO rigid body: animation writes the object's
+ *    local transform (object tracks) freely.
+ *  - Animator + STATIC body: allowed (teleport-style sync).
+ *  - Animator + KINEMATIC body: allowed (physics consumes the
+ *    kinematic motion per Phase 28 sync).
+ *  - Animator + DYNAMIC body + OBJECT-target tracks: REJECTED
+ *    with LE_ERROR_INVALID_HIERARCHY (physics owns the root
+ *    transform; no tug-of-war). JOINT-target tracks under a
+ *    dynamic root are VALID (skeleton moves under the body).
+ *
+ * @return LE_SUCCESS, LE_ERROR_INVALID_ARGUMENT (NULL args, bad
+ *         loop/speed/handles), LE_ERROR_WRONG_WORLD,
+ *         LE_ERROR_STALE_HANDLE, LE_ERROR_STALE_ASSET,
+ *         LE_ERROR_WRONG_ASSET_TYPE, LE_ERROR_MISSING_ASSET,
+ *         LE_ERROR_INVALID_HIERARCHY (dynamic + object tracks),
+ *         LE_ERROR_OUT_OF_MEMORY.
+ */
+LE_API le_result le_object_add_animator(le_world *world,
+                                        const le_object *object,
+                                        const le_animator_desc *desc);
+/** Remove an animator (missing = success/no-op). */
+LE_API le_result le_object_remove_animator(
+    le_world *world, const le_object *object);
+/** Copy out animator state (zeros for NULL/stale/missing; out may
+ *  be NULL). Returns 1 when present, 0 otherwise. */
+LE_API int le_object_get_animator(const le_world *world,
+                                  const le_object *object,
+                                  le_animator_desc *out_desc);
+
+/* ---- playback (all AOT-compatible; Lua bindings are thin) ---- */
+
+/** Play a clip (restart = nonzero forces time 0 even for the
+ *  same clip; restart = 0 continues same-clip time). Starts
+ *  playing. Missing animator = INVALID_ARGUMENT. */
+LE_API le_result le_anim_play(le_world *world,
+                              const le_object *object,
+                              const le_asset *clip, int restart);
+/** Pause (holds time; resume continues). Missing animator is
+ *  success/no-op for pause idempotence? No: missing = INVALID. */
+LE_API le_result le_anim_pause(le_world *world,
+                               const le_object *object);
+LE_API le_result le_anim_resume(le_world *world,
+                                const le_object *object);
+/** Stop: pauses AND (reset nonzero) returns to bind pose/time 0,
+ *  else holds the last pose. */
+LE_API le_result le_anim_stop(le_world *world,
+                              const le_object *object, int reset);
+/** Seek (clamped into [0, duration]; invalidates cursors). */
+LE_API le_result le_anim_seek(le_world *world,
+                              const le_object *object, float time);
+/** Speed (finite, >= 0; negative rejected, unchanged). */
+LE_API le_result le_anim_set_speed(le_world *world,
+                                   const le_object *object,
+                                   float speed);
+/** Loop mode. */
+LE_API le_result le_anim_set_loop(le_world *world,
+                                  const le_object *object,
+                                  le_anim_loop_mode loop);
+/** Crossfade to a clip over duration seconds (0 = immediate).
+ *  Interrupts in-flight fades from the CURRENT blended pose
+ *  (no snap back to either endpoint). */
+LE_API le_result le_anim_crossfade(le_world *world,
+                                   const le_object *object,
+                                   const le_asset *clip,
+                                   float duration);
+/** Queries (zeros/false for NULL/stale/missing). */
+LE_API int le_anim_is_playing(const le_world *world,
+                              const le_object *object);
+LE_API float le_anim_get_time(const le_world *world,
+                              const le_object *object);
+LE_API float le_anim_get_duration(const le_world *world,
+                                  const le_object *object);
+
+/* ---- sampling + pose (engine/Vulkan-test surface) ---- */
+
+/** Sample a clip at time into local TRS poses (joint poses for
+ *  JOINT tracks, object pose slot for OBJECT tracks). Caller
+ *  provides out arrays sized [joint_count] (+1 object slot when
+ *  the clip has object tracks). Pure function of (clip, time):
+ *  no Lua, no playback state. Loop/wrap policy is the caller's
+ *  (pass already-wrapped time). */
+LE_API le_result le_anim_sample_clip(
+    const le_engine *engine, const le_asset *clip, float time,
+    float (*out_t)[3], float (*out_r)[4], float (*out_s)[3],
+    uint32_t joint_count, float out_obj_t[3],
+    float out_obj_r[4], float out_obj_s[3]);
+
+/** Evaluate one skeleton's bind-pose globals (iterative,
+ *  topological; no recursion). out_global holds [joint_count]
+ *  column-major 4x4 matrices. */
+LE_API le_result le_anim_bind_pose(const le_engine *engine,
+                                   const le_asset *skeleton,
+                                   float (*out_global)[16],
+                                   uint32_t joint_count);
+
+/** Blend two local poses (positions/scales lerp, rotations
+ *  shortest-path slerp; weight clamped to [0,1], non-finite
+ *  rejected). Pure function for tests + crossfades. */
+LE_API le_result le_anim_blend_pose(
+    uint32_t joint_count, const float (*a_t)[3],
+    const float (*a_r)[4], const float (*a_s)[3],
+    const float (*b_t)[3], const float (*b_r)[4],
+    const float (*b_s)[3], float weight, float (*out_t)[3],
+    float (*out_r)[4], float (*out_s)[3]);
+
+/** CPU reference skinning oracle (tests + tools; NOT the render
+ *  path): p' = sum weight_i * (joint_matrix_i * p), normals via
+ *  the upper-3x3 (renormalized). No NaNs (zero-weight verts hold
+ *  position; bad joints/weights rejected before use). */
+LE_API le_result le_anim_skin_vertex(
+    const float position[3], const float normal[3],
+    const uint32_t joints[4], const float weights[4],
+    const float (*joint_matrices)[16], uint32_t joint_count,
+    float out_position[3], float out_normal[3]);
+
+/* ---- inspection + stats (value-based; future editor/MCP) ---- */
+
+typedef struct le_anim_stats {
+    uint32_t animator_count;
+    uint32_t playing_count;
+    uint32_t sampled_tracks;
+    uint32_t evaluated_joints;
+    uint32_t active_crossfades;
+    uint64_t frames_advanced;
+} le_anim_stats;
+
+LE_API void le_anim_get_stats(const le_world *world,
+                              le_anim_stats *out_stats);
 
 /* ------------------------------------------------------------------
  * Lua scripting runtime (Phase 26): an interpreted backend over the

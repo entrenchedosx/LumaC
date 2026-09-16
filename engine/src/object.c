@@ -35,6 +35,9 @@ static void le_slot_init_live(le_object_slot *slot, uint32_t generation) {
     slot->camera_index = LE_NO_LINK;
     slot->light_index = LE_NO_LINK;
     slot->script_index = LE_NO_LINK;
+    slot->body_index = LE_NO_LINK;
+    slot->collider_index = LE_NO_LINK;
+    slot->animator_index = LE_NO_LINK;
 }
 
 le_result le_object_create(le_world *world, le_object *out_object) {
@@ -165,6 +168,26 @@ static void le_remove_slot_components(le_world *world, uint32_t slot) {
         }
         s->light_index = LE_NO_LINK;
         s->present &= ~LE_PRESENT_LIGHT;
+    }
+    /* Phase 28: physics components retire with the slot
+     * (swap-remove + EXIT emission to survivors + pair purge).
+     * The hook lives in physics (object.c stays struct-blind
+     * to le_physics_world, like the script hooks). */
+    if (((s->present & LE_PRESENT_RIGID_BODY) != 0u ||
+         (s->present & LE_PRESENT_COLLIDER) != 0u)) {
+        le_physics_remove_slot_components(world, slot);
+        s->body_index = LE_NO_LINK;
+        s->collider_index = LE_NO_LINK;
+        s->present &=
+            ~(LE_PRESENT_RIGID_BODY | LE_PRESENT_COLLIDER);
+        le_physics_retire_slot(world, slot);
+    }
+    /* Phase 29: animator retires with the slot (swap-remove via
+     * the animation hook; object.c stays struct-blind). */
+    if ((s->present & LE_PRESENT_ANIMATOR) != 0u) {
+        le_anim_remove_slot_animator(world, slot);
+        s->animator_index = LE_NO_LINK;
+        s->present &= ~LE_PRESENT_ANIMATOR;
     }
 }
 

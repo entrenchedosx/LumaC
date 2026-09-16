@@ -1,4 +1,4 @@
-# Script AOT Contract (Phase 26; Input/Time Phase 27)
+# Script AOT Contract (Phase 26; Input/Time Phase 27; Physics 28; Animation 29)
 
 Rule: **Script semantics ─┤├→ Engine operations.** The VM (or
 any future native backend) must not define gameplay semantics:
@@ -32,6 +32,14 @@ get_prop / set_prop / list_props (le_script_property values)
 ```
 
 Callback ids: 0=start, 1=update, 2=fixed_update, 3=destroy.
+Collision/trigger callbacks (`collision_enter/stay/exit`,
+`trigger_enter/stay/exit`, Phase 28) arrive through a SEPARATE
+VM-independent entry — `le_script_fire_collision(world, entry,
+name, other, normal, point, penetration)` in
+`engine_internal.h` (implemented per backend in `script_lua.c`):
+`fn(self, other, contact)` with `contact` nil for EXIT. A
+native backend implements the same entry against its own
+registry; physics (`step.c`) never touches backend types.
 Absent callbacks are no-ops. General engine code must keep
 reaching scripts only through the `engine_internal.h` hooks
 (step/fire/destroy/capture/apply/release) — never backend
@@ -66,10 +74,14 @@ are skipped (forward compat).
 ## Explicitly NOT implemented
 
 No Lua→C compiler, no JIT, no ahead-of-time codegen of any
-kind — Phase 26 ships the interpreted backend only. No physics,
-no animation. Phase 27 input/time semantics live in ordinary
-engine C APIs (`le_input_*`, `le_time_*`), so a future native
-backend calls the same services with identical semantics:
+kind — Phase 26 ships the interpreted backend only. Phase 27
+input/time semantics live in ordinary engine C APIs
+(`le_input_*`, `le_time_*`), so a future native backend calls
+the same services with identical semantics; Phase 28 physics
+likewise (`le_physics_*` + `le_script_fire_collision`); Phase
+29 animation likewise (`le_anim_*` playback/sampling — the Lua
+bindings in `script_bind_anim.c` hold no state, so a native
+backend re-implements the same thin method table):
 
 ```c
 /* AOT-native gameplay (conceptual): same engine services. */

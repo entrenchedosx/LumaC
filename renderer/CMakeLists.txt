@@ -34,7 +34,11 @@ file(COPY
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/unlit.frag.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr.vert.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr.frag.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr_skinned.vert.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/shadow.vert.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/shadow_skinned.vert.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/unlit.vert.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/unlit_skinned.vert.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/fulltri.vert.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/eq2cube.frag.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/irradiance.frag.spv"
@@ -60,7 +64,11 @@ if(LR_GLSLC)
             "${LR_SPV_DIR}/unlit.frag.spv"
             "${LR_SPV_DIR}/pbr.vert.spv"
             "${LR_SPV_DIR}/pbr.frag.spv"
+            "${LR_SPV_DIR}/pbr_skinned.vert.spv"
             "${LR_SPV_DIR}/shadow.vert.spv"
+            "${LR_SPV_DIR}/shadow_skinned.vert.spv"
+            "${LR_SPV_DIR}/unlit.vert.spv"
+            "${LR_SPV_DIR}/unlit_skinned.vert.spv"
             "${LR_SPV_DIR}/fulltri.vert.spv"
             "${LR_SPV_DIR}/eq2cube.frag.spv"
             "${LR_SPV_DIR}/irradiance.frag.spv"
@@ -80,6 +88,9 @@ if(LR_GLSLC)
         COMMAND "${LR_GLSLC}" -fshader-stage=vert -O
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/unlit.vert"
             -o "${LR_SPV_DIR}/unlit.vert.spv"
+        COMMAND "${LR_GLSLC}" -fshader-stage=vert -O
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/unlit_skinned.vert"
+            -o "${LR_SPV_DIR}/unlit_skinned.vert.spv"
         COMMAND "${LR_GLSLC}" -fshader-stage=frag -O
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/unlit.frag"
             -o "${LR_SPV_DIR}/unlit.frag.spv"
@@ -90,8 +101,14 @@ if(LR_GLSLC)
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr.frag"
             -o "${LR_SPV_DIR}/pbr.frag.spv"
         COMMAND "${LR_GLSLC}" -fshader-stage=vert -O
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr_skinned.vert"
+            -o "${LR_SPV_DIR}/pbr_skinned.vert.spv"
+        COMMAND "${LR_GLSLC}" -fshader-stage=vert -O
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/shadow.vert"
             -o "${LR_SPV_DIR}/shadow.vert.spv"
+        COMMAND "${LR_GLSLC}" -fshader-stage=vert -O
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/shadow_skinned.vert"
+            -o "${LR_SPV_DIR}/shadow_skinned.vert.spv"
         COMMAND "${LR_GLSLC}" -fshader-stage=vert -O
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/fulltri.vert"
             -o "${LR_SPV_DIR}/fulltri.vert.spv"
@@ -142,10 +159,13 @@ if(LR_GLSLC)
             -o "${LR_SPV_DIR}/vis_finalize.comp.spv"
         DEPENDS
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/unlit.vert"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/unlit_skinned.vert"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/unlit.frag"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr.vert"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr.frag"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr_skinned.vert"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/shadow.vert"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/shadow_skinned.vert"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/fulltri.vert"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/eq2cube.frag"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/irradiance.frag"
@@ -168,7 +188,11 @@ if(LR_GLSLC)
         "${LR_SPV_DIR}/unlit.frag.spv"
         "${LR_SPV_DIR}/pbr.vert.spv"
         "${LR_SPV_DIR}/pbr.frag.spv"
+        "${LR_SPV_DIR}/pbr_skinned.vert.spv"
         "${LR_SPV_DIR}/shadow.vert.spv"
+        "${LR_SPV_DIR}/shadow_skinned.vert.spv"
+        "${LR_SPV_DIR}/unlit.vert.spv"
+        "${LR_SPV_DIR}/unlit_skinned.vert.spv"
         "${LR_SPV_DIR}/fulltri.vert.spv"
         "${LR_SPV_DIR}/eq2cube.frag.spv"
         "${LR_SPV_DIR}/irradiance.frag.spv"
@@ -221,6 +245,14 @@ add_custom_command(
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hex_to_c.cmake"
     DEPENDS "${LR_SPV_DIR}/pbr.frag.spv")
 add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/lr_pbr_skinned_vert_spv.c"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DIN=${LR_SPV_DIR}/pbr_skinned.vert.spv"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/lr_pbr_skinned_vert_spv.c"
+        "-DSYM=lr_pbr_skinned_vert_spv"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hex_to_c.cmake"
+    DEPENDS "${LR_SPV_DIR}/pbr_skinned.vert.spv")
+add_custom_command(
     OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/lr_shadow_vert_spv.c"
     COMMAND "${CMAKE_COMMAND}"
         "-DIN=${LR_SPV_DIR}/shadow.vert.spv"
@@ -228,6 +260,22 @@ add_custom_command(
         "-DSYM=lr_shadow_vert_spv"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hex_to_c.cmake"
     DEPENDS "${LR_SPV_DIR}/shadow.vert.spv")
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/lr_shadow_skinned_vert_spv.c"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DIN=${LR_SPV_DIR}/shadow_skinned.vert.spv"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/lr_shadow_skinned_vert_spv.c"
+        "-DSYM=lr_shadow_skinned_vert_spv"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hex_to_c.cmake"
+    DEPENDS "${LR_SPV_DIR}/shadow_skinned.vert.spv")
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/lr_unlit_skinned_vert_spv.c"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DIN=${LR_SPV_DIR}/unlit_skinned.vert.spv"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/lr_unlit_skinned_vert_spv.c"
+        "-DSYM=lr_unlit_skinned_vert_spv"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hex_to_c.cmake"
+    DEPENDS "${LR_SPV_DIR}/unlit_skinned.vert.spv")
 add_custom_command(
     OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/lr_fulltri_vert_spv.c"
     COMMAND "${CMAKE_COMMAND}"
@@ -364,6 +412,7 @@ add_library(luma_renderer STATIC
     src/material.c
     src/camera.c
     src/draw_list.c
+    src/skin.c
     src/environment.c
     src/post.c
     src/gpu_driven.c
@@ -372,9 +421,12 @@ add_library(luma_renderer STATIC
     src/render_graph.c
     "${CMAKE_CURRENT_BINARY_DIR}/lr_unlit_vert_spv.c"
     "${CMAKE_CURRENT_BINARY_DIR}/lr_unlit_frag_spv.c"
+    "${CMAKE_CURRENT_BINARY_DIR}/lr_unlit_skinned_vert_spv.c"
     "${CMAKE_CURRENT_BINARY_DIR}/lr_pbr_vert_spv.c"
     "${CMAKE_CURRENT_BINARY_DIR}/lr_pbr_frag_spv.c"
+    "${CMAKE_CURRENT_BINARY_DIR}/lr_pbr_skinned_vert_spv.c"
     "${CMAKE_CURRENT_BINARY_DIR}/lr_shadow_vert_spv.c"
+    "${CMAKE_CURRENT_BINARY_DIR}/lr_shadow_skinned_vert_spv.c"
     "${CMAKE_CURRENT_BINARY_DIR}/lr_fulltri_vert_spv.c"
     "${CMAKE_CURRENT_BINARY_DIR}/lr_eq2cube_frag_spv.c"
     "${CMAKE_CURRENT_BINARY_DIR}/lr_irradiance_frag_spv.c"
@@ -601,6 +653,23 @@ if(UNIX AND NOT APPLE)
 endif()
 add_test(NAME test_mirror_vulkan COMMAND test_mirror_vulkan)
 
+# GPU skinning (Phase 29): bind-pose regression (identity
+# palette == rigid pixels), translated-joint oracle (pixels
+# move), mesh flag queries, in both CPU and GPU-driven modes.
+add_executable(test_skin_vulkan tests/test_skin_vulkan.c)
+target_link_libraries(test_skin_vulkan PRIVATE luma_renderer lumac Vulkan::Vulkan)
+target_include_directories(test_skin_vulkan PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(TARGET luma_renderer_shaders)
+    add_dependencies(test_skin_vulkan luma_renderer_shaders)
+endif()
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_skin_vulkan PRIVATE m)
+endif()
+add_test(NAME test_skin_vulkan COMMAND test_skin_vulkan)
+
 # Render-graph foundation (Phase 23): derivation, cycles,
 # transients, diagnostics, execution order.
 add_executable(test_render_graph tests/test_render_graph.c)
@@ -627,6 +696,6 @@ if(WIN32)
         test_pbr_vulkan test_shadow test_shadow_vulkan test_ibl
         test_ibl_vulkan test_gpu_driven_vulkan test_hiz_vulkan
         test_occlusion_vulkan test_lod_vulkan test_mirror_vulkan
-        test_render_graph PROPERTIES
+        test_skin_vulkan test_render_graph PROPERTIES
         ENVIRONMENT "PATH=$<TARGET_FILE_DIR:lumac>\;$ENV{PATH}")
 endif()

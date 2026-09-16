@@ -320,6 +320,165 @@ def write_gltf_external(path, json_obj, bin_bytes):
         f.write(bin_bytes)
 
 
+# ------------------------------------------------------------------
+# Skinned fixture (Phase 29): 2 joints, 1 skin, 2 primitives
+# covering every JOINTS/WEIGHTS encoding, 1 kept animation
+# (T LINEAR + R CUBICSPLINE) + 1 morph-only animation that the
+# importer must exclude from the count.
+# ------------------------------------------------------------------
+
+def make_skinned():
+    # Inverse bind: joint0 identity, joint1 translation(1,2,3)
+    # (column-major, distinctive for value checks).
+    ibm = ([1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0] +
+           [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0, 1.0, 2.0, 3.0, 1.0])
+    # Prim 0: quad (float32 weights + u8 joints).
+    p0_pos = [-1.0, -1.0, 0.0, 1.0, -1.0, 0.0, 1.0, 1.0, 0.0,
+              -1.0, 1.0, 0.0]
+    p0_nrm = [0.0, 0.0, 1.0] * 4
+    p0_uv = [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0]
+    p0_joints = [0, 0, 0, 0, 0, 1, 0, 0,
+                 0, 1, 0, 0, 1, 0, 2, 0]
+    p0_weights = [1.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0,
+                  0.25, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    p0_morph = [0.0] * 12  # one POSITION target (zeros)
+    p0_idx = [0, 1, 2, 0, 2, 3]
+    # Prim 1: triangle (normalized u16 weights + u16 joints).
+    p1_pos = [-0.5, -0.5, 0.5, 0.5, -0.5, 0.5, 0.0, 0.5, 0.5]
+    p1_nrm = [0.0, 0.0, 1.0] * 3
+    p1_joints = [0, 0, 0, 0, 1, 1, 0, 0, 300, 0, 0, 0]
+    p1_weights = [65535, 0, 0, 0, 32768, 32768, 0, 0,
+                  0, 0, 0, 0]
+    p1_idx = [0, 1, 2]
+    # Animation "Wave": T LINEAR on JointA, R CUBICSPLINE JointB.
+    t_times = [0.0, 1.0]
+    t_vals = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+    r_times = [0.0, 2.0]
+    r_vals = ([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+               0.0, 0.0, 0.0, 0.0] +
+              [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7071068, 0.7071068,
+               0.0, 0.0, 0.0, 0.0])
+    # Animation "MorphOnly": weights on MeshNode (must be skipped;
+    # output count = keys x targets = 2 x 1).
+    m_times = [0.0, 0.5]
+    m_vals = [0.0, 1.0]
+
+    blob = bytearray()
+
+    def emit(raw):
+        off = len(blob)
+        blob.extend(raw)
+        blob.extend(b"\x00" * (-len(blob) % 4))
+        return off, len(raw)
+
+    o_ibm, _ = emit(struct.pack("<%df" % len(ibm), *ibm))
+    o_p0pos, _ = emit(struct.pack("<%df" % len(p0_pos), *p0_pos))
+    o_p0nrm, _ = emit(struct.pack("<%df" % len(p0_nrm), *p0_nrm))
+    o_p0uv, _ = emit(struct.pack("<%df" % len(p0_uv), *p0_uv))
+    o_p0j, _ = emit(bytes(bytearray(p0_joints)))
+    o_p0w, _ = emit(struct.pack("<%df" % len(p0_weights),
+                                *p0_weights))
+    o_p0m, _ = emit(struct.pack("<%df" % len(p0_morph), *p0_morph))
+    o_p0i, _ = emit(struct.pack("<%dH" % len(p0_idx), *p0_idx))
+    o_p1pos, _ = emit(struct.pack("<%df" % len(p1_pos), *p1_pos))
+    o_p1nrm, _ = emit(struct.pack("<%df" % len(p1_nrm), *p1_nrm))
+    o_p1j, _ = emit(struct.pack("<%dH" % len(p1_joints), *p1_joints))
+    o_p1w, _ = emit(struct.pack("<%dH" % len(p1_weights),
+                                *p1_weights))
+    o_p1i, _ = emit(bytes(bytearray(p1_idx)))
+    o_tt, _ = emit(struct.pack("<%df" % len(t_times), *t_times))
+    o_tv, _ = emit(struct.pack("<%df" % len(t_vals), *t_vals))
+    o_rt, _ = emit(struct.pack("<%df" % len(r_times), *r_times))
+    o_rv, _ = emit(struct.pack("<%df" % len(r_vals), *r_vals))
+    o_mt, _ = emit(struct.pack("<%df" % len(m_times), *m_times))
+    o_mv, _ = emit(struct.pack("<%df" % len(m_vals), *m_vals))
+    blob = bytes(blob)
+
+    def acc(view, ctype, count, typ, extra=None):
+        a = {"bufferView": view, "componentType": ctype,
+             "count": count, "type": typ}
+        if extra:
+            a.update(extra)
+        return a
+
+    views = [o_ibm, o_p0pos, o_p0nrm, o_p0uv, o_p0j, o_p0w, o_p0m,
+             o_p0i, o_p1pos, o_p1nrm, o_p1j, o_p1w, o_p1i, o_tt,
+             o_tv, o_rt, o_rv, o_mt, o_mv]
+    lens = [128, 48, 48, 32, 16, 64, 48, 12, 36, 36, 24, 24, 3,
+            8, 24, 8, 96, 8, 8]
+
+    gltf = {
+        "asset": {"version": "2.0", "generator": "luma-generate-fixtures"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [
+            {"name": "Root", "children": [1, 3]},
+            {"name": "JointA", "translation": [0.0, 1.0, 0.0],
+             "children": [2]},
+            {"name": "JointB", "translation": [0.0, 1.0, 0.0]},
+            {"name": "MeshNode", "mesh": 0, "skin": 0},
+        ],
+        "meshes": [{
+            "weights": [0.0],
+            "primitives": [
+                {"attributes": {"POSITION": 1, "NORMAL": 2,
+                                 "TEXCOORD_0": 3, "JOINTS_0": 4,
+                                 "WEIGHTS_0": 5},
+                 "indices": 7, "material": 0, "mode": 4,
+                 "targets": [{"POSITION": 6}]},
+                {"attributes": {"POSITION": 8, "NORMAL": 9,
+                                 "JOINTS_0": 10, "WEIGHTS_0": 11},
+                 "indices": 12, "material": 0, "mode": 4}],
+        }],
+        "materials": [{
+            "name": "SkinFlat",
+            "pbrMetallicRoughness": {
+                "baseColorFactor": [0.4, 0.7, 0.45, 1.0],
+                "metallicFactor": 0.0, "roughnessFactor": 0.6},
+            "alphaMode": "OPAQUE", "doubleSided": False}],
+        "skins": [{"name": "Rig", "joints": [1, 2],
+                   "inverseBindMatrices": 0}],
+        "animations": [
+            {"name": "Wave",
+             "samplers": [
+                 {"input": 13, "output": 14,
+                  "interpolation": "LINEAR"},
+                 {"input": 15, "output": 16,
+                  "interpolation": "CUBICSPLINE"}],
+             "channels": [
+                 {"sampler": 0,
+                  "target": {"node": 1, "path": "translation"}},
+                 {"sampler": 1,
+                  "target": {"node": 2, "path": "rotation"}}]},
+            {"name": "MorphOnly",
+             "samplers": [{"input": 17, "output": 18}],
+             "channels": [
+                 {"sampler": 0,
+                  "target": {"node": 3, "path": "weights"}}]},
+        ],
+        "accessors": [
+            acc(0, 5126, 2, "MAT4"),
+            acc(1, 5126, 4, "VEC3"), acc(2, 5126, 4, "VEC3"),
+            acc(3, 5126, 4, "VEC2"), acc(4, 5121, 4, "VEC4"),
+            acc(5, 5126, 4, "VEC4"), acc(6, 5126, 4, "VEC3"),
+            acc(7, 5123, 6, "SCALAR"),
+            acc(8, 5126, 3, "VEC3"), acc(9, 5126, 3, "VEC3"),
+            acc(10, 5123, 3, "VEC4"),
+            acc(11, 5123, 3, "VEC4", {"normalized": True}),
+            acc(12, 5121, 3, "SCALAR"),
+            acc(13, 5126, 2, "SCALAR"), acc(14, 5126, 2, "VEC3"),
+            acc(15, 5126, 2, "SCALAR"), acc(16, 5126, 6, "VEC4"),
+            acc(17, 5126, 2, "SCALAR"), acc(18, 5126, 2, "SCALAR")],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": o, "byteLength": n}
+            for o, n in zip(views, lens)],
+        "buffers": [{"byteLength": len(blob)}],
+    }
+    return gltf, blob
+
+
 def make_malformed(base_gltf, base_blob):
     """(name, kind, payload) cases; kind is 'glb', 'gltf', or 'raw'.
 
@@ -421,6 +580,10 @@ def main():
     with open(os.path.join(FIX_DIR, "fixture.png"), "wb") as f:
         f.write(blob[png_off:png_off + png_len])
     print("wrote fixture.gltf/.bin/.png")
+
+    gltf, blob = make_skinned()
+    write_glb(os.path.join(FIX_DIR, "skinned.glb"), gltf, blob)
+    print("wrote skinned.glb", len(blob), "bin bytes")
 
     # Negative inputs (expected results documented in make_malformed).
     for name, kind, payload in make_malformed(gltf, blob):

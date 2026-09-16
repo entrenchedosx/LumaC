@@ -33,6 +33,15 @@ static void lr_write_vertex(lr_vertex *v, float px, float py, float pz,
     v->tangent[3] = tw;
     v->texcoord[0] = u;
     v->texcoord[1] = vv;
+    /* Phase 29: primitives are rigid (joint 0, full weight). */
+    v->joints[0] = 0;
+    v->joints[1] = 0;
+    v->joints[2] = 0;
+    v->joints[3] = 0;
+    v->weights[0] = 1.0f;
+    v->weights[1] = 0.0f;
+    v->weights[2] = 0.0f;
+    v->weights[3] = 0.0f;
 }
 
 lr_result lr_mesh_cube_data(lr_vertex *out_vertices, uint32_t *out_indices,

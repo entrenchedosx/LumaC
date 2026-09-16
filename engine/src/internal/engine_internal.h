@@ -45,6 +45,12 @@
 #define LE_PRESENT_ASSET_RENDERABLE ((uint32_t)(1u << 3))
 /* Phase 26: script component (at most one script per object). */
 #define LE_PRESENT_SCRIPT ((uint32_t)(1u << 4))
+/* Phase 28: physics components (rigid body + collider, at most
+ * one of each per object). */
+#define LE_PRESENT_RIGID_BODY ((uint32_t)(1u << 5))
+#define LE_PRESENT_COLLIDER ((uint32_t)(1u << 6))
+/* Phase 29: animator component (at most one per object). */
+#define LE_PRESENT_ANIMATOR ((uint32_t)(1u << 7))
 
 typedef struct le_object_slot {
     uint32_t generation;
@@ -70,6 +76,11 @@ typedef struct le_object_slot {
     int has_scene_id;
     /* Phase 26: script component entry index (or LE_NO_LINK). */
     int32_t script_index;
+    /* Phase 28: physics component entry indices (or LE_NO_LINK). */
+    int32_t body_index;
+    int32_t collider_index;
+    /* Phase 29: animator component entry index (or LE_NO_LINK). */
+    int32_t animator_index;
 } le_object_slot;
 
 typedef struct le_renderable_entry {
@@ -150,6 +161,12 @@ typedef struct le_asset_slot {
     char *script_source;
     size_t script_size;
     int script_chunk_ref;
+    /* Phase 29: animation assets (owned immutable data; exactly one
+     * kind live per skeleton/clip slot). Skeleton = joint arrays;
+     * clip = track arrays. See src/animation/animation_internal.h
+     * for the layouts. */
+    struct le_skeleton_data *skeleton;
+    struct le_clip_data *clip;
 } le_asset_slot;
 
 struct le_engine {
@@ -164,6 +181,8 @@ struct le_engine {
     uint32_t asset_textures;
     uint32_t asset_scenes;
     uint32_t asset_scripts;
+    uint32_t asset_skeletons;
+    uint32_t asset_clips;
     uint32_t asset_ready;
     uint32_t asset_failed;
     int32_t asset_free_head;
@@ -221,6 +240,14 @@ struct le_world {
     le_script_entry *scripts;
     uint32_t script_capacity;
     uint32_t script_count;
+    /* Phase 29: animator component entries (dense array, same
+     * swap-remove discipline as every other component). Defined
+     * in src/animation/animation_internal.h; general engine
+     * sources touch animators only through the le_anim_* hooks
+     * below. */
+    struct le_animator_entry *animators;
+    uint32_t animator_capacity;
+    uint32_t animator_count;
     le_object active_camera;
     int has_active_camera;
     double time;
@@ -237,6 +264,9 @@ struct le_world {
     /* Phase 27: per-world pause (independent of global time scale;
      * paused worlds skip simulation but still render). */
     int paused;
+    /* Phase 28: per-world physics state (bodies, colliders, broad
+     * phase, contacts, events). Created with the world. */
+    struct le_physics_world *physics;
 };
 
 /* ---- shared helpers (defined per-TU where used) ---- */
@@ -350,6 +380,11 @@ void le_script_runtime_destroy(le_engine *engine);
  * updates, in deterministic slot order over a snapshot. No-op for
  * NULL or scriptless worlds. */
 void le_script_step_world(le_world *world, float dt);
+/* Phase 28: fixed-step physics for scriptless worlds (same
+ * accumulator/schedule as the PASS2 loop; called by
+ * le_script_step_world when no script dispatch exists, never
+ * alongside the inline loop). */
+void le_script_step_physics(le_world *world, float dt);
 
 /* Fire destroy() for every started script instance (world teardown
  * path; sets scripts_tearing_down so structural ops fail safely). */
@@ -359,6 +394,20 @@ void le_script_fire_world_destroy(le_world *world);
  * fired (object-destroy / remove-script paths). Safe with no
  * script, unstarted, or already-fired instances. */
 void le_script_fire_slot_destroy(le_world *world, uint32_t slot);
+/* Phase 28: VM-independent collision/trigger dispatch into one
+ * script entry (implemented in src/script/script_lua.c so the
+ * physics TU never includes Lua; keeps general engine TUs free
+ * of the script-internal header). Fires funcs[name](self, other,
+ * contact); contact nil for EXIT. Returns 0 ok/absent, nonzero
+ * on script error (caller marks failed). Valid names:
+ * collision_enter/stay/exit, trigger_enter/stay/exit. */
+int le_script_fire_collision(le_world *world,
+                             le_script_entry *entry,
+                             const char *name,
+                             const le_object *other,
+                             const float normal[3],
+                             const float point[3],
+                             float penetration);
 
 /* Release backend state for one script entry (registry refs). */
 void le_script_release_entry(le_world *world, le_script_entry *entry);
@@ -376,5 +425,88 @@ void le_script_capture_for_record(le_world *world, uint32_t slot,
                                   le_scene_object *rec);
 le_result le_script_apply_record(le_world *world, const le_object *obj,
                                  const le_scene_object *rec);
+
+/* ---- Phase 28 physics hook (defined in src/physics/) ---- */
+
+struct le_physics_world;
+struct le_physics_world *le_physics_create(void);
+void le_physics_destroy(struct le_physics_world *pw);
+
+/* Run one physics sub-step of dt (fixed-step ordering 2..8:
+ * forces -> integrate -> detect -> solve -> sync -> events).
+ * No-op for NULL world/physics or dt <= 0. Called once per
+ * fixed interval from the PASS2 loop (script fixed_update
+ * callbacks run first each interval — documented order). */
+void le_physics_step(le_world *world, float dt);
+
+/* Swap-remove a slot's body/collider entries (object destroy /
+ * component strip path). Struct-blind hook so object.c never
+ * touches le_physics_world layout. */
+void le_physics_remove_slot_components(le_world *world,
+                                       uint32_t slot);
+/* Purge contacts/overlaps/events naming a retired slot (emits
+ * EXIT to survivors). Defined in src/physics/physics.c. */
+void le_physics_retire_slot(le_world *world, uint32_t slot);
+
+/* Scene capture/apply for physics records (authoring state
+ * only; mirrors the script record pattern). */
+void le_physics_capture_for_record(le_world *world, uint32_t slot,
+                                   le_scene_object *rec);
+le_result le_physics_validate_record(const le_scene_object *rec);
+le_result le_physics_apply_record(le_world *world,
+                                  const le_object *obj,
+                                  const le_scene_object *rec);
+
+/* ---- Phase 29 animation hooks (defined in src/animation/) ---- */
+
+struct le_skeleton_data;
+struct le_clip_data;
+
+/* Free one slot's animation asset backing (struct-blind for
+ * asset.c/engine.c teardown). Either pointer may be NULL. */
+void le_anim_free_slot_backing(struct le_skeleton_data *skeleton,
+                               struct le_clip_data *clip);
+
+/* Swap-remove a slot's animator entry (object destroy /
+ * component strip path). Struct-blind hook so object.c never
+ * touches animator layout. */
+void le_anim_remove_slot_animator(le_world *world, uint32_t slot);
+
+/* Destroy all animator runtime state for a dying world
+ * (entries + pose/palette scratch; assets stay). */
+void le_anim_destroy_world(le_world *world);
+
+/* Advance animators + evaluate poses + write animated
+ * transforms (variable-dt visual path; called from the PASS3
+ * region of the dispatcher with scaled dt). No-op for NULL,
+ * paused callers (pause handled by the caller), or dt<=0. */
+void le_anim_step_visual(le_world *world, float dt);
+
+/* Submit skin palettes for animated renderables (called from
+ * the extraction path in sync.c, once per frame after the
+ * visual step; dirty/version-gated uploads). */
+void le_anim_submit_palettes(le_world *world);
+
+/* Borrow one slot's evaluated skin palette for the submit /
+ * extraction paths (0/NULL when no animator or no evaluated
+ * pose; static poses evaluate on demand). Struct-blind for
+ * sync.c. */
+int le_anim_get_palette(le_world *world, uint32_t slot,
+                        const float (**out_palette)[16],
+                        uint32_t *out_joints);
+
+/* Count animator references to one asset slot (struct-blind
+ * for asset.c's refcount; skeleton + clip + fade dest). */
+uint32_t le_anim_refcount_slot(const le_world *world,
+                               uint32_t asset_slot,
+                               uint32_t generation);
+
+/* Scene capture/apply/validate for animator records. */
+void le_anim_capture_for_record(le_world *world, uint32_t slot,
+                                le_scene_object *rec);
+le_result le_anim_validate_record(const le_scene_object *rec);
+le_result le_anim_apply_record(le_world *world,
+                               const le_object *obj,
+                               const le_scene_object *rec);
 
 #endif /* LUMA_ENGINE_INTERNAL_H */

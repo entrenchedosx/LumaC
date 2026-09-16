@@ -12,6 +12,11 @@
 #include "input/input_internal.h"
 #include "time/time_internal.h"
 
+/* Phase 29: animation backing free (defined in
+ * src/animation/anim_asset.c; struct-blind). */
+void le_anim_free_slot_backing(struct le_skeleton_data *skeleton,
+                               struct le_clip_data *clip);
+
 le_result le_engine_create(const le_engine_desc *desc,
                            le_engine **out_engine) {
     le_engine *engine;
@@ -98,6 +103,13 @@ void le_engine_destroy(le_engine *engine) {
                 free(s->script_source);
                 s->script_source = NULL;
                 s->script_size = 0;
+            } else if (s->type == LE_ASSET_SKELETON ||
+                       s->type == LE_ASSET_ANIMATION_CLIP) {
+                /* Phase 29: pure CPU payloads (no renderer
+                 * backing, no runtime ordering constraint). */
+                le_anim_free_slot_backing(s->skeleton, s->clip);
+                s->skeleton = NULL;
+                s->clip = NULL;
             }
             free(s->source);
             free(s->scene_objects);

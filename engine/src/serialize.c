@@ -887,6 +887,137 @@ le_result le_scene_save_text(le_engine *engine, const le_asset *scene,
                 }
             }
         }
+        /* Physics components (Phase 28): `rigid_body <type>
+         * <mass> <lindamp> <angdamp> <gscale> <lv...> <av...>`
+         * and `collider <shape> <dims...> <off...> <quat...>
+         * <trigger> <layer> <mask> <friction> <restitution>`
+         * (authoring state only — never accumulators/contacts).
+         * Deterministic %.9g floats (float32 round-trip). */
+        if (rec->has_rigid_body) {
+            const char *t =
+                (rec->body_type == LE_BODY_DYNAMIC)
+                    ? "dynamic"
+                    : ((rec->body_type == LE_BODY_KINEMATIC)
+                           ? "kinematic"
+                           : "static");
+            char m[32];
+            char ld[32];
+            char ad[32];
+            char gs[32];
+            char lv[3][32];
+            char av[3][32];
+            int k;
+
+            le_fmt_float(m, sizeof(m), rec->body_mass);
+            le_fmt_float(ld, sizeof(ld),
+                         rec->body_linear_damping);
+            le_fmt_float(ad, sizeof(ad),
+                         rec->body_angular_damping);
+            le_fmt_float(gs, sizeof(gs),
+                         rec->body_gravity_scale);
+            for (k = 0; k < 3; k++) {
+                le_fmt_float(lv[k], sizeof(lv[k]),
+                             rec->body_linear_velocity[k]);
+                le_fmt_float(av[k], sizeof(av[k]),
+                             rec->body_angular_velocity[k]);
+            }
+            snprintf(line, sizeof(line),
+                      "rigid_body %s %s %s %s %s %s %s %s %s "
+                      "%s %s\n",
+                      t, m, ld, ad, gs, lv[0], lv[1], lv[2],
+                      av[0], av[1], av[2]);
+            if (!le_buf_puts(&buf, &len, &cap, line)) {
+                goto oom;
+            }
+        }
+        if (rec->has_collider) {
+            char dims[3][32];
+            char off[3][32];
+            char quat[4][32];
+            char fr[32];
+            char re[32];
+            int k;
+
+            for (k = 0; k < 3; k++) {
+                le_fmt_float(off[k], sizeof(off[k]),
+                             rec->collider_offset[k]);
+            }
+            for (k = 0; k < 4; k++) {
+                le_fmt_float(quat[k], sizeof(quat[k]),
+                             rec->collider_orientation[k]);
+            }
+            le_fmt_float(fr, sizeof(fr), rec->collider_friction);
+            le_fmt_float(re, sizeof(re),
+                         rec->collider_restitution);
+            if (rec->collider_shape == LE_COLLIDER_SPHERE) {
+                le_fmt_float(dims[0], sizeof(dims[0]),
+                             rec->collider_radius);
+                snprintf(line, sizeof(line),
+                         "collider sphere %s %s %s %s %s %s %s "
+                         "%s %d %u %u %s %s\n",
+                         dims[0], off[0], off[1], off[2],
+                         quat[0], quat[1], quat[2], quat[3],
+                         rec->collider_is_trigger ? 1 : 0,
+                         rec->collider_layer, rec->collider_mask,
+                         fr, re);
+            } else {
+                for (k = 0; k < 3; k++) {
+                    le_fmt_float(dims[k], sizeof(dims[k]),
+                                 rec->collider_half_extents[k]);
+                }
+                snprintf(line, sizeof(line),
+                         "collider box %s %s %s %s %s %s %s %s "
+                         "%s %s %d %u %u %s %s\n",
+                         dims[0], dims[1], dims[2], off[0],
+                         off[1], off[2], quat[0], quat[1],
+                         quat[2], quat[3],
+                         rec->collider_is_trigger ? 1 : 0,
+                         rec->collider_layer, rec->collider_mask,
+                         fr, re);
+            }
+            if (!le_buf_puts(&buf, &len, &cap, line)) {
+                goto oom;
+            }
+        }
+        /* Animator component (Phase 29): `animator <skelhex|nil>
+         * <cliphex|nil> <autoplay> <loop> <speed> <start>` (7
+         * tokens; nil IDs = unset). Deterministic %.9g floats
+         * (float32 round-trip); loop is once/loop/pingpong. */
+        if (rec->has_animator) {
+            char sk[33];
+            char cl[33];
+            char sp[32];
+            char st[32];
+            const char *loop;
+
+            if (rec->skeleton_id.hi == 0 &&
+                rec->skeleton_id.lo == 0) {
+                memcpy(sk, "nil", 4);
+            } else {
+                le_asset_id_to_string(&rec->skeleton_id, sk);
+            }
+            if (rec->clip_id.hi == 0 && rec->clip_id.lo == 0) {
+                memcpy(cl, "nil", 4);
+            } else {
+                le_asset_id_to_string(&rec->clip_id, cl);
+            }
+            loop = (rec->animator_loop == LE_ANIM_LOOP)
+                       ? "loop"
+                       : ((rec->animator_loop ==
+                           LE_ANIM_PING_PONG)
+                              ? "pingpong"
+                              : "once");
+            le_fmt_float(sp, sizeof(sp), rec->animator_speed);
+            le_fmt_float(st, sizeof(st),
+                         rec->animator_start_time);
+            snprintf(line, sizeof(line),
+                     "animator %s %s %d %s %s %s\n", sk, cl,
+                     rec->animator_autoplay ? 1 : 0, loop, sp,
+                     st);
+            if (!le_buf_puts(&buf, &len, &cap, line)) {
+                goto oom;
+            }
+        }
         if (!le_buf_puts(&buf, &len, &cap, "end\n")) {
             goto oom;
         }
@@ -1068,9 +1199,11 @@ le_result le_scene_load_text(le_engine *engine, const le_asset *scene,
                     ln[llen - 1] = '\0';
                 }
                 if (ln[0] != '\0' && ln[0] != '#') {
-                    /* Parse one line. */
-                    char *tok[16];
-                    int ntok = le_tokenize(ln, tok, 16);
+                    /* Parse one line. Box collider lines carry
+                     * 17 tokens (the longest record); size the
+                     * buffer with headroom (24). */
+                    char *tok[24];
+                    int ntok = le_tokenize(ln, tok, 24);
                     le_result lr =
                         LE_SUCCESS; /* per-line status */
 
@@ -1696,6 +1829,373 @@ le_result le_scene_load_text(le_engine *engine, const le_asset *scene,
                                 lr = LE_ERROR_PARSE;
                             }
                         }
+                    } else if (strcmp(tok[0], "rigid_body") == 0) {
+                        /* rigid_body <type> <mass> <lindamp>
+                         * <angdamp> <gscale> <lv x3> <av x3>:
+                         * 12 tokens. Duplicate lines malformed.
+                         * Values re-validated at commit (scene.c)
+                         * — the parser enforces shape + finiteness
+                         * here (strict, transactional). */
+                        if (ntok != 12) {
+                            lr = LE_ERROR_PARSE;
+                        } else if (recs[cur].rec.has_rigid_body) {
+                            lr = LE_ERROR_PARSE;
+                        } else {
+                            le_body_type bt;
+                            float mass;
+                            float ld;
+                            float ad;
+                            float gs;
+                            float lv[3];
+                            float av[3];
+
+                            if (strcmp(tok[1], "static") == 0) {
+                                bt = LE_BODY_STATIC;
+                            } else if (strcmp(tok[1],
+                                              "dynamic") == 0) {
+                                bt = LE_BODY_DYNAMIC;
+                            } else if (strcmp(tok[1],
+                                              "kinematic") ==
+                                       0) {
+                                bt = LE_BODY_KINEMATIC;
+                            } else {
+                                lr = LE_ERROR_PARSE;
+                                goto rigid_body_done;
+                            }
+                            if (!le_parse_float_checked(
+                                    tok[2], &mass) ||
+                                !le_parse_float_checked(
+                                    tok[3], &ld) ||
+                                !le_parse_float_checked(
+                                    tok[4], &ad) ||
+                                !le_parse_float_checked(
+                                    tok[5], &gs) ||
+                                !le_parse_float_checked(
+                                    tok[6], &lv[0]) ||
+                                !le_parse_float_checked(
+                                    tok[7], &lv[1]) ||
+                                !le_parse_float_checked(
+                                    tok[8], &lv[2]) ||
+                                !le_parse_float_checked(
+                                    tok[9], &av[0]) ||
+                                !le_parse_float_checked(
+                                    tok[10], &av[1]) ||
+                                !le_parse_float_checked(
+                                    tok[11], &av[2])) {
+                                lr = LE_ERROR_PARSE;
+                            } else {
+                                recs[cur].rec.has_rigid_body = 1;
+                                recs[cur].rec.body_type = bt;
+                                recs[cur].rec.body_mass = mass;
+                                recs[cur]
+                                    .rec.body_linear_damping = ld;
+                                recs[cur]
+                                    .rec.body_angular_damping = ad;
+                                recs[cur].rec.body_gravity_scale =
+                                    gs;
+                                memcpy(recs[cur]
+                                           .rec.body_linear_velocity,
+                                       lv, sizeof(lv));
+                                memcpy(recs[cur]
+                                           .rec.body_angular_velocity,
+                                       av, sizeof(av));
+                            }
+                        rigid_body_done:;
+                        }
+                    } else if (strcmp(tok[0], "collider") == 0) {
+                        /* collider sphere <r> <off x3> <quat x4>
+                         * <trigger> <layer> <mask> <fr> <re>
+                         * (15 tokens) or collider box <he x3>
+                         * <off x3> <quat x4> <trigger> <layer>
+                         * <mask> <fr> <re> (17 tokens).
+                         * Duplicate lines malformed. */
+                        if (recs[cur].rec.has_collider) {
+                            lr = LE_ERROR_PARSE;
+                        } else if (ntok >= 2 &&
+                                   strcmp(tok[1], "sphere") ==
+                                       0) {
+                            float r;
+                            float off[3];
+                            float q[4];
+                            long trig;
+                            unsigned long layer;
+                            unsigned long long mask;
+                            float fr;
+                            float re;
+                            char *ep = NULL;
+
+                            if (ntok != 15) {
+                                lr = LE_ERROR_PARSE;
+                            } else if (
+                                !le_parse_float_checked(
+                                    tok[2], &r) ||
+                                !le_parse_float_checked(
+                                    tok[3], &off[0]) ||
+                                !le_parse_float_checked(
+                                    tok[4], &off[1]) ||
+                                !le_parse_float_checked(
+                                    tok[5], &off[2]) ||
+                                !le_parse_float_checked(
+                                    tok[6], &q[0]) ||
+                                !le_parse_float_checked(
+                                    tok[7], &q[1]) ||
+                                !le_parse_float_checked(
+                                    tok[8], &q[2]) ||
+                                !le_parse_float_checked(
+                                    tok[9], &q[3]) ||
+                                !le_parse_float_checked(
+                                    tok[13], &fr) ||
+                                !le_parse_float_checked(
+                                    tok[14], &re)) {
+                                lr = LE_ERROR_PARSE;
+                            } else {
+                                trig =
+                                    strtol(tok[10], &ep, 10);
+                                if (ep == tok[10] ||
+                                    *ep != '\0' ||
+                                    (trig != 0 && trig != 1)) {
+                                    lr = LE_ERROR_PARSE;
+                                } else {
+                                    ep = NULL;
+                                    layer = strtoul(tok[11],
+                                                    &ep, 10);
+                                    if (ep == tok[11] ||
+                                        *ep != '\0' ||
+                                        layer > 31u) {
+                                        lr = LE_ERROR_PARSE;
+                                    } else {
+                                        ep = NULL;
+                                        mask = strtoull(
+                                            tok[12], &ep, 10);
+                                        if (ep == tok[12] ||
+                                            *ep != '\0' ||
+                                            mask > 0xFFFFFFFFull) {
+                                            lr = LE_ERROR_PARSE;
+                                        } else {
+                                            recs[cur]
+                                                .rec.has_collider =
+                                                1;
+                                            recs[cur]
+                                                .rec.collider_shape =
+                                                LE_COLLIDER_SPHERE;
+                                            recs[cur]
+                                                .rec.collider_radius =
+                                                r;
+                                            memcpy(
+                                                recs[cur]
+                                                    .rec.collider_offset,
+                                                off,
+                                                sizeof(off));
+                                            memcpy(
+                                                recs[cur]
+                                                    .rec.collider_orientation,
+                                                q, sizeof(q));
+                                            recs[cur]
+                                                .rec.collider_is_trigger =
+                                                (trig != 0);
+                                            recs[cur]
+                                                .rec.collider_layer =
+                                                (uint32_t)layer;
+                                            recs[cur]
+                                                .rec.collider_mask =
+                                                (uint32_t)mask;
+                                            recs[cur]
+                                                .rec.collider_friction =
+                                                fr;
+                                            recs[cur]
+                                                .rec.collider_restitution =
+                                                re;
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (ntok >= 2 &&
+                                   strcmp(tok[1], "box") == 0) {
+                            float he[3];
+                            float off[3];
+                            float q[4];
+                            long trig;
+                            unsigned long layer;
+                            unsigned long long mask;
+                            float fr;
+                            float re;
+                            char *ep = NULL;
+
+                            if (ntok != 17) {
+                                lr = LE_ERROR_PARSE;
+                            } else if (
+                                !le_parse_float_checked(
+                                    tok[2], &he[0]) ||
+                                !le_parse_float_checked(
+                                    tok[3], &he[1]) ||
+                                !le_parse_float_checked(
+                                    tok[4], &he[2]) ||
+                                !le_parse_float_checked(
+                                    tok[5], &off[0]) ||
+                                !le_parse_float_checked(
+                                    tok[6], &off[1]) ||
+                                !le_parse_float_checked(
+                                    tok[7], &off[2]) ||
+                                !le_parse_float_checked(
+                                    tok[8], &q[0]) ||
+                                !le_parse_float_checked(
+                                    tok[9], &q[1]) ||
+                                !le_parse_float_checked(
+                                    tok[10], &q[2]) ||
+                                !le_parse_float_checked(
+                                    tok[11], &q[3]) ||
+                                !le_parse_float_checked(
+                                    tok[15], &fr) ||
+                                !le_parse_float_checked(
+                                    tok[16], &re)) {
+                                lr = LE_ERROR_PARSE;
+                            } else {
+                                trig =
+                                    strtol(tok[12], &ep, 10);
+                                if (ep == tok[12] ||
+                                    *ep != '\0' ||
+                                    (trig != 0 && trig != 1)) {
+                                    lr = LE_ERROR_PARSE;
+                                } else {
+                                    ep = NULL;
+                                    layer = strtoul(tok[13],
+                                                    &ep, 10);
+                                    if (ep == tok[13] ||
+                                        *ep != '\0' ||
+                                        layer > 31u) {
+                                        lr = LE_ERROR_PARSE;
+                                    } else {
+                                        ep = NULL;
+                                        mask = strtoull(
+                                            tok[14], &ep, 10);
+                                        if (ep == tok[14] ||
+                                            *ep != '\0' ||
+                                            mask > 0xFFFFFFFFull) {
+                                            lr = LE_ERROR_PARSE;
+                                        } else {
+                                            recs[cur]
+                                                .rec.has_collider =
+                                                1;
+                                            recs[cur]
+                                                .rec.collider_shape =
+                                                LE_COLLIDER_BOX;
+                                            memcpy(
+                                                recs[cur]
+                                                    .rec.collider_half_extents,
+                                                he,
+                                                sizeof(he));
+                                            memcpy(
+                                                recs[cur]
+                                                    .rec.collider_offset,
+                                                off,
+                                                sizeof(off));
+                                            memcpy(
+                                                recs[cur]
+                                                    .rec.collider_orientation,
+                                                q, sizeof(q));
+                                            recs[cur]
+                                                .rec.collider_is_trigger =
+                                                (trig != 0);
+                                            recs[cur]
+                                                .rec.collider_layer =
+                                                (uint32_t)layer;
+                                            recs[cur]
+                                                .rec.collider_mask =
+                                                (uint32_t)mask;
+                                            recs[cur]
+                                                .rec.collider_friction =
+                                                fr;
+                                            recs[cur]
+                                                .rec.collider_restitution =
+                                                re;
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            lr = LE_ERROR_PARSE;
+                        }
+                    } else if (strcmp(tok[0], "animator") == 0) {
+                        /* animator <skelhex|nil> <cliphex|nil>
+                         * <autoplay 0|1> <once|loop|pingpong>
+                         * <speed> <start>: 7 tokens. Duplicate
+                         * lines malformed. IDs resolve at commit
+                         * (scene.c) — the parser enforces shape +
+                         * finiteness here; value ranges re-validate
+                         * at commit via le_anim_validate_record. */
+                        if (ntok != 7) {
+                            lr = LE_ERROR_PARSE;
+                        } else if (recs[cur].rec.has_animator) {
+                            lr = LE_ERROR_PARSE;
+                        } else {
+                            le_asset_id sk;
+                            le_asset_id cl;
+                            int autoplay;
+                            int loop;
+                            float speed;
+                            float start;
+
+                            memset(&sk, 0, sizeof(sk));
+                            memset(&cl, 0, sizeof(cl));
+                            if (strcmp(tok[1], "nil") == 0) {
+                                /* unset skeleton */
+                            } else if (!le_asset_id_from_string(
+                                           tok[1], &sk) ||
+                                       le_asset_id_is_nil(&sk)) {
+                                lr = LE_ERROR_PARSE;
+                                goto animator_done;
+                            }
+                            if (strcmp(tok[2], "nil") == 0) {
+                                /* unset clip */
+                            } else if (!le_asset_id_from_string(
+                                           tok[2], &cl) ||
+                                       le_asset_id_is_nil(&cl)) {
+                                lr = LE_ERROR_PARSE;
+                                goto animator_done;
+                            }
+                            if (strcmp(tok[3], "0") == 0) {
+                                autoplay = 0;
+                            } else if (strcmp(tok[3], "1") ==
+                                       0) {
+                                autoplay = 1;
+                            } else {
+                                lr = LE_ERROR_PARSE;
+                                goto animator_done;
+                            }
+                            if (strcmp(tok[4], "once") == 0) {
+                                loop = LE_ANIM_ONCE;
+                            } else if (strcmp(tok[4],
+                                              "loop") == 0) {
+                                loop = LE_ANIM_LOOP;
+                            } else if (strcmp(tok[4],
+                                              "pingpong") ==
+                                       0) {
+                                loop = LE_ANIM_PING_PONG;
+                            } else {
+                                lr = LE_ERROR_PARSE;
+                                goto animator_done;
+                            }
+                            if (!le_parse_float_checked(
+                                    tok[5], &speed) ||
+                                !le_parse_float_checked(
+                                    tok[6], &start)) {
+                                lr = LE_ERROR_PARSE;
+                            } else {
+                                recs[cur].rec.has_animator = 1;
+                                recs[cur].rec.skeleton_id = sk;
+                                recs[cur].rec.clip_id = cl;
+                                recs[cur].rec.animator_autoplay =
+                                    autoplay;
+                                recs[cur].rec.animator_loop =
+                                    loop;
+                                recs[cur].rec.animator_speed =
+                                    speed;
+                                recs[cur]
+                                    .rec.animator_start_time =
+                                    start;
+                            }
+                        animator_done:;
+                        }
                     } else {
                         /* Unknown LINE KIND inside an object:
                          * tolerate only `shadowdist`-style
@@ -1727,6 +2227,8 @@ le_result le_scene_load_text(le_engine *engine, const le_asset *scene,
                             strcmp(tok[0], "camera") == 0 ||
                             strcmp(tok[0], "light") == 0 ||
                             strcmp(tok[0], "physics") == 0 ||
+                            strcmp(tok[0], "animator") == 0 ||
+                            strcmp(tok[0], "animation") == 0 ||
                             strcmp(tok[0], "audio") == 0 ||
                             strcmp(tok[0], "component") == 0) {
                             /* NOTE: "script"/"sprop" are handled as

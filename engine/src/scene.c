@@ -138,6 +138,19 @@ le_result le_scene_add_object(le_engine *engine, const le_asset *scene,
     } else if (object->script_prop_count != 0) {
         return LE_ERROR_INVALID_ARGUMENT;
     }
+    /* Physics records validate the same way (malformed values
+     * rejected before the struct copy). */
+    if (object->has_rigid_body || object->has_collider) {
+        if (le_physics_validate_record(object) != LE_SUCCESS) {
+            return LE_ERROR_INVALID_ARGUMENT;
+        }
+    }
+    /* Animator records validate the same way. */
+    if (object->has_animator) {
+        if (le_anim_validate_record(object) != LE_SUCCESS) {
+            return LE_ERROR_INVALID_ARGUMENT;
+        }
+    }
     for (i = 0; i < s->scene_count; i++) {
         if (le_scene_id_equal(&s->scene_objects[i].id,
                               &object->id)) {
@@ -380,6 +393,13 @@ le_result le_scene_capture(le_world *world, const le_asset *scene,
         /* Scripts: asset ID + exported property values (never VM
          * state). Scriptless objects keep has_script 0. */
         le_script_capture_for_record(world, i, &rec);
+        /* Physics: authoring state only (never accumulators or
+         * solver caches). Component-less objects keep both 0. */
+        le_physics_capture_for_record(world, i, &rec);
+        /* Animation: authoring/playback state only (never poses
+         * or palettes). Animator-less objects keep has_animator
+         * 0. */
+        le_anim_capture_for_record(world, i, &rec);
         /* Append (capacity checked inside add path — inline here
          * for speed; failure aborts capture with prior records
          * intact? No: capture replaced wholesale, so OOM leaves
@@ -612,6 +632,47 @@ le_result le_scene_instantiate(le_world *world, const le_asset *scene,
                     goto fail_invalid;
                 }
             }
+            /* Physics records validate here (malformed values
+             * fail the load transactionally, never half-load). */
+            if (rec->has_rigid_body || rec->has_collider) {
+                if (le_physics_validate_record(rec) !=
+                    LE_SUCCESS) {
+                    goto fail_invalid;
+                }
+            }
+            /* Animator records validate here (loop/speed/range;
+             * asset IDs resolve at commit — missing IDs fail
+             * there with MISSING_ASSET). */
+            if (rec->has_animator) {
+                uint32_t aslot;
+
+                if (le_anim_validate_record(rec) != LE_SUCCESS) {
+                    goto fail_invalid;
+                }
+                if (!(rec->skeleton_id.hi == 0 &&
+                      rec->skeleton_id.lo == 0) &&
+                    !le_find_asset_by_id(engine,
+                                         &rec->skeleton_id,
+                                         LE_ASSET_SKELETON,
+                                         &aslot)) {
+                    free(handles);
+                    free(parent_of);
+                    free(mesh_h);
+                    free(mat_h);
+                    return LE_ERROR_MISSING_ASSET;
+                }
+                if (!(rec->clip_id.hi == 0 &&
+                      rec->clip_id.lo == 0) &&
+                    !le_find_asset_by_id(engine, &rec->clip_id,
+                                         LE_ASSET_ANIMATION_CLIP,
+                                         &aslot)) {
+                    free(handles);
+                    free(parent_of);
+                    free(mesh_h);
+                    free(mat_h);
+                    return LE_ERROR_MISSING_ASSET;
+                }
+            }
         }
     }
     /* PASS 2: parent resolution by persistent ID (forward refs OK:
@@ -763,11 +824,29 @@ le_result le_scene_instantiate(le_world *world, const le_asset *scene,
                 goto fail_rollback;
             }
         }
-        /* Scripts attach LAST (component commit order): attach +
-         * recorded property values (best-effort per property —
-         * unknown names from newer files are skipped, never
-         * fatal). Instances start on the next le_world_update in
-         * instantiation order (pending_start, never twice). */
+        /* Physics attaches before scripts (collision callbacks
+         * need live colliders when instances start stepping). */
+        if (rec->has_rigid_body || rec->has_collider) {
+            if (le_physics_apply_record(world, &handles[i],
+                                        rec) != LE_SUCCESS) {
+                goto fail_rollback;
+            }
+        }
+        /* Animators attach after physics (object-track ownership
+         * validates against the live body) and before scripts
+         * (start() observes the animator). */
+        if (rec->has_animator) {
+            if (le_anim_apply_record(world, &handles[i], rec) !=
+                LE_SUCCESS) {
+                goto fail_rollback;
+            }
+        }
+        /* Scripts attach after physics (component commit order):
+         * attach + recorded property values (best-effort per
+         * property — unknown names from newer files are
+         * skipped, never fatal). Instances start on the next
+         * le_world_update in instantiation order
+         * (pending_start, never twice). */
         if (rec->has_script) {
             if (le_script_apply_record(world, &handles[i], rec) !=
                 LE_SUCCESS) {

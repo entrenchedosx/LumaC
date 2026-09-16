@@ -106,11 +106,13 @@ uint32_t la_asset_manager_get_sampler_count(
 /* One node of the imported hierarchy (order = file order, never
  * flattened: children address a model-owned flat link array so
  * future animation and scene import keep working). `mesh_index` is
- * -1 when the node instantiates no mesh. `name` points at
- * model-owned storage ("" when unnamed); valid while the model
- * lives. Both the decomposed `local_transform` and the lossless
- * `local_matrix` (column-major) are kept: submission uses the
- * matrix, inspection uses either. */
+ * -1 when the node instantiates no mesh. `skin_index` is the
+ * file-order skin used by this node (-1 when unskinned; joints
+ * index into that skin's joint list, NOT into nodes). `name`
+ * points at model-owned storage ("" when unnamed); valid while
+ * the model lives. Both the decomposed `local_transform` and the
+ * lossless `local_matrix` (column-major) are kept: submission uses
+ * the matrix, inspection uses either. */
 typedef struct la_model_node {
     const char *name;
     int32_t parent;
@@ -119,6 +121,7 @@ typedef struct la_model_node {
     lr_transform local_transform;
     float local_matrix[16];
     int32_t mesh_index;
+    int32_t skin_index;
 } la_model_node;
 
 /* Alpha handling (parsed always, rendered as OPAQUE in Phase 14). */
@@ -275,6 +278,97 @@ void la_model_get_bounds(const la_model *model, lr_bounds *out);
 /** Source path copy (model-owned; "" when unknown, NULL model safe
  *  via "" return? Returns NULL for NULL model). */
 const char *la_model_get_source_path(const la_model *model);
+
+/* ------------------------------------------------------------------
+ * Skin + animation queries (Phase 29; decoded, engine-ready).
+ *
+ * Skins map 1:1 to the file's skin list (file order). Each skin
+ * owns its joint-node list and its inverse-bind matrices
+ * (column-major, decoded ONCE at import from the skin's
+ * inverseBindMatrices accessor; identity per joint when the file
+ * omits the accessor). The engine derives skeleton parents from
+ * the node hierarchy and bind TRS from node local transforms
+ * (see docs/GLTF_ANIMATION_IMPORT.md).
+ *
+ * Animations map to the file's animation list MINUS morph-only
+ * leftovers: morph-target (weights) channels are skipped at
+ * import (deferred feature, never silent — the engine reports
+ * surviving-track counts), and an animation left with zero
+ * importable channels is excluded from the count entirely.
+ *
+ * Lifetimes: all returned pointers borrow model storage (valid
+ * while the model lives). Every query is NULL-safe; out-of-range
+ * indices yield documented zeros (counts), NULL (borrowed
+ * pointers), -1 (node/skin links), identity (bad inverse bind),
+ * or 0 (bad channel/duration/bad-args).
+ * ------------------------------------------------------------------ */
+
+/** Skin count (0 for NULL model, or a model whose file names no
+ *  skins). */
+uint32_t la_model_get_skin_count(const la_model *model);
+
+/** Joint count for one skin (0 for NULL model or bad skin). */
+uint32_t la_model_get_skin_joint_count(const la_model *model,
+                                       uint32_t skin_index);
+
+/** Model node index of one joint (file order; -1 for NULL model,
+ *  bad skin, or bad joint). */
+int32_t la_model_get_skin_joint_node(const la_model *model,
+                                     uint32_t skin_index,
+                                     uint32_t joint);
+
+/** Copy out one joint's inverse-bind matrix (column-major). Bad
+ *  skin/joint (or NULL model) yields identity; `out_inv_bind`
+ *  may be NULL for a no-op. */
+void la_model_get_skin_inverse_bind(const la_model *model,
+                                    uint32_t skin_index,
+                                    uint32_t joint,
+                                    float out_inv_bind[16]);
+
+/** Skin used by one node (file-order skin index, -1 when the
+ *  node is unskinned; -1 for NULL model or bad node). */
+int32_t la_model_get_node_skin(const la_model *model,
+                               uint32_t node_index);
+
+/** Imported animation count (morph-only animations excluded; 0
+ *  for NULL model). */
+uint32_t la_model_get_animation_count(const la_model *model);
+
+/** Importable channel count for one animation (0 for NULL model
+ *  or bad animation). */
+uint32_t la_model_get_animation_channel_count(const la_model *model,
+                                              uint32_t anim_index);
+
+/* One decoded animation channel. `path`: 0 = translation (vec3),
+ * 1 = rotation (quat xyzw, vec4), 2 = scale (vec3).
+ * `interpolation`: 0 = STEP, 1 = LINEAR, 2 = CUBICSPLINE.
+ * `times` holds `key_count` seconds (>= 0, non-decreasing).
+ * `values` holds `key_count` vectors of `comps` floats — EXCEPT
+ * under CUBICSPLINE, where each key expands to an in/value/out
+ * Hermite triple, so `values` holds `key_count * 3` vectors
+ * (3x the floats; the engine scales tangents by the key
+ * interval at sample time). Both arrays borrow model storage. */
+typedef struct la_anim_channel {
+    int32_t target_node; /* model node index */
+    uint32_t path; /* 0 = T, 1 = R, 2 = S */
+    uint32_t interpolation; /* 0 = STEP, 1 = LINEAR, 2 = CUBICSPLINE */
+    uint32_t key_count;
+    const float *times; /* [key_count] */
+    const float *values; /* [key_count * comps] (x3 vectors if cubic) */
+} la_anim_channel;
+
+/** Borrow one channel's decoded keys (1 on success with `out`
+ *  filled; 0 for NULL model, bad indices, or NULL out). */
+int la_model_get_animation_channel(const la_model *model,
+                                   uint32_t anim_index,
+                                   uint32_t channel_index,
+                                   la_anim_channel *out);
+
+/** Animation duration in seconds (max last-key time across the
+ *  animation's imported channels; 0 for NULL model, bad index,
+ *  or an empty animation). */
+float la_model_get_animation_duration(const la_model *model,
+                                      uint32_t anim_index);
 
 /**
  * Submit every mesh instance with hierarchy-composed world matrices:

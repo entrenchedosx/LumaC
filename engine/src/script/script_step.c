@@ -312,6 +312,51 @@ static int le_entry_effective(le_world *world,
     return le_object_is_effectively_enabled(world, &h);
 }
 
+/* Phase 28 fixed-step physics driver for worlds WITHOUT script
+ * dispatch (no runtime, or zero scripts). Runs the SAME schedule
+ * as the PASS2 loop inline in le_script_step_world (accumulator
+ * + capped catch-up + backlog drop on the shared script_fixed_dt
+ * / script_max_steps / script_accum fields — one schedule, two
+ * entry points, never double-stepped: callers take exactly one
+ * path per frame). No fixed_update callbacks exist here by
+ * construction; each interval is a straight physics sub-step.
+ * A world that never opted into a fixed dt still simulates at
+ * the default 60 Hz physics rate (physics always runs; only
+ * fixed_update SCRIPT callbacks are opt-in). */
+void le_script_step_physics(le_world *world, float dt) {
+    double cap;
+    uint32_t steps = 0;
+    float fixed_dt;
+    uint32_t max_steps;
+
+    if (world == NULL) {
+        return;
+    }
+    if (!(dt == dt) || dt <= 0.0f) {
+        return;
+    }
+    fixed_dt = world->script_fixed_dt;
+    max_steps = world->script_max_steps;
+    if (!(fixed_dt > 0.0f)) {
+        fixed_dt = 1.0f / 60.0f; /* physics default rate */
+    }
+    if (max_steps == 0) {
+        max_steps = 4u;
+    }
+    cap = (double)fixed_dt * (double)max_steps * 2.0;
+    world->script_accum += (dt > cap) ? cap : (double)dt;
+    while (world->script_accum >= (double)fixed_dt &&
+           steps < max_steps) {
+        world->script_accum -= (double)fixed_dt;
+        steps++;
+        le_physics_step(world, fixed_dt);
+    }
+    if (steps == max_steps &&
+        world->script_accum >= (double)fixed_dt) {
+        world->script_accum = 0.0; /* drop backlog */
+    }
+}
+
 void le_script_step_world(le_world *world, float dt) {
     le_engine *engine;
     le_script_runtime *rt;
@@ -323,13 +368,22 @@ void le_script_step_world(le_world *world, float dt) {
         return;
     }
     engine = world->engine;
-    if (engine == NULL || engine->script_runtime == NULL) {
+    if (engine == NULL) {
+        /* Engine-less worlds never exist in practice, but keep
+         * physics alive anyway (script dispatch needs the
+         * runtime, physics does not). */
+        le_script_step_physics(world, dt);
+        return;
+    }
+    if (engine->script_runtime == NULL ||
+        world->script_count == 0) {
+        /* Phase 28: scriptless (or runtime-less) worlds still
+         * simulate physics on the fixed schedule. The physics
+         * accumulator is independent of script presence. */
+        le_script_step_physics(world, dt);
         return;
     }
     rt = engine->script_runtime;
-    if (world->script_count == 0) {
-        return;
-    }
     if (world->scripts_firing >= LE_SCRIPT_MAX_NEST) {
         return;
     }
@@ -419,7 +473,14 @@ void le_script_step_world(le_world *world, float dt) {
         e->started = 1;
         e->pending_start = 0;
     }
-    /* PASS 2: fixed steps (accumulator, capped catch-up). */
+    /* PASS 2: fixed steps (accumulator, capped catch-up). One
+     * physics sub-step runs per fixed interval AFTER the
+     * fixed_update script fires for that interval (scripts apply
+     * forces/impulses first) — documented order, no second
+     * timer. Scriptless worlds take the same path via
+     * le_script_step_physics (called above); this loop handles
+     * scripted worlds inline so fixed_update and physics stay
+     * in lockstep per interval. */
     if (world->script_fixed_dt > 0.0f) {
         double cap =
             (double)world->script_fixed_dt *
@@ -453,6 +514,7 @@ void le_script_step_world(le_world *world, float dt) {
                         e->failed = 1;
                     }
                 }
+                le_physics_step(world, world->script_fixed_dt);
             }
             if (steps == world->script_max_steps &&
                 world->script_accum >=
@@ -611,11 +673,24 @@ int le_script_get_property(le_world *world, const le_object *object,
                            le_script_property *out_prop) {
     le_result code = LE_SUCCESS;
     le_script_entry *e;
+    /* The lookup name may alias out_prop->name (callers pass a
+     * field of their output struct as the key). Copy it aside
+     * FIRST so the memset below cannot wipe the key. */
+    char key[64];
 
+    memset(key, 0, sizeof(key));
+    if (name != NULL) {
+        size_t n = strlen(name);
+
+        if (n >= sizeof(key)) {
+            n = sizeof(key) - 1u;
+        }
+        memcpy(key, name, n);
+    }
     if (out_prop != NULL) {
         memset(out_prop, 0, sizeof(*out_prop));
     }
-    if (name == NULL || out_prop == NULL) {
+    if (key[0] == '\0' || out_prop == NULL) {
         return 0;
     }
     e = le_prop_entry(world, object, &code);
@@ -623,7 +698,7 @@ int le_script_get_property(le_world *world, const le_object *object,
         world->engine->script_runtime == NULL) {
         return 0;
     }
-    snprintf(out_prop->name, sizeof(out_prop->name), "%s", name);
+    snprintf(out_prop->name, sizeof(out_prop->name), "%s", key);
     /* Discover type via list, then typed read. */
     {
         le_script_property all[16];
@@ -636,7 +711,7 @@ int le_script_get_property(le_world *world, const le_object *object,
             return 0;
         }
         for (i = 0; i < count; i++) {
-            if (strcmp(all[i].name, name) == 0) {
+            if (strcmp(all[i].name, key) == 0) {
                 out_prop->type = all[i].type;
                 return world->engine->script_runtime->backend
                     ->get_prop(world->engine->script_runtime,

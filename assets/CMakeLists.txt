@@ -82,12 +82,14 @@ target_link_libraries(test_assets_vulkan PRIVATE luma_assets luma_renderer lumac
 target_include_directories(test_assets_vulkan PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
     ${CMAKE_CURRENT_SOURCE_DIR}/../renderer/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../renderer/src
     ${CMAKE_CURRENT_SOURCE_DIR}/../src
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(test_assets_vulkan PRIVATE
     LA_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures"
     LA_MALFORMED_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/malformed"
-    LA_BOX_PATH="${CMAKE_CURRENT_SOURCE_DIR}/BoxTextured.glb")
+    LA_BOX_PATH="${CMAKE_CURRENT_SOURCE_DIR}/BoxTextured.glb"
+    LA_SKINNED_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/skinned.glb")
 if(UNIX AND NOT APPLE)
     target_link_libraries(test_assets_vulkan PRIVATE m)
 endif()
