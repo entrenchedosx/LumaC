@@ -190,10 +190,20 @@ if(UNIX AND NOT APPLE)
 endif()
 add_test(NAME test_gltf_identity COMMAND test_gltf_identity)
 
+# Phase 32 prefab depth (determinism/isolation/malformed/stress).
+add_executable(test_prefab tests/test_prefab.c)
+target_link_libraries(test_prefab PRIVATE luma_editor)
+target_include_directories(test_prefab PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_prefab PRIVATE m)
+endif()
+add_test(NAME test_prefab COMMAND test_prefab)
+
 # Shared Windows builds place lumac.dll beside the top-level tests;
 # editor tests live deeper, so extend their DLL search path
 # explicitly (no-op for static builds).
 if(WIN32)
-    set_tests_properties(test_editor_core test_editor_history test_editor_play test_editor_viewport test_editor_reflect test_prefab_smoke test_project test_import test_assetdb test_project_editor test_gltf_identity PROPERTIES
+    set_tests_properties(test_editor_core test_editor_history test_editor_play test_editor_viewport test_editor_reflect test_prefab_smoke test_project test_import test_assetdb test_project_editor test_gltf_identity test_prefab PROPERTIES
         ENVIRONMENT "PATH=$<TARGET_FILE_DIR:lumac>\;$ENV{PATH}")
 endif()
