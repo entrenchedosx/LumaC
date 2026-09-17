@@ -140,9 +140,20 @@ le_result le_asset_create_script(le_engine *engine,
      * NOTE: no dedup-by-ID — repeat creates return DISTINCT handles
      * sharing one ID (find_by_id returns the first READY match).
      * Dedup is by canonical PATH (load path only). Handles stay
-     * generational; IDs stay content-derived. */
+     * generational; IDs stay content-derived.
+     *
+     * Portable identity (Phase 34A): when the caller supplies an
+     * identity key (project UUID + relative locator), the key —
+     * not the normalized access path — feeds the low half, so the
+     * ID survives project relocation. NULL key keeps legacy
+     * path-derived IDs. */
     id.hi = le_fnv1a64(desc->source, desc->size);
-    id.lo = le_fnv1a64(norm, strlen(norm)) ^ (id.hi | 1u);
+    if (desc->identity_key != NULL && desc->identity_len > 0) {
+        id.lo = le_fnv1a64(desc->identity_key, desc->identity_len) ^
+                (id.hi | 1u);
+    } else {
+        id.lo = le_fnv1a64(norm, strlen(norm)) ^ (id.hi | 1u);
+    }
     if (id.hi == 0 && id.lo == 0) {
         id.lo = 1;
     }
@@ -272,12 +283,13 @@ le_result le_script_asset_set_source(le_engine *engine,
     s->script_source = copy;
     s->script_size = size;
     s->script_chunk_ref = chunk;
-    /* Content hash follows the bytes (dedup identity = content). */
+    /* Content hash follows the bytes (dedup identity = content).
+     * Portable identity (Phase 34A): the KEY half is caller-
+     * supplied at create time (project UUID) and set_source must
+     * NOT re-derive it from the abs access path — the path is a
+     * locator, not identity. Content half follows the bytes; key
+     * half is preserved verbatim (it was fixed at create). */
     s->id.hi = le_fnv1a64(source, size);
-    s->id.lo =
-        le_fnv1a64((s->source != NULL) ? s->source : "", 
-                   (s->source != NULL) ? strlen(s->source) : 0) ^
-        (s->id.hi | 1u);
     if (s->id.hi == 0 && s->id.lo == 0) {
         s->id.lo = 1;
     }

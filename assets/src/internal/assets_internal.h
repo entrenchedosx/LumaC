@@ -43,12 +43,14 @@ typedef struct la_model_primitive {
 typedef struct la_model_mesh {
     la_model_primitive *primitives; /* owned array */
     uint32_t primitive_count;
+    char *name; /* owned copy of the glTF mesh name ("" when unnamed) */
 } la_model_mesh;
 
 /* One model material: preserved PBR metadata + renderer instance. */
 typedef struct la_model_material {
     la_pbr_material_data data;
     lr_material *material; /* owned */
+    char *name; /* owned copy of the glTF material name ("" when unnamed) */
 } la_model_material;
 
 /* One imported skin (file order): joint nodes + inverse-bind
@@ -59,6 +61,7 @@ typedef struct la_model_skin {
     int32_t *joint_nodes; /* owned [joint_count] */
     float *inv_bind; /* owned [joint_count * 16] */
     uint32_t joint_count;
+    char *name; /* owned copy of the glTF skin name ("" when unnamed) */
 } la_model_skin;
 
 /* One imported animation channel: decoded key times + values,
@@ -80,6 +83,7 @@ typedef struct la_model_animation {
     la_model_anim_channel *channels; /* owned [channel_count] */
     uint32_t channel_count;
     float duration;
+    char *name; /* owned copy of the glTF animation name ("" when unnamed) */
 } la_model_animation;
 
 /* One cached HDR environment source (manager-owned, shared by

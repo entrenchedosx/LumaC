@@ -878,6 +878,12 @@ typedef struct led_asset_record {
     uint64_t settings_digest;
     uint32_t dependency_count;
     uint32_t sub_asset_count;
+    /* Stable sub-asset keys, parallel to the record's sub-ID table
+     * (Phase 34A portable identity; up to 64 copied, count in
+     * sub_asset_count — longer tables truncate the STRINGS only,
+     * never the count). Empty when the record has no sub-assets. */
+    char sub_keys[64][128];
+    uint32_t sub_key_count;
     le_asset runtime_asset; /* INVALID when not imported */
     int has_runtime_asset;
     le_asset_id runtime_id; /* persistent engine ID; nil when none */

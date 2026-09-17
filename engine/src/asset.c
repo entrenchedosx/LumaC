@@ -317,6 +317,36 @@ uint64_t le_fnv1a64(const void *bytes, size_t size) {
     return h;
 }
 
+void le_identity_for_key(const void *key_bytes, size_t key_len,
+                         const char *sub_key, le_asset_id *out_id) {
+    uint64_t kh = 14695981039346656037ull;
+    uint64_t sh;
+    size_t sl = 0;
+
+    if (out_id != NULL) {
+        memset(out_id, 0, sizeof(*out_id));
+    }
+    if (sub_key != NULL) {
+        sl = strlen(sub_key);
+        sh = le_fnv1a64(sub_key, sl);
+    } else {
+        sh = le_fnv1a64("unnamed", 7);
+        sl = 7;
+    }
+    if (key_bytes != NULL && key_len > 0) {
+        kh = le_fnv1a64(key_bytes, key_len);
+    }
+    if (out_id == NULL) {
+        return;
+    }
+    out_id->hi = kh ^ (sh * 1099511628211ull);
+    out_id->lo = sh ^ (out_id->hi | 1u);
+    if (out_id->hi == 0 && out_id->lo == 0) {
+        out_id->lo = 1;
+    }
+    (void)sl;
+}
+
 void le_uuid_mint(le_engine *engine, uint64_t *hi, uint64_t *lo) {
     /* splitmix64 over a process counter folded with the engine
      * address: unique per process, deterministic-free (no RNG

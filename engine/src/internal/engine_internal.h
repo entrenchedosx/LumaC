@@ -368,6 +368,20 @@ int le_normalize_source(const char *path, char *out, size_t out_size);
 /* FNV-1a 64-bit over bytes (persistent content hashing). */
 uint64_t le_fnv1a64(const void *bytes, size_t size);
 
+/* Portable sub-asset identity (Phase 34A): derive the persistent
+ * engine asset ID from a caller-supplied identity key (project
+ * UUID bytes + stable sub-asset key string) instead of the file
+ * access path. Location-free: identical keys yield identical IDs
+ * on every machine and after any project relocation.
+ *
+ *   hi = FNV(key_bytes) ^ (FNV(sub_key) * P)
+ *   lo = FNV(sub_key) ^ (hi | 1)      (nil-guarded to nonzero)
+ *
+ * NULL/empty keys fall back to the legacy path hash (documented
+ * non-portable; kept for non-project callers). */
+void le_identity_for_key(const void *key_bytes, size_t key_len,
+                         const char *sub_key, le_asset_id *out_id);
+
 /* Mint a fresh process-unique UUID into out (counter-seeded, never
  * nil; engine NULL mints from a static fallback — only used for
  * scene object IDs where the engine is always available). */

@@ -1390,6 +1390,14 @@ typedef struct le_gltf_import {
     uint32_t texture_count;
     le_gltf_node *nodes;
     uint32_t node_count;
+    /* Stable sub-asset key strings, parallel to mesh_assets (one
+     * per mesh asset: "mesh<mi>:prim<pi>[:<name>]") — Phase 34A.
+     * Owned by the result (freed by le_gltf_import_free); NULL
+     * when the import produced no meshes. Project layers persist
+     * these strings in sidecar `sub` lines (asserted by tests). */
+    char **mesh_keys;
+    /* Parallel to material_assets ("mat<mi>[:<name>]"). */
+    char **material_keys;
 } le_gltf_result;
 
 /** Import a glTF file into engine assets (dedup by canonical path).
@@ -1397,6 +1405,11 @@ typedef struct le_gltf_import {
  *  owned arrays (free with le_gltf_import_free even on failure
  *  paths that partially filled it — on hard failure out is
  *  zeroed).
+ *
+ *  Identity note (Phase 34A): this entry point derives persistent
+ *  mesh/material IDs from the normalized access path (location-
+ *  bound, legacy behavior for non-project callers). Project layers
+ *  MUST use le_gltf_import_with_key for relocation-proof IDs.
  *
  * @return LE_SUCCESS, LE_ERROR_INVALID_ARGUMENT (NULL
  *         engine/path/out, engine without renderer),
@@ -1406,6 +1419,30 @@ typedef struct le_gltf_import {
  */
 LE_API le_result le_gltf_import(le_engine *engine, const char *path,
                                 le_gltf_result *out_import);
+
+/** Import a glTF file with a caller-supplied identity key
+ *  (Phase 34A portable identity). File access still uses `path`
+ *  (normalized for dedup + read); persistent mesh/material IDs
+ *  derive from `identity_key[0..identity_len)` (project UUID bytes
+ *  + stable locator) instead of the access path, so identical keys
+ *  yield identical IDs after any project relocation. NULL/empty
+ *  key == le_gltf_import behavior exactly.
+ *
+ *  Sub-asset key vocabulary (stable, persisted by project sidecars
+ *  as the human-readable half of the identity):
+ *    mesh i, primitive p .... "mesh<i>:prim<p>[:<name>]"
+ *    material i ............. "mat<i>[:<name>]"
+ *  where <name> is the sanitized file-authored name (mesh names
+ *  resolve through the first referencing node; empty/dup names
+ *  fall back to index-only keys — documented, never silent).
+ *
+ * @return same codes as le_gltf_import.
+ */
+LE_API le_result le_gltf_import_with_key(le_engine *engine,
+                                         const char *path,
+                                         const void *identity_key,
+                                         size_t identity_len,
+                                         le_gltf_result *out_import);
 
 /** Release an import's handle arrays (handles stay live in the
  *  registry; only the listing is freed). NULL-safe no-op. */
@@ -1442,6 +1479,11 @@ typedef struct le_gltf_animated {
 /** Import skeleton + clips for one skin (transactional:
  *  malformed data creates NOTHING, registry untouched).
  *
+ *  Portable identity (Phase 34A): `identity_key`/`identity_len`
+ *  (project UUID + locator, may be NULL) flow into the skeleton
+ *  (`skin<si>[:<name>]`) and clip (`clip<ai>[:<name>]`) asset IDs.
+ *  NULL key keeps legacy minted UUIDs.
+ *
  * @return LE_SUCCESS, LE_ERROR_INVALID_ARGUMENT (NULL args,
  *         skin_index out of range, bad joints/hierarchy),
  *         LE_ERROR_OUT_OF_MEMORY, LE_ERROR_MISSING_ASSET
@@ -1450,6 +1492,12 @@ typedef struct le_gltf_animated {
 LE_API le_result le_gltf_import_animated(
     le_engine *engine, const struct la_model *model,
     uint32_t skin_index, le_gltf_animated *out_anim);
+
+/** Keyed variant of le_gltf_import_animated (Phase 34A). */
+LE_API le_result le_gltf_import_animated_with_key(
+    le_engine *engine, const struct la_model *model,
+    uint32_t skin_index, const void *identity_key,
+    size_t identity_len, le_gltf_animated *out_anim);
 
 /** Free an animated import's listing arrays (NULL-safe). */
 LE_API void le_gltf_animated_free(le_gltf_animated *anim);
@@ -2911,10 +2959,16 @@ typedef struct le_skeleton_joint_desc {
     float inverse_bind[16]; /* column-major, finite, invertible-ish */
 } le_skeleton_joint_desc;
 
-/** Skeleton asset description (zero-init, then fill joints). */
+/** Skeleton asset description (zero-init, then fill joints).
+ *  Portable identity (Phase 34A): `identity_key`/`identity_len`
+ *  (e.g. project UUID bytes + "skin<si>[:<name>]") override the
+ *  minted UUID with le_identity_for_key. NULL keeps legacy UUIDs. */
 typedef struct le_skeleton_asset_desc {
     const le_skeleton_joint_desc *joints;
     uint32_t joint_count;
+    const void *identity_key;
+    size_t identity_len;
+    const char *identity_sub_key;
 } le_skeleton_asset_desc;
 
 /** Track target kind (joint-space or plain object transform). */
@@ -2956,11 +3010,16 @@ typedef struct le_anim_track_desc {
     uint32_t key_count;
 } le_anim_track_desc;
 
-/** Clip asset description (zero-init, then fill tracks). */
+/** Clip asset description (zero-init, then fill tracks).
+ *  Portable identity (Phase 34A): same key contract as the
+ *  skeleton desc (`clip<ai>[:<name>]` sub-keys). */
 typedef struct le_animation_clip_desc {
     float duration; /* seconds, finite, > 0 */
     const le_anim_track_desc *tracks;
     uint32_t track_count;
+    const void *identity_key;
+    size_t identity_len;
+    const char *identity_sub_key;
 } le_animation_clip_desc;
 
 /** Create a READY skeleton asset (validates hierarchy: parents
@@ -3189,11 +3248,20 @@ LE_API int le_asset_find_by_id(le_engine *engine,
  * `size` carry UTF-8 Lua bytes (copied in); `path_hint` names the
  * origin for diagnostics/module identity (normalized like every
  * asset source; may be "" for ad-hoc snippets). Persistent ID is
- * the FNV-1a content hash (identical bytes = identical ID). */
+ * the FNV-1a content hash (identical bytes = identical ID).
+ *
+ * Portable identity (Phase 34A): `identity_key` + `identity_len`
+ * optionally override the path contribution to the persistent ID.
+ * When non-NULL/nonzero, `lo = FNV(key) ^ (hi|1)` instead of
+ * `FNV(normalized path) ^ (hi|1)` — project layers pass their
+ * UUID + relative locator so script IDs survive relocation. NULL
+ * keeps the legacy path-derived ID (non-project callers). */
 typedef struct le_script_asset_desc {
     const char *source;
     size_t size;
     const char *path_hint;
+    const void *identity_key;
+    size_t identity_len;
 } le_script_asset_desc;
 
 /** Create a READY script asset (compiles immediately: syntax errors

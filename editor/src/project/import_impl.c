@@ -112,20 +112,39 @@ const char *led_importer_id_for(led_project_asset_type type) {
 }
 
 uint32_t led_importer_version_for(led_project_asset_type type) {
+    /* Phase 34A: glTF + Lua importers are v2 (portable identity —
+     * engine IDs derive from project UUIDs, not access paths).
+     * The bump marks v1 records STALE so the next scan reimports
+     * them into the portable scheme (sidecars + scene refs follow
+     * automatically: same UUID + same sub-keys => same engine IDs
+     * => saved scenes keep resolving). */
+    switch (type) {
+    case LED_PROJECT_ASSET_MODEL:
+    case LED_PROJECT_ASSET_SCRIPT:
+        return 2;
+    default:
+        break;
+    }
     (void)type;
     return 1;
 }
 
 uint64_t led_import_settings_digest(led_project_asset_type type) {
     /* Default settings digest per type (no user settings yet —
-     * the digest domain is reserved; changes mark STALE). */
+     * the digest domain is reserved; changes mark STALE).
+     *
+     * Phase 34A: glTF importer v2 (portable identity). v1 minted
+     * location-bound mesh/material engine IDs; v2 mints
+     * (project-UUID || sub-key) IDs. The version bump (below)
+     * marks every v1 model record STALE on next scan so reimport
+     * republishes portable IDs + key strings. */
     switch (type) {
     case LED_PROJECT_ASSET_MODEL:
-        return led_fnv1a64("gltf/v1", 7);
+        return led_fnv1a64("gltf/v2-portable", 16);
     case LED_PROJECT_ASSET_TEXTURE:
         return led_fnv1a64("tex/v1/srgb-auto", 16);
     case LED_PROJECT_ASSET_SCRIPT:
-        return led_fnv1a64("lua/v1", 6);
+        return led_fnv1a64("lua/v2-portable", 14);
     case LED_PROJECT_ASSET_SCENE:
         return led_fnv1a64("scene/v1", 8);
     case LED_PROJECT_ASSET_PREFAB:
@@ -184,23 +203,31 @@ static int led_read_file_bytes(const char *abs, unsigned char **out,
     return 1;
 }
 
-/* ---- sub-asset stable keys (glTF §22-24) ----
- * meshes:   "mesh<mi>:prim<pi>"  (matches stable mesh IDs)
- * materials:"mat<mi>:<sanitized-name>" (name-keyed; index fallback)
- * textures: "tex<ti>:<sanitized-name>"
- * skeletons:"skin<si>"
- * clips:    "clip<ai>:<sanitized-name>"
- * Sanitized names: lowercase alnum, others -> '_', capped 64. */
+/* ---- sub-asset stable keys (Phase 34A portable identity) ----
+ * meshes:   "mesh<mi>:prim<pi>[:<sanitized-name>]"
+ * materials:"mat<mi>[:<sanitized-name>]"
+ * textures: "tex<ti>[:<sanitized-name>]"
+ * skeletons:"skin<si>[:<sanitized-name>]"
+ * clips:    "clip<ai>[:<sanitized-name>]"
+ * Sanitized names: lowercase alnum, others -> '_', capped 47
+ * (matches the engine's le_gltf_sanitize vocabulary — keys must be
+ * byte-identical on both sides of the bridge).
+ *
+ * The engine mints persistent le_asset_id values from
+ * (project-UUID || sub-key) via le_gltf_import_with_key; the
+ * project layer persists the SAME key strings in the sidecar
+ * `sub` lines, so key strings are asserted by tests (not just
+ * counts). Empty/dup names fall back to index-only keys
+ * (documented, never silent invention). */
 
 static void led_sanitize_name(const char *src, char out[64]) {
     size_t i = 0;
 
     memset(out, 0, 64);
     if (src == NULL) {
-        strncpy(out, "unnamed", 63);
         return;
     }
-    while (src[i] != '\0' && i < 63) {
+    while (src[i] != '\0' && i < 47) {
         char c = src[i];
 
         if (c >= 'A' && c <= 'Z') {
@@ -212,8 +239,25 @@ static void led_sanitize_name(const char *src, char out[64]) {
         out[i] = c;
         i++;
     }
-    if (i == 0) {
-        strncpy(out, "unnamed", 63);
+}
+
+/* Build the engine identity-key buffer for one record: the 16
+ * project-UUID bytes (location-free authoring identity). The
+ * sub-key half is appended by the engine per sub-asset. */
+static void led_identity_key_for(const led_db_record *r,
+                                 unsigned char out[16]) {
+    uint64_t hi = 0;
+    uint64_t lo = 0;
+    size_t k = 0;
+
+    if (r != NULL) {
+        hi = r->id.hi;
+        lo = r->id.lo;
+    }
+    for (k = 0; k < 8; k++) {
+        out[k] = (unsigned char)((hi >> (56u - 8u * k)) & 0xFFu);
+        out[8 + k] =
+            (unsigned char)((lo >> (56u - 8u * k)) & 0xFFu);
     }
 }
 
@@ -240,12 +284,18 @@ static led_result led_import_gltf(led_session *s, led_db_record *r,
     le_engine *e = s->engine;
     le_gltf_result imp;
     le_result rc;
+    /* Portable identity (Phase 34A): the engine mints mesh/material
+     * IDs from (project-UUID || sub-key), never from the access
+     * path. File reads + registry dedup still use `abs`. */
+    unsigned char idkey[16];
 
     memset(&imp, 0, sizeof(imp));
+    led_identity_key_for(r, idkey);
     /* Needs a renderer for GPU upload (headless engines without
      * one fail INVALID_ARGUMENT — surfaced as FAILED with
      * diagnostics, never a crash). */
-    rc = le_gltf_import(e, abs, &imp);
+    rc = le_gltf_import_with_key(e, abs, idkey, sizeof(idkey),
+                                 &imp);
     if (rc != LE_SUCCESS) {
         snprintf(r->diagnostic, sizeof(r->diagnostic),
                  "gltf import failed (%d)", (int)rc);
@@ -271,16 +321,13 @@ static led_result led_import_gltf(led_session *s, led_db_record *r,
         r->sub_count = 0;
         r->sub_cap = 0;
     }
-    /* Bridge the runtime IDs into name-keyed sub-asset table
-     * (FIXES the positional debt: materials keyed by
-     * mat<index>:<sanitized-factors>? No — by model material
-     * ORDER-independent keys: prefer node-referenced material
-     * names via the result arrays. The engine result arrays are
-     * adoption order (== model order); keys use sanitized
-     * per-index names where the model exposes them, else index.
-     * Reordered-but-equivalent sources keep keys because keys
-     * derive from (kind, name-or-index) + source path, NOT from
-     * result-array positions. */
+    /* Bridge the runtime IDs into the STABLE sub-asset table
+     * (Phase 34A portable identity). Key strings arrive WITH the
+     * engine result (minted at the adopt site from file-authored
+     * names — the same strings that fed the ID derivation), so the
+     * sidecar persists exactly what the IDs encode. NULL entries
+     * (key-derivation load failed, or adopted-gap truncation) fall
+     * back to index-only keys loudly via the diagnostic. */
     {
         uint32_t i;
         char key[128];
@@ -289,7 +336,20 @@ static led_result led_import_gltf(led_session *s, led_db_record *r,
             le_asset_id id;
 
             memset(&id, 0, sizeof(id));
-            snprintf(key, sizeof(key), "mesh%u:prim0", i);
+            if (imp.mesh_keys != NULL &&
+                imp.mesh_keys[i] != NULL) {
+                strncpy(key, imp.mesh_keys[i],
+                        sizeof(key) - 1);
+                key[sizeof(key) - 1] = '\0';
+            } else {
+                /* Key-derivation load failed (or a gap truncated
+                 * the table): index-only fallback key. The ENGINE
+                 * ID for this asset was STILL minted from the true
+                 * sub-key (adopt site), so ID stability holds —
+                 * only the persisted string is coarser. Loud via
+                 * the count assertion in tests, not silent. */
+                snprintf(key, sizeof(key), "mesh%u:prim0", i);
+            }
             le_asset_get_id(e, &imp.mesh_assets[i], &id);
             /* grow sub table */
             if (r->sub_count >= r->sub_cap) {
@@ -330,11 +390,16 @@ static led_result led_import_gltf(led_session *s, led_db_record *r,
         }
         for (i = 0; i < imp.material_count; i++) {
             le_asset_id id;
-            char mname[64];
 
             memset(&id, 0, sizeof(id));
-            snprintf(mname, sizeof(mname), "mat%u", i);
-            snprintf(key, sizeof(key), "mat%u:%s", i, mname);
+            if (imp.material_keys != NULL &&
+                imp.material_keys[i] != NULL) {
+                strncpy(key, imp.material_keys[i],
+                        sizeof(key) - 1);
+                key[sizeof(key) - 1] = '\0';
+            } else {
+                snprintf(key, sizeof(key), "mat%u", i);
+            }
             le_asset_get_id(e, &imp.material_assets[i], &id);
             if (r->sub_count >= r->sub_cap) {
                 uint32_t grown =
@@ -439,8 +504,36 @@ static led_result led_import_script(led_session *s, led_db_record *r,
                                     const char *abs) {
     le_engine *e = s->engine;
     le_asset handle = LE_ASSET_INVALID;
-    le_result rc = le_asset_load_script(e, abs, &handle);
+    le_result rc;
+    /* Portable identity (Phase 34A): script IDs derive from
+     * (content || project-UUID) instead of (content || abs path).
+     * The abs-keyed dedup inside le_asset_load_script reuses slots
+     * within one process but mints location-bound IDs, so the
+     * project layer reads the bytes and creates with the project
+     * identity key (same content + same key => same ID; slots stay
+     * fresh per import, handles generational). */
+    unsigned char *bytes = NULL;
+    size_t size = 0;
 
+    if (!led_read_file_bytes(abs, &bytes, &size)) {
+        snprintf(r->diagnostic, sizeof(r->diagnostic),
+                 "script unreadable");
+        return LED_ERROR_IO;
+    }
+    {
+        le_script_asset_desc desc;
+        unsigned char idkey[16];
+
+        memset(&desc, 0, sizeof(desc));
+        led_identity_key_for(r, idkey);
+        desc.source = (const char *)bytes;
+        desc.size = size;
+        desc.path_hint = abs;
+        desc.identity_key = idkey;
+        desc.identity_len = sizeof(idkey);
+        rc = le_asset_create_script(e, &desc, &handle);
+    }
+    free(bytes);
     if (rc != LE_SUCCESS) {
         snprintf(r->diagnostic, sizeof(r->diagnostic),
                  "script load failed (%d)", (int)rc);

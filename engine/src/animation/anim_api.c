@@ -31,7 +31,23 @@ le_result le_asset_create_skeleton(
     if (rc != LE_SUCCESS) {
         return rc;
     }
-    le_uuid_mint(engine, &id.hi, &id.lo);
+    /* Portable identity (Phase 34A): keyed callers get
+     * le_identity_for_key IDs (relocation-stable); legacy callers
+     * keep minted UUIDs (each create distinct). */
+    if (desc->identity_key != NULL && desc->identity_len > 0 &&
+        desc->identity_sub_key != NULL &&
+        desc->identity_sub_key[0] != '\0') {
+        extern void le_identity_for_key(const void *key_bytes,
+                                        size_t key_len,
+                                        const char *sub_key,
+                                        le_asset_id *out_id);
+
+        le_identity_for_key(desc->identity_key,
+                            desc->identity_len,
+                            desc->identity_sub_key, &id);
+    } else {
+        le_uuid_mint(engine, &id.hi, &id.lo);
+    }
     idx = le_asset_alloc(engine, LE_ASSET_SKELETON, LE_ASSET_READY,
                          &id, NULL, &rc, &handle);
     if (idx < 0) {
@@ -62,7 +78,20 @@ le_result le_asset_create_clip(le_engine *engine,
     if (rc != LE_SUCCESS) {
         return rc;
     }
-    le_uuid_mint(engine, &id.hi, &id.lo);
+    if (desc->identity_key != NULL && desc->identity_len > 0 &&
+        desc->identity_sub_key != NULL &&
+        desc->identity_sub_key[0] != '\0') {
+        extern void le_identity_for_key(const void *key_bytes,
+                                        size_t key_len,
+                                        const char *sub_key,
+                                        le_asset_id *out_id);
+
+        le_identity_for_key(desc->identity_key,
+                            desc->identity_len,
+                            desc->identity_sub_key, &id);
+    } else {
+        le_uuid_mint(engine, &id.hi, &id.lo);
+    }
     idx = le_asset_alloc(engine, LE_ASSET_ANIMATION_CLIP,
                          LE_ASSET_READY, &id, NULL, &rc, &handle);
     if (idx < 0) {

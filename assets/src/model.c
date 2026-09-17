@@ -360,6 +360,7 @@ void la_model_teardown(la_model *model) {
                 lr_mesh_destroy(model->meshes[i].primitives[p].mesh);
             }
             free(model->meshes[i].primitives);
+            free(model->meshes[i].name);
         }
         free(model->meshes);
         model->meshes = NULL;
@@ -367,6 +368,7 @@ void la_model_teardown(la_model *model) {
     if (model->materials != NULL) {
         for (i = 0; i < model->material_count; i++) {
             lr_material_destroy(model->materials[i].material);
+            free(model->materials[i].name);
         }
         free(model->materials);
         model->materials = NULL;
@@ -394,6 +396,7 @@ void la_model_teardown(la_model *model) {
         for (i = 0; i < model->skin_count; i++) {
             free(model->skins[i].joint_nodes);
             free(model->skins[i].inv_bind);
+            free(model->skins[i].name);
         }
         free(model->skins);
         model->skins = NULL;
@@ -407,6 +410,7 @@ void la_model_teardown(la_model *model) {
                 free(model->anims[i].channels[c].values);
             }
             free(model->anims[i].channels);
+            free(model->anims[i].name);
         }
         free(model->anims);
         model->anims = NULL;
@@ -576,6 +580,91 @@ const la_pbr_material_data *la_model_get_material_data(
         return NULL;
     }
     return &model->materials[index].data;
+}
+
+/* Name borrowers (Phase 34A): file-authored names for stable
+ * sub-asset keys. Mesh names resolve through the first node that
+ * references the mesh slot (glTF meshes carry names, but the
+ * Crate-style fixtures name NODES, not meshes — node names are
+ * the useful authoring signal). */
+
+const char *la_model_get_mesh_name(const la_model *model,
+                                   uint32_t mesh_index) {
+    uint32_t i;
+
+    if (model == NULL || mesh_index >= model->mesh_count) {
+        return "";
+    }
+    if (model->meshes[mesh_index].name != NULL &&
+        model->meshes[mesh_index].name[0] != '\0') {
+        return model->meshes[mesh_index].name;
+    }
+    if (model->nodes != NULL) {
+        for (i = 0; i < model->node_count; i++) {
+            if (model->nodes[i].mesh_index == (int32_t)mesh_index &&
+                model->nodes[i].name != NULL &&
+                model->nodes[i].name[0] != '\0') {
+                return model->nodes[i].name;
+            }
+        }
+    }
+    return "";
+}
+
+const char *la_model_get_material_name(const la_model *model,
+                                       uint32_t material_index) {
+    if (model == NULL || material_index >= model->material_count) {
+        return "";
+    }
+    if (model->materials[material_index].name != NULL) {
+        return model->materials[material_index].name;
+    }
+    return "";
+}
+
+const char *la_model_get_skin_name(const la_model *model,
+                                   uint32_t skin_index) {
+    if (model == NULL || skin_index >= model->skin_count) {
+        return "";
+    }
+    if (model->skins[skin_index].name != NULL) {
+        return model->skins[skin_index].name;
+    }
+    return "";
+}
+
+const char *la_model_get_animation_name(const la_model *model,
+                                        uint32_t anim_index) {
+    if (model == NULL || anim_index >= model->anim_count) {
+        return "";
+    }
+    if (model->anims[anim_index].name != NULL) {
+        return model->anims[anim_index].name;
+    }
+    return "";
+}
+
+const char *la_model_get_image_name(const la_model *model,
+                                    uint32_t image_index) {
+    la_texture_info info;
+
+    memset(&info, 0, sizeof(info));
+    la_model_get_texture_info(model, image_index, &info);
+    if (info.source != NULL && info.source[0] != '\0') {
+        /* Prefer the trailing leaf of the source key (uri or
+         * embedded identity) — the full key embeds the model
+         * path, which is a locator, not a name. */
+        const char *leaf = info.source;
+        const char *s = NULL;
+
+        for (s = info.source; *s != '\0'; s++) {
+            if (*s == '/' || *s == '\\' || *s == '#') {
+                leaf = s + 1;
+            }
+        }
+        return leaf;
+    }
+    return "";
 }
 
 void la_model_get_texture_info(const la_model *model, uint32_t index,

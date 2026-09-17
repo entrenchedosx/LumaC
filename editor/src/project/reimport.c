@@ -189,6 +189,10 @@ led_result led_reimport_asset(led_session *session,
                             r->diagnostic);
                         return LED_ERROR_VALIDATION;
                     }
+                    /* Portable identity (Phase 34A): the engine
+                     * preserves the key half across set_source
+                     * (script_asset.c), so the live slot ID is
+                     * already correct — just republish it. */
                     le_asset_get_id(session->engine, &old_handle,
                                     &r->runtime_id);
                     r->has_runtime_id = 1;

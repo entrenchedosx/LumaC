@@ -620,6 +620,27 @@ la_result la_decode_skin_vertex(const cgltf_accessor *joints,
  * reordering, ever.
  * ------------------------------------------------------------------ */
 
+/* Copy a cgltf-authored name (mesh/material/skin/animation/image)
+ * into an owned heap string ("" when NULL). Returns NULL on OOM. */
+static char *la_copy_cgltf_name(const char *src) {
+    size_t n = 0;
+    char *copy = NULL;
+
+    if (src != NULL) {
+        n = strlen(src);
+    }
+    copy = (char *)malloc(n + 1u);
+    if (copy == NULL) {
+        return NULL;
+    }
+    if (n > 0) {
+        memcpy(copy, src, n + 1u);
+    } else {
+        copy[0] = '\0';
+    }
+    return copy;
+}
+
 static void la_compose_trs(const float t[3], const float q[4],
                            const float s[3], float out_m[16]) {
     lr_transform tr;
@@ -1352,6 +1373,10 @@ static la_result la_import_material(la_import *imp, cgltf_size mat_index,
 
     la_material_defaults(&mat->data);
     mat->material = NULL;
+    mat->name = la_copy_cgltf_name(src->name);
+    if (mat->name == NULL) {
+        return LA_ERROR_OUT_OF_MEMORY;
+    }
     if (src->has_pbr_metallic_roughness) {
         const cgltf_pbr_metallic_roughness *pbr =
             &src->pbr_metallic_roughness;
@@ -1861,6 +1886,11 @@ static la_result la_build_skins(la_import *imp) {
         la_model_skin *dst = &model->skins[s];
         cgltf_size j;
 
+        dst->name = la_copy_cgltf_name(src->name);
+        if (dst->name == NULL) {
+            la_set_error(imp->manager, "out of memory decoding skin");
+            return LA_ERROR_OUT_OF_MEMORY;
+        }
         if (src->joints_count == 0 ||
             src->joints_count > UINT32_MAX) {
             la_set_error(imp->manager, "skin has no joints");
@@ -2275,6 +2305,7 @@ static la_result la_build_anims(la_import *imp) {
                     la_free_channel(&kept[p].channels[k]);
                 }
                 free(kept[p].channels);
+                free(kept[p].name);
             }
             free(kept);
             return res;
@@ -2283,6 +2314,27 @@ static la_result la_build_anims(la_import *imp) {
             /* Morph-only (or empty) animation: excluded. */
             free(channels);
             continue;
+        }
+        kept[kept_count].name = la_copy_cgltf_name(src->name);
+        if (kept[kept_count].name == NULL) {
+            uint32_t k;
+            size_t p;
+
+            for (k = 0; k < n_kept; k++) {
+                la_free_channel(&channels[k]);
+            }
+            free(channels);
+            for (p = 0; p < (size_t)kept_count; p++) {
+                uint32_t k;
+
+                for (k = 0; k < kept[p].channel_count; k++) {
+                    la_free_channel(&kept[p].channels[k]);
+                }
+                free(kept[p].channels);
+                free(kept[p].name);
+            }
+            free(kept);
+            return LA_ERROR_OUT_OF_MEMORY;
         }
         if (n_kept < src->channels_count) {
             /* Shrink to the kept prefix (keeps borrowing math
@@ -2351,6 +2403,10 @@ static la_result la_build_meshes(la_import *imp) {
         la_model_mesh *dst = &model->meshes[mi];
         size_t pi;
 
+        dst->name = la_copy_cgltf_name(src->name);
+        if (dst->name == NULL) {
+            return LA_ERROR_OUT_OF_MEMORY;
+        }
         if (src->primitives_count == 0 ||
             src->primitives_count > UINT32_MAX) {
             la_set_error(imp->manager, "mesh has no primitives");

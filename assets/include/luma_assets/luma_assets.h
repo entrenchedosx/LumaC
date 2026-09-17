@@ -263,6 +263,25 @@ const la_model_node *la_model_get_node(const la_model *model,
 const la_pbr_material_data *la_model_get_material_data(
     const la_model *model, uint32_t index);
 
+/** Borrow one mesh/material/skin/animation/image name ("" when
+ *  unnamed or unavailable; model-owned storage, valid while the
+ *  model lives; NULL model yields ""). Names are file-authored
+ *  (glTF `name` fields) and feed stable sub-asset keys — see
+ *  docs/PORTABLE_IDENTITY.md. Mesh names are the FIRST node name
+ *  referencing the mesh slot ("" when unreferenced); material,
+ *  skin, animation names are file-order names; image names prefer
+ *  the glTF image `name`, falling back to the uri. */
+const char *la_model_get_mesh_name(const la_model *model,
+                                   uint32_t mesh_index);
+const char *la_model_get_material_name(const la_model *model,
+                                       uint32_t material_index);
+const char *la_model_get_skin_name(const la_model *model,
+                                   uint32_t skin_index);
+const char *la_model_get_animation_name(const la_model *model,
+                                        uint32_t anim_index);
+const char *la_model_get_image_name(const la_model *model,
+                                    uint32_t image_index);
+
 /** Borrow one referenced texture's info (0-filled when unavailable;
  *  `out` may be NULL for a no-op). */
 void la_model_get_texture_info(const la_model *model, uint32_t index,

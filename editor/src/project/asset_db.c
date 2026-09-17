@@ -864,6 +864,26 @@ static void led_record_to_snapshot(const led_db_record *r,
     out->settings_digest = r->settings_digest;
     out->dependency_count = r->dep_count;
     out->sub_asset_count = r->sub_count;
+    /* Copy stable sub-asset key strings (bounded: 64; the count
+     * above stays exact even when truncated). */
+    {
+        uint32_t k;
+        uint32_t ncopy =
+            (r->sub_count < 64u) ? r->sub_count : 64u;
+
+        out->sub_key_count = ncopy;
+        for (k = 0; k < ncopy; k++) {
+            if (r->sub_keys != NULL &&
+                r->sub_keys[k] != NULL) {
+                strncpy(out->sub_keys[k], r->sub_keys[k],
+                        sizeof(out->sub_keys[k]) - 1);
+                out->sub_keys[k][sizeof(out->sub_keys[k]) - 1] =
+                    '\0';
+            } else {
+                out->sub_keys[k][0] = '\0';
+            }
+        }
+    }
     out->runtime_asset = r->runtime_asset;
     out->has_runtime_asset = r->has_runtime_asset;
     out->runtime_id = r->runtime_id;

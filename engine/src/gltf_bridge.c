@@ -53,7 +53,42 @@ static int le_gltf_find_live(const le_engine *engine,
 
 le_result le_gltf_import(le_engine *engine, const char *path,
                          le_gltf_result *out_import) {
+    return le_gltf_import_with_key(engine, path, NULL, 0,
+                                   out_import);
+}
+
+/* Sanitize a file-authored name into a sub-asset key fragment:
+ * lowercase alnum kept, everything else -> '_', capped at 47
+ * chars. Empty/unavailable names yield "" (caller falls back to
+ * index-only keys). */
+static void le_gltf_sanitize(const char *src, char out[48]) {
+    size_t i = 0;
+
+    memset(out, 0, 48);
+    if (src == NULL) {
+        return;
+    }
+    while (src[i] != '\0' && i < 47) {
+        char c = src[i];
+
+        if (c >= 'A' && c <= 'Z') {
+            c = (char)(c - 'A' + 'a');
+        }
+        if (!((c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9'))) {
+            c = '_';
+        }
+        out[i] = c;
+        i++;
+    }
+}
+
+le_result le_gltf_import_with_key(le_engine *engine, const char *path,
+                                  const void *identity_key,
+                                  size_t identity_len,
+                                  le_gltf_result *out_import) {
     char normalized[1024];
+    int has_key = 0;
     la_asset_manager *manager = NULL;
     la_model *model = NULL;
     la_result lar;
@@ -84,6 +119,12 @@ le_result le_gltf_import(le_engine *engine, const char *path,
     if (!le_normalize_source(path, normalized, sizeof(normalized))) {
         return LE_ERROR_INVALID_ARGUMENT;
     }
+    /* Portable identity (Phase 34A): a caller-supplied key
+     * (project UUID + relative locator) replaces the access path
+     * in persistent ID derivation. The `source` locator string in
+     * the registry stays the normalized access path (file reads +
+     * dedup still work); only the minted IDs change. */
+    has_key = (identity_key != NULL && identity_len > 0) ? 1 : 0;
     /* Reject escapes above the project root (lexical leading ..):
      * loaders must not read outside the project. */
     if (normalized[0] == '.' && normalized[1] == '.' &&
@@ -238,18 +279,41 @@ load_nodes_only:
                 out->mesh_asset = -1;
                 out->material_asset = -1;
                 /* Map (mi,pi=0) to registry assets by persistent
-                 * ID {(src hash),(mi<<32|pi)}. */
+                 * ID. Legacy: {(src hash),(mi<<32|pi)}. Keyed
+                 * (Phase 34A): le_identity_for_key(key, sub-key)
+                 * with the SAME sub-key the full import mints
+                 * below ("mesh<mi>:prim0[:<name>]"). */
                 if (nd->mesh_index >= 0) {
                     uint32_t mi = (uint32_t)nd->mesh_index;
                     le_asset_id want;
                     uint32_t q;
 
-                    want.hi = le_fnv1a64(normalized,
-                                         strlen(normalized));
-                    want.lo =
-                        (((uint64_t)mi << 32) | 0u) ^ want.hi;
-                    if (want.hi == 0 && want.lo == 0) {
-                        want.lo = 1;
+                    if (has_key) {
+                        char sub[128];
+                        char frag[48];
+                        const char *mn =
+                            la_model_get_mesh_name(m2model, mi);
+
+                        le_gltf_sanitize(mn, frag);
+                        if (frag[0] != '\0') {
+                            snprintf(sub, sizeof(sub),
+                                     "mesh%u:prim0:%s", mi, frag);
+                        } else {
+                            snprintf(sub, sizeof(sub),
+                                     "mesh%u:prim0", mi);
+                        }
+                        le_identity_for_key(
+                            identity_key, identity_len, sub,
+                            &want);
+                    } else {
+                        want.hi = le_fnv1a64(normalized,
+                                             strlen(normalized));
+                        want.lo =
+                            (((uint64_t)mi << 32) | 0u) ^
+                            want.hi;
+                        if (want.hi == 0 && want.lo == 0) {
+                            want.lo = 1;
+                        }
                     }
                     for (q = 0; q < nmesh; q++) {
                         uint32_t aslot;
@@ -382,10 +446,27 @@ full_import:
         if (rmat == NULL) {
             continue;
         }
-        /* Persistent ID: content hash of PBR factors (stable
-         * across runs for identical materials). */
+        /* Persistent ID (Phase 34A): when the caller supplies an
+         * identity key, `mat<i>[:<name>]` feeds
+         * le_identity_for_key — location-free, reorder-robust for
+         * named materials, index-stable otherwise. Legacy (no key):
+         * content hash of PBR factors + path + index (unchanged). */
         md = la_model_get_material_data(model, i);
-        {
+        if (has_key) {
+            char sub[128];
+            char frag[48];
+            const char *mname =
+                la_model_get_material_name(model, i);
+
+            le_gltf_sanitize(mname, frag);
+            if (frag[0] != '\0') {
+                snprintf(sub, sizeof(sub), "mat%u:%s", i, frag);
+            } else {
+                snprintf(sub, sizeof(sub), "mat%u", i);
+            }
+            le_identity_for_key(identity_key, identity_len,
+                                sub, &id);
+        } else {
             uint64_t h = 14695981039346656037ull;
             const unsigned char *p;
             size_t k;
@@ -536,12 +617,44 @@ full_import:
                             rmesh == NULL) {
                             continue;
                         }
-                        id.hi = le_fnv1a64(normalized,
-                                           strlen(normalized));
-                        id.lo = ((uint64_t)mi << 32) | pi;
-                        id.lo ^= id.hi;
-                        if (id.hi == 0 && id.lo == 0) {
-                            id.lo = 1;
+                        /* Persistent ID (Phase 34A): keyed form is
+                         * le_identity_for_key(key,
+                         * "mesh<mi>:prim<pi>[:<name>]") — the SAME
+                         * sub-key the dedup path + project sidecar
+                         * use (name = first referencing node name,
+                         * sanitized; index-only when unnamed).
+                         * Legacy (no key): {(src hash),
+                         * (mi<<32|pi)} (unchanged). */
+                        if (has_key) {
+                            char sub[128];
+                            char frag[48];
+                            const char *mn =
+                                la_model_get_mesh_name(model,
+                                                       mi);
+
+                            le_gltf_sanitize(mn, frag);
+                            if (frag[0] != '\0') {
+                                snprintf(sub, sizeof(sub),
+                                         "mesh%u:prim%u:%s", mi,
+                                         pi, frag);
+                            } else {
+                                snprintf(sub, sizeof(sub),
+                                         "mesh%u:prim%u", mi,
+                                         pi);
+                            }
+                            le_identity_for_key(
+                                identity_key, identity_len, sub,
+                                &id);
+                        } else {
+                            id.hi = le_fnv1a64(normalized,
+                                               strlen(
+                                                   normalized));
+                            id.lo =
+                                ((uint64_t)mi << 32) | pi;
+                            id.lo ^= id.hi;
+                            if (id.hi == 0 && id.lo == 0) {
+                                id.lo = 1;
+                            }
                         }
                         idx = le_asset_alloc(
                             engine, LE_ASSET_MESH, LE_ASSET_READY,
@@ -652,12 +765,146 @@ full_import:
     out_import->texture_count = 0;
     out_import->nodes = nodes;
     out_import->node_count = nnode;
+    /* Re-derive the stable key strings for the published assets
+     * (Phase 34A): the per-asset mint sites above know (mi,pi,i)
+     * but the listing order must map back. Mesh assets publish in
+     * adoption order (mi ascending, pi ascending — the node walk
+     * visits nodes in order and primitives in order); material
+     * assets publish in model-material order. Recompute keys from
+     * a fresh metadata-only model load: authoritative (names come
+     * from the file, not from recollection), bounded (import-time
+     * only, freed below). On any failure the key arrays stay NULL
+     * (IDs are still correct; only the strings are absent — the
+     * project layer falls back to index-only keys loudly). */
+    {
+        la_asset_manager *kman = engine->gltf_manager;
+        la_model *kmodel = NULL;
+
+        if (kman != NULL &&
+            la_model_load(kman, normalized, &kmodel) ==
+                LA_SUCCESS &&
+            kmodel != NULL) {
+            uint32_t ki;
+
+            if (nmesh > 0) {
+                out_import->mesh_keys = (char **)calloc(
+                    nmesh, sizeof(char *));
+            }
+            if (nmat > 0) {
+                out_import->material_keys = (char **)calloc(
+                    nmat, sizeof(char *));
+            }
+            if ((nmesh == 0 ||
+                 out_import->mesh_keys != NULL) &&
+                (nmat == 0 ||
+                 out_import->material_keys != NULL)) {
+                /* Walk (mi,pi) in the same order the adoption
+                 * loop visited them: node order, primitive
+                 * order. */
+                uint32_t kn = 0;
+                uint32_t nnd =
+                    la_model_get_node_count(kmodel);
+
+                for (ki = 0; ki < nnd && kn < nmesh; ki++) {
+                    const la_model_node *knd =
+                        la_model_get_node(kmodel, ki);
+                    uint32_t kmi;
+                    uint32_t kpc;
+                    uint32_t kpi;
+
+                    if (knd == NULL || knd->mesh_index < 0) {
+                        continue;
+                    }
+                    kmi = (uint32_t)knd->mesh_index;
+                    kpc = la_model_get_primitive_count(kmodel,
+                                                       kmi);
+                    for (kpi = 0;
+                         kpi < kpc && kn < nmesh; kpi++) {
+                        char sub[128];
+                        char frag[48];
+
+                        le_gltf_sanitize(
+                            la_model_get_mesh_name(kmodel,
+                                                   kmi),
+                            frag);
+                        if (frag[0] != '\0') {
+                            snprintf(sub, sizeof(sub),
+                                     "mesh%u:prim%u:%s", kmi,
+                                     kpi, frag);
+                        } else {
+                            snprintf(sub, sizeof(sub),
+                                     "mesh%u:prim%u", kmi,
+                                     kpi);
+                        }
+                        /* Adopted assets may skip (adopt
+                         * failures `continue` above) — map
+                         * positionally while counts align;
+                         * stop at the first gap (honest: keys
+                         * beyond a gap are omitted, never
+                         * misassigned). */
+                        {
+                            char *kc = (char *)malloc(
+                                strlen(sub) + 1u);
+
+                            if (kc == NULL) {
+                                break;
+                            }
+                            memcpy(kc, sub,
+                                   strlen(sub) + 1u);
+                            out_import->mesh_keys[kn++] = kc;
+                        }
+                    }
+                }
+                for (ki = 0;
+                     ki < la_model_get_material_count(kmodel) &&
+                     ki < nmat;
+                     ki++) {
+                    char sub[128];
+                    char frag[48];
+                    char *kc = NULL;
+
+                    le_gltf_sanitize(
+                        la_model_get_material_name(kmodel,
+                                                   ki),
+                        frag);
+                    if (frag[0] != '\0') {
+                        snprintf(sub, sizeof(sub), "mat%u:%s",
+                                 ki, frag);
+                    } else {
+                        snprintf(sub, sizeof(sub), "mat%u",
+                                 ki);
+                    }
+                    kc = (char *)malloc(strlen(sub) + 1u);
+                    if (kc == NULL) {
+                        break;
+                    }
+                    memcpy(kc, sub, strlen(sub) + 1u);
+                    out_import->material_keys[ki] = kc;
+                }
+            }
+            la_model_destroy(kmodel);
+        }
+    }
     return LE_SUCCESS;
 }
 
 void le_gltf_import_free(le_gltf_result *import) {
+    uint32_t i;
+
     if (import == NULL) {
         return;
+    }
+    if (import->mesh_keys != NULL) {
+        for (i = 0; i < import->mesh_count; i++) {
+            free(import->mesh_keys[i]);
+        }
+        free(import->mesh_keys);
+    }
+    if (import->material_keys != NULL) {
+        for (i = 0; i < import->material_count; i++) {
+            free(import->material_keys[i]);
+        }
+        free(import->material_keys);
     }
     free(import->mesh_assets);
     free(import->material_assets);

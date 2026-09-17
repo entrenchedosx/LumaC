@@ -250,6 +250,40 @@ le_result le_gltf_import_animated(le_engine *engine,
                                   const la_model *model,
                                   uint32_t skin_index,
                                   le_gltf_animated *out_anim) {
+    return le_gltf_import_animated_with_key(engine, model,
+                                            skin_index, NULL, 0,
+                                            out_anim);
+}
+
+/* Sanitize a file-authored name into a sub-asset key fragment
+ * (same vocabulary as gltf_bridge.c: lowercase alnum, else '_',
+ * capped at 47). */
+static void le_anim_sanitize(const char *src, char out[48]) {
+    size_t i = 0;
+
+    memset(out, 0, 48);
+    if (src == NULL) {
+        return;
+    }
+    while (src[i] != '\0' && i < 47) {
+        char c = src[i];
+
+        if (c >= 'A' && c <= 'Z') {
+            c = (char)(c - 'A' + 'a');
+        }
+        if (!((c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9'))) {
+            c = '_';
+        }
+        out[i] = c;
+        i++;
+    }
+}
+
+le_result le_gltf_import_animated_with_key(
+    le_engine *engine, const la_model *model, uint32_t skin_index,
+    const void *identity_key, size_t identity_len,
+    le_gltf_animated *out_anim) {
     uint32_t njoints;
     uint32_t j;
     int32_t *joint_nodes = NULL;
@@ -478,14 +512,37 @@ le_result le_gltf_import_animated(le_engine *engine,
     free(globals);
     globals = NULL;
     /* Create the skeleton asset (validates hierarchy; nothing
-     * created on failure). */
+     * created on failure). Keyed (Phase 34A): `skin<si>[:<name>]`
+     * identity flows into the persistent ID so skeletons survive
+     * relocation + reimport. */
     {
         le_skeleton_asset_desc sd;
+        char sk_sub[128];
+        int have_key = 0;
 
         memset(&sd, 0, sizeof(sd));
         sd.joints = joints;
         sd.joint_count = njoints;
+        if (identity_key != NULL && identity_len > 0) {
+            char frag[48];
+            const char *sn =
+                la_model_get_skin_name(model, skin_index);
+
+            le_anim_sanitize(sn, frag);
+            if (frag[0] != '\0') {
+                snprintf(sk_sub, sizeof(sk_sub), "skin%u:%s",
+                         skin_index, frag);
+            } else {
+                snprintf(sk_sub, sizeof(sk_sub), "skin%u",
+                         skin_index);
+            }
+            sd.identity_key = identity_key;
+            sd.identity_len = identity_len;
+            sd.identity_sub_key = sk_sub;
+            have_key = 1;
+        }
         rc = le_asset_create_skeleton(engine, &sd, &skeleton);
+        (void)have_key;
         free(joints);
         joints = NULL;
         if (rc != LE_SUCCESS) {
@@ -600,11 +657,33 @@ le_result le_gltf_import_animated(le_engine *engine,
             {
                 le_animation_clip_desc cd;
                 le_asset h = LE_ASSET_INVALID;
+                char clip_sub[128];
 
                 memset(&cd, 0, sizeof(cd));
                 cd.duration = duration;
                 cd.tracks = tracks;
                 cd.track_count = nt;
+                /* Keyed (Phase 34A): `clip<ai>[:<name>]`. NOTE:
+                 * `a` is the FILE animation index (not the kept
+                 * ordinal): morph-only exclusions shift kept
+                 * ordinals, file indices stay stable. */
+                if (identity_key != NULL && identity_len > 0) {
+                    char frag[48];
+                    const char *an =
+                        la_model_get_animation_name(model, a);
+
+                    le_anim_sanitize(an, frag);
+                    if (frag[0] != '\0') {
+                        snprintf(clip_sub, sizeof(clip_sub),
+                                 "clip%u:%s", a, frag);
+                    } else {
+                        snprintf(clip_sub, sizeof(clip_sub),
+                                 "clip%u", a);
+                    }
+                    cd.identity_key = identity_key;
+                    cd.identity_len = identity_len;
+                    cd.identity_sub_key = clip_sub;
+                }
                 rc = le_asset_create_clip(engine, &cd, &h);
                 free(tracks);
                 if (rc != LE_SUCCESS) {
