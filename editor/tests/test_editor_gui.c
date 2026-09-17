@@ -1,11 +1,13 @@
-/* Phase 33 GUI public-ABI probes (headless): input ownership
- * defaults, clip->scissor clamping, draw-walk budget caps.
+/* Phase 33 GUI public-ABI probes (headless): NULL-context refusal,
+ * clip->scissor clamping, draw-walk budget caps.
  *
  * No window, no GPU, no renderer, no Dear ImGui linkage: these tests
  * drive ONLY the C ABI in luma_editor.h (leg_* pure helpers) plus a
  * NULL-context leg_context_create refusal probe. GPU-backed proofs
  * (font upload, blended draws, viewport composite) live in
- * test_editor_gui_gpu.
+ * test_editor_gui_gpu — including the positive leg_feed_event
+ * mapping matrix (Phase 33V: this file never tested input mapping;
+ * the old header claiming "input ownership defaults" overstated it).
  */
 
 #include <math.h>

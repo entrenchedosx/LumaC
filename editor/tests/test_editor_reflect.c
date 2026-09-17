@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <lumac/lumac.h>
 #include <luma_editor/luma_editor.h>
 
 static int g_passed = 0;
@@ -601,26 +602,35 @@ int main(void) {
             TEST_CHECK(le_world_get_object_count(w) == 100000,
                        "100k count");
             {
-                uint64_t t0 = 0;
-                uint64_t t1 = 0;
-                le_object *buf = NULL;
+                /* Real wall clock (Phase 33V: the old t0=0/t1=1 stub
+                 * asserted a count while claiming timing). */
+                uint64_t freq = lc_clock_frequency();
+                uint64_t t0 = lc_clock_now();
                 uint32_t got = 0;
+                le_object *buf = NULL;
+
+                if (freq == 0) {
+                    freq = 1000000000ull;
+                }
 
                 buf = (le_object *)malloc(100000 *
                                           sizeof(*buf));
                 TEST_CHECK(buf != NULL, "enum buffer");
                 if (buf != NULL) {
-                    /* ms clock via reflection-free tick. */
-                    t0 = 0;
+                    uint64_t t1 = 0;
+                    double ms = 0.0;
+
                     got = le_world_get_all_objects(w, buf,
                                                    100000);
-                    t1 = 1;
+                    t1 = lc_clock_now();
+                    ms = (t1 >= t0)
+                             ? (double)(t1 - t0) * 1000.0 /
+                                   (double)freq
+                             : 0.0;
                     TEST_CHECK(got == 100000, "100k enumerated");
-                    printf("[INFO] 100k enumeration: %u objects "
-                           "(timing reported, not asserted)\n",
-                           got);
-                    (void)t0;
-                    (void)t1;
+                    printf("[INFO] 100k enumeration: %u objects in "
+                           "%.2f ms (reported, not asserted)\n",
+                           got, ms);
                     free(buf);
                 }
             }

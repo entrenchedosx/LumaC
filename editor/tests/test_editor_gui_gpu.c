@@ -182,6 +182,60 @@ int main(void) {
     TEST_CHECK(leg_set_ini_path(gui, NULL) == LED_SUCCESS,
                "gui ini default");
 
+    /* Phase 33V: positive input-mapping matrix (the headless suite
+     * only NULL-probes leg_feed_event; the mapping table itself was
+     * untested). Synthetic events straight into the live context —
+     * no window queue drain involved. */
+    {
+        lc_window_event ev;
+
+        memset(&ev, 0, sizeof(ev));
+        ev.type = LC_EVENT_KEY_DOWN;
+        ev.key = LC_KEY_A;
+        TEST_CHECK(leg_feed_event(gui, &ev) == 1, "feed key A");
+        ev.type = LC_EVENT_KEY_UP;
+        TEST_CHECK(leg_feed_event(gui, &ev) == 1, "feed key A up");
+        memset(&ev, 0, sizeof(ev));
+        ev.type = LC_EVENT_KEY_DOWN;
+        ev.key = LC_KEY_RIGHT_SHIFT;
+        ev.mods = LC_MOD_SHIFT;
+        TEST_CHECK(leg_feed_event(gui, &ev) == 1,
+                   "feed right shift");
+        memset(&ev, 0, sizeof(ev));
+        ev.type = LC_EVENT_CHAR;
+        ev.utf8[0] = 'x';
+        ev.utf8_len = 1;
+        TEST_CHECK(leg_feed_event(gui, &ev) == 1, "feed char");
+        memset(&ev, 0, sizeof(ev));
+        ev.type = LC_EVENT_MOUSE_MOVE;
+        ev.mouse_x = 100.0f;
+        ev.mouse_y = 120.0f;
+        TEST_CHECK(leg_feed_event(gui, &ev) == 1, "feed mouse move");
+        memset(&ev, 0, sizeof(ev));
+        ev.type = LC_EVENT_MOUSE_DOWN;
+        ev.button = LC_MOUSE_LEFT;
+        ev.mouse_x = 100.0f;
+        ev.mouse_y = 120.0f;
+        TEST_CHECK(leg_feed_event(gui, &ev) == 1,
+                   "feed mouse down");
+        memset(&ev, 0, sizeof(ev));
+        ev.type = LC_EVENT_MOUSE_WHEEL;
+        ev.wheel_y = 1.0f;
+        TEST_CHECK(leg_feed_event(gui, &ev) == 1, "feed wheel");
+        /* Host-owned events are never consumed as GUI input. */
+        memset(&ev, 0, sizeof(ev));
+        ev.type = LC_EVENT_FOCUS_LOST;
+        TEST_CHECK(leg_feed_event(gui, &ev) == 0,
+                   "feed focus lost ignored");
+        /* Control chars never reach fields. */
+        memset(&ev, 0, sizeof(ev));
+        ev.type = LC_EVENT_CHAR;
+        ev.utf8[0] = 0x01;
+        ev.utf8_len = 1;
+        TEST_CHECK(leg_feed_event(gui, &ev) == 0,
+                   "feed control char refused");
+    }
+
     led_viewport_default(&vp);
     vp.width = fw;
     vp.height = fh;

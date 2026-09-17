@@ -1,9 +1,16 @@
-/* Phase 33 editor demo builder: creates editor/demo/Phase33Demo/
- * (a portable Luma Project: manifest + Assets/ + Scenes/Main)
- * through the PUBLIC led_* project/scene/prefab API — the same
- * workflow the desktop app drives via GUI (open project -> browse
- * assets -> open scene -> create -> prefab -> save). Headless (no
- * window/GPU); run from the repo root:
+/* Phase 33 editor demo FIXTURE builder (not a verification test):
+ * creates editor/demo/Phase33Demo/ (a portable Luma Project:
+ * manifest + Assets/ + Scenes/Main) through the PUBLIC led_*
+ * project/scene/prefab API. CTest runs it for its SIDE EFFECT (the
+ * fixture other evidence depends on), NOT as proof of any workflow:
+ * it drives no window, no GPU, no panel, no mouse, no viewport, and
+ * its "Play oracle" ticks a deliberately de-scripted world (the
+ * script is detached for portable save), so it proves nothing about
+ * scripts, the GUI, or rendering. See
+ * docs/PHASE33_VERIFICATION_AUDIT.md §13 (rated NOT ACTUALLY TESTING
+ * CLAIM as a test; kept as a fixture generator).
+ *
+ * Headless (no window/GPU); run from the repo root:
  *
  *   build/editor/Debug/editor_demo_phase33.exe
  *

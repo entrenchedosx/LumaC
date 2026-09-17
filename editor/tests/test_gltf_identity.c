@@ -1,19 +1,25 @@
-/* Phase 32 glTF identity tests (Vulkan-gated, headless-safe
- * SKIP without a device): import BoxTextured.glb through the
- * PROJECT import layer (led_import_asset over luma.gltf), record
- * the published sub-asset persistent IDs + representative runtime
- * IDs, reimport the identical source (IDs stable, handles
- * re-published per new-handle policy), and verify the sub-asset
- * key vocabulary (mesh<mi>:prim<pi> meshes, mat<mi>:<name>
- * materials) round-trips through the sidecar (close + reopen ->
- * same sub IDs).
+/* Phase 32 glTF identity tests (Vulkan-gated): import
+ * BoxTextured.glb through the PROJECT import layer (led_import_asset
+ * over luma.gltf), record the published sub-asset persistent IDs +
+ * representative runtime IDs, reimport the identical source (IDs
+ * stable, handles re-published per new-handle policy), and verify
+ * identity round-trips through the sidecar (close + reopen -> same
+ * sub IDs).
  *
  * What this proves: stable reimport identity for identical bytes
  * at the project layer. What it does NOT prove (documented):
  * reorder-robustness of ENGINE material IDs (factor-hash debt in
  * gltf_bridge.c) — the project keys are index-derived until the
  * model layer exposes material names; the debt is tracked, not
- * hidden.
+ * hidden. It also does NOT check individual sub-asset key STRINGS
+ * (only the sub-asset COUNT + representative runtime ID) — the
+ * header's old "key vocabulary" sentence overstated this; the
+ * assertion gap is recorded in docs/PHASE33_VERIFICATION_AUDIT.md.
+ *
+ * SKIP policy (Phase 33V fix): without a Vulkan device the test
+ * SKIPs (exit 0) ONLY by default; setting LUMA_REQUIRE_GPU=1 in the
+ * environment turns SKIP into a hard failure, so GPU CI runners
+ * cannot go green with glTF import 100% broken.
  */
 
 #include <stdint.h>
@@ -47,7 +53,15 @@ static int g_failed = 0;
 } while (0)
 
 #define SKIP_ENV(what) do { \
-    printf("SKIP: environment cannot provide %s\n", what); \
+    const char *req = getenv("LUMA_REQUIRE_GPU"); \
+    if (req != NULL && req[0] != '\0' && req[0] != '0') { \
+        printf("[FAIL] GPU required (LUMA_REQUIRE_GPU=1) but %s " \
+               "unavailable\n", what); \
+        lc_shutdown(); \
+        return 1; \
+    } \
+    printf("SKIP: environment cannot provide %s " \
+           "(set LUMA_REQUIRE_GPU=1 to fail instead)\n", what); \
     lc_shutdown(); \
     return 0; \
 } while (0)
