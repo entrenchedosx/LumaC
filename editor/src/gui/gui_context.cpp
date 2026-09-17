@@ -74,8 +74,16 @@ led_result leg_context_create(led_session *session,
         io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
         io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
         io.BackendRendererName = "luma_gui_lumac";
-        /* Layout INI separation: never beside scenes/prefabs. */
+        /* Layout INI separation: never beside scenes/prefabs. NULL =
+         * in-memory layout (deterministic default every launch via
+         * gui_layout.cpp); a host-provided path is honored verbatim
+         * (see leg_set_ini_path). */
         io.IniFilename = NULL;
+        /* Luma Slate theme + system UI font (before the first frame
+         * so the atlas builds with the chosen face; the font walk in
+         * gui_font.cpp uploads whatever the atlas holds). */
+        leg_theme_apply();
+        leg_font_load();
     }
     *out_context = ctx;
     return LED_SUCCESS;
@@ -117,6 +125,10 @@ led_result leg_set_ini_path(leg_context *context, const char *path) {
     if (path == NULL || path[0] == '\0') {
         context->has_ini_path = 0;
         context->ini_path[0] = '\0';
+        if (context->imgui != NULL) {
+            ImGui::SetCurrentContext(context->imgui);
+            ImGui::GetIO().IniFilename = NULL;
+        }
         return LED_SUCCESS;
     }
     if (strlen(path) >= sizeof(context->ini_path)) {
@@ -125,6 +137,13 @@ led_result leg_set_ini_path(leg_context *context, const char *path) {
     strncpy(context->ini_path, path, sizeof(context->ini_path) - 1);
     context->ini_path[sizeof(context->ini_path) - 1] = '\0';
     context->has_ini_path = 1;
+    /* Honor the host path immediately (previously stored but never
+     * assigned — dead plumbing fixed in Phase 33V). io keeps the
+     * pointer; context->ini_path outlives the context. */
+    if (context->imgui != NULL) {
+        ImGui::SetCurrentContext(context->imgui);
+        ImGui::GetIO().IniFilename = context->ini_path;
+    }
     return LED_SUCCESS;
 }
 

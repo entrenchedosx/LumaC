@@ -79,13 +79,18 @@ led_result leg_frame_begin(leg_context *context, lc_window *window,
             if (ev.type == LC_EVENT_NONE) {
                 break;
             }
+            /* Focus loss releases held-state pressure: an OS-level
+             * focus drop without matching key-ups would stick keys
+             * (the old code documented the release but no-op'd it —
+             * fixed in Phase 33V). */
+            if (ev.type == LC_EVENT_FOCUS_LOST) {
+                io.ClearInputKeys();
+            }
             leg_map_one_for_frame(io, &ev);
         }
-        /* Focus loss clears held-state pressure: ImGui keys derive
-         * from events, but an OS-level focus drop without matching
-         * key-ups would stick modifiers — mirror the lc_key_mod
-         * truth by releasing when unfocused. (Mouse position stays;
-         * viewports yield while unfocused via frame_minimized.) */
+        /* Focus state is consumed above (ClearInputKeys on loss);
+         * window_focused remains host-observed (minimize handling),
+         * not GUI-consumed. */
         (void)input->window_focused;
     }
     context->frame_w = input->window_width;
@@ -94,10 +99,13 @@ led_result leg_frame_begin(leg_context *context, lc_window *window,
         (input->window_width == 0 || input->window_height == 0) ? 1
                                                                 : 0;
     context->frame_open = 1;
-    /* Open the dockspace root: upstream docking, single call. */
+    /* Open a new ImGui frame. The dockspace root is submitted by the
+     * panels frame itself (LEG_DOCK_ROOT inside the dock-host window
+     * below the menu/toolbar chrome — see gui_panels.cpp), so the
+     * loop never imposes a fullscreen dockspace that would fight the
+     * fixed chrome windows. */
     if (!context->frame_minimized) {
         ImGui::NewFrame();
-        ImGui::DockSpaceOverViewport();
     }
     return LED_SUCCESS;
 }

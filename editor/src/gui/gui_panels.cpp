@@ -118,7 +118,6 @@ static int leg_run(leg_context *ctx, const led_command *cmd,
 /* ------------------------------------------------------------------ */
 
 static void leg_menu_file(leg_context *ctx, leg_ui *ui) {
-    (void)ui;
     if (ImGui::BeginMenu("File")) {
         if (ImGui::MenuItem("New scene")) {
             if (led_scene_new(ctx->session) == LED_SUCCESS) {
@@ -127,6 +126,12 @@ static void leg_menu_file(leg_context *ctx, leg_ui *ui) {
                 leg_status(ctx, "New scene failed (playing?)", 1);
             }
         }
+        if (ImGui::MenuItem("Open scene...")) {
+            ui->scene_path_stage[0] = '\0';
+            ui->show_open_scene_popup = 1;
+            ImGui::OpenPopup("Open scene");
+        }
+        ImGui::Separator();
         if (ImGui::MenuItem("Save scene", "Ctrl+S",
                             false, !led_is_playing(ctx->session))) {
             led_result rc = led_scene_save(ctx->session);
@@ -138,6 +143,20 @@ static void leg_menu_file(leg_context *ctx, leg_ui *ui) {
                            1);
             }
         }
+        if (ImGui::MenuItem("Save scene as...")) {
+            const char *cur = led_scene_get_path(ctx->session);
+
+            if (cur != NULL) {
+                strncpy(ui->scene_path_stage, cur,
+                        sizeof(ui->scene_path_stage) - 1);
+                ui->scene_path_stage[sizeof(ui->scene_path_stage) -
+                                     1] = '\0';
+            } else {
+                ui->scene_path_stage[0] = '\0';
+            }
+            ui->show_save_as_popup = 1;
+            ImGui::OpenPopup("Save scene as");
+        }
         if (ImGui::MenuItem("Revert scene", NULL, false,
                             !led_is_playing(ctx->session))) {
             if (led_scene_revert(ctx->session) == LED_SUCCESS) {
@@ -147,6 +166,54 @@ static void leg_menu_file(leg_context *ctx, leg_ui *ui) {
             }
         }
         ImGui::EndMenu();
+    }
+    /* Scene-path popups (modal text fields; the session remembers
+     * the path as given — no stored absolute paths). */
+    if (ImGui::BeginPopupModal("Open scene", NULL,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::InputText("Scene path", ui->scene_path_stage,
+                         sizeof(ui->scene_path_stage));
+        ImGui::TextDisabled("Project-relative (.luma_scene)");
+        if (ImGui::Button("Open")) {
+            if (led_scene_open(ctx->session,
+                               ui->scene_path_stage) ==
+                LED_SUCCESS) {
+                leg_status(ctx, "Scene opened", 0);
+            } else {
+                leg_status(ctx, "Scene open failed", 1);
+            }
+            ImGui::CloseCurrentPopup();
+            ui->show_open_scene_popup = 0;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            ImGui::CloseCurrentPopup();
+            ui->show_open_scene_popup = 0;
+        }
+        ImGui::EndPopup();
+    }
+    if (ImGui::BeginPopupModal("Save scene as", NULL,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::InputText("Scene path", ui->scene_path_stage,
+                         sizeof(ui->scene_path_stage));
+        ImGui::TextDisabled("Project-relative (.luma_scene)");
+        if (ImGui::Button("Save")) {
+            if (led_scene_save_as(ctx->session,
+                                  ui->scene_path_stage) ==
+                LED_SUCCESS) {
+                leg_status(ctx, "Scene saved", 0);
+            } else {
+                leg_status(ctx, "Save failed", 1);
+            }
+            ImGui::CloseCurrentPopup();
+            ui->show_save_as_popup = 0;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            ImGui::CloseCurrentPopup();
+            ui->show_save_as_popup = 0;
+        }
+        ImGui::EndPopup();
     }
 }
 
@@ -190,6 +257,11 @@ static void leg_menu_view(leg_context *ctx, leg_ui *ui) {
         ImGui::MenuItem("Viewport", NULL, &show[4]);
         ImGui::MenuItem("Toolbar", NULL, &show[5]);
         ImGui::MenuItem("Status bar", NULL, &show[6]);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Reset layout")) {
+            leg_layout_request_reset(ctx);
+            leg_status(ctx, "Layout reset", 0);
+        }
         ImGui::EndMenu();
     }
     ui->show_hierarchy = show[0] ? 1 : 0;
@@ -199,6 +271,41 @@ static void leg_menu_view(leg_context *ctx, leg_ui *ui) {
     ui->show_viewport = show[4] ? 1 : 0;
     ui->show_toolbar = show[5] ? 1 : 0;
     ui->show_status = show[6] ? 1 : 0;
+}
+
+static void leg_menu_help(leg_context *ctx, leg_ui *ui) {
+    if (ImGui::BeginMenu("Help")) {
+        if (ImGui::MenuItem("About Luma")) {
+            ui->show_about = 1;
+            ImGui::OpenPopup("About Luma");
+        }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginPopupModal("About Luma", NULL,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        leg_roles roles;
+
+        leg_theme_roles(&roles);
+        ImGui::TextColored(
+            ImVec4(roles.accent[0], roles.accent[1], roles.accent[2],
+                   1.0f),
+            "◆ Luma Editor");
+        ImGui::Separator();
+        ImGui::TextDisabled("Phase 33V — independent verification "
+                            "and visual rebuild.");
+        ImGui::Text("Project → scene → select → edit → gizmo → "
+                    "prefab → undo → save → play → stop.");
+        ImGui::Separator();
+        ImGui::TextDisabled("Shortcuts: W/E/R gizmo · F focus · "
+                            "F5 play · Shift+F5 stop · F10 step · "
+                            "Ctrl+Z/Y/D/S undo/redo/dup/save");
+        if (ImGui::Button("Close")) {
+            ImGui::CloseCurrentPopup();
+            ui->show_about = 0;
+        }
+        ImGui::EndPopup();
+    }
+    (void)ctx;
 }
 
 static void leg_menu_project(leg_context *ctx, leg_ui *ui) {
@@ -245,21 +352,32 @@ static void leg_menu_project(leg_context *ctx, leg_ui *ui) {
 static void leg_toolbar(leg_context *ctx, leg_ui *ui) {
     int playing = led_is_playing(ctx->session);
     int paused = led_play_is_paused(ctx->session);
+    const float tbs = 28.0f; /* tool button square (design system) */
+    leg_roles roles;
 
-    if (ImGui::Button("Create...")) {
+    leg_theme_roles(&roles);
+    /* Authoring group. */
+    if (leg_tool_button("##tb-create", LEG_ICON_PLUS,
+                        "Create object", 0, tbs)) {
         ui->create_name[0] = '\0';
         ui->show_create_popup = 1;
         ImGui::OpenPopup("Create object");
     }
     ImGui::SameLine();
-    if (ImGui::Button("Prefab...")) {
+    if (leg_tool_button("##tb-prefab", LEG_ICON_PREFAB,
+                        "Instantiate prefab", 0, tbs)) {
         ui->prefab_path[0] = '\0';
         ui->show_prefab_popup = 1;
         ImGui::OpenPopup("Instantiate prefab");
     }
     ImGui::SameLine();
+    ImGui::Separator();
+    ImGui::SameLine();
+    /* Play group (icon transport). */
     ImGui::BeginDisabled(playing);
-    if (ImGui::Button("Play")) {
+    if (leg_tool_button("##tb-play", LEG_ICON_PLAY,
+                        playing ? "Playing" : "Play (F5)", 0,
+                        tbs)) {
         if (led_play_enter(ctx->session) == LED_SUCCESS) {
             leg_status(ctx, "Playing (edit locked)", 0);
         } else {
@@ -269,15 +387,21 @@ static void leg_toolbar(leg_context *ctx, leg_ui *ui) {
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::BeginDisabled(!playing);
-    if (ImGui::Button(paused ? "Resume" : "Pause")) {
+    if (leg_tool_button("##tb-pause",
+                        paused ? LEG_ICON_PLAY : LEG_ICON_PAUSE,
+                        paused ? "Resume" : "Pause", paused, tbs)) {
         led_play_set_paused(ctx->session, !paused);
     }
     ImGui::SameLine();
-    if (ImGui::Button("Step")) {
+    if (leg_tool_button("##tb-step", LEG_ICON_STEP,
+                        "Step one tick (F10)", 0, tbs)) {
         led_play_step(ctx->session);
     }
     ImGui::SameLine();
-    if (ImGui::Button("Stop")) {
+    if (leg_tool_button("##tb-stop", LEG_ICON_STOP,
+                        playing ? "Stop (Shift+F5)"
+                                : "Stop (not playing)",
+                        0, tbs)) {
         if (led_play_exit(ctx->session) == LED_SUCCESS) {
             leg_status(ctx, "Stopped (edit unchanged)", 0);
         } else {
@@ -286,32 +410,61 @@ static void leg_toolbar(leg_context *ctx, leg_ui *ui) {
     }
     ImGui::EndDisabled();
     if (playing) {
+        /* Play pill: unmistakable but quiet (design system). */
         ImGui::SameLine();
-        ImGui::TextColored(ImVec4(1, 0.35f, 0.3f, 1),
-                           "[PLAY] structural edits locked");
+        ImGui::PushStyleColor(
+            ImGuiCol_Button,
+            ImVec4(roles.play[0], roles.play[1], roles.play[2],
+                   0.25f));
+        ImGui::PushStyleColor(
+            ImGuiCol_ButtonHovered,
+            ImVec4(roles.play[0], roles.play[1], roles.play[2],
+                   0.25f));
+        ImGui::PushStyleColor(
+            ImGuiCol_ButtonActive,
+            ImVec4(roles.play[0], roles.play[1], roles.play[2],
+                   0.25f));
+        ImGui::PushStyleColor(ImGuiCol_Text,
+                              ImVec4(roles.play[0], roles.play[1],
+                                     roles.play[2], 1.0f));
+        ImGui::Button(paused ? "PAUSED" : "PLAYING");
+        ImGui::PopStyleColor(4);
     }
-    /* Gizmo mode + space (display state; drags route via intents). */
+    /* Gizmo mode group (icon radio + W/E/R hotkeys). */
+    ImGui::SameLine();
+    ImGui::Separator();
+    ImGui::SameLine();
+    if (leg_tool_button(
+            "##tb-translate", LEG_ICON_TRANSLATE,
+            "Translate (W)",
+            ui->gizmo_mode == LED_GIZMO_TRANSLATE, tbs)) {
+        ui->gizmo_mode = LED_GIZMO_TRANSLATE;
+    }
+    ImGui::SameLine();
+    if (leg_tool_button("##tb-rotate", LEG_ICON_ROTATE,
+                        "Rotate (E)",
+                        ui->gizmo_mode == LED_GIZMO_ROTATE, tbs)) {
+        ui->gizmo_mode = LED_GIZMO_ROTATE;
+    }
+    ImGui::SameLine();
+    if (leg_tool_button("##tb-scale", LEG_ICON_SCALE,
+                        "Scale (R)",
+                        ui->gizmo_mode == LED_GIZMO_SCALE, tbs)) {
+        ui->gizmo_mode = LED_GIZMO_SCALE;
+    }
+    /* Snap + space + camera speed (compact; tooltips carry docs). */
     ImGui::SameLine();
     ImGui::Separator();
     ImGui::SameLine();
     {
-        const char *modes = "Translate\0Rotate\0Scale\0";
-        int m = ui->gizmo_mode;
-
-        ImGui::SetNextItemWidth(110);
-        if (ImGui::Combo("Gizmo", &m, modes)) {
-            if (m >= LED_GIZMO_TRANSLATE && m <= LED_GIZMO_SCALE) {
-                ui->gizmo_mode = m;
-            }
-        }
-    }
-    ImGui::SameLine();
-    {
         int s = ui->gizmo_space;
 
-        ImGui::SetNextItemWidth(90);
-        if (ImGui::Combo("Space", &s, "World\0Local\0")) {
+        ImGui::SetNextItemWidth(76);
+        if (ImGui::Combo("##tb-space", &s, "World\0Local\0")) {
             ui->gizmo_space = (s != 0) ? 1 : 0;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Gizmo space (display only)");
         }
     }
     ImGui::SameLine();
@@ -320,12 +473,18 @@ static void leg_toolbar(leg_context *ctx, leg_ui *ui) {
 
         ImGui::Checkbox("Snap", &snap);
         ui->gizmo_snap_on = snap ? 1 : 0;
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Snap gizmo drags to Step");
+        }
     }
     if (ui->gizmo_snap_on) {
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(70);
-        ImGui::DragFloat("Step", &ui->gizmo_snap_step, 0.05f, 0.001f,
-                         10.0f, "%.3f");
+        ImGui::SetNextItemWidth(64);
+        ImGui::DragFloat("##tb-step", &ui->gizmo_snap_step, 0.05f,
+                         0.001f, 10.0f, "%.3f");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Snap step");
+        }
         if (ui->gizmo_snap_step <= 0.0f) {
             ui->gizmo_snap_step = 0.1f;
         }
@@ -334,9 +493,20 @@ static void leg_toolbar(leg_context *ctx, leg_ui *ui) {
     {
         int sp = ui->camera_speed;
 
-        ImGui::SetNextItemWidth(110);
-        if (ImGui::SliderInt("Cam%", &sp, 10, 1000, "%d%%")) {
+        ImGui::SetNextItemWidth(90);
+        if (ImGui::SliderInt("##tb-cam", &sp, 10, 1000, "%d%%")) {
             ui->camera_speed = sp;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Viewport fly speed");
+        }
+    }
+    /* Dirty dot (authored-change indicator, right side). */
+    if (led_is_dirty(ctx->session)) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("●");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Unsaved changes (Ctrl+S)");
         }
     }
 }
@@ -448,6 +618,33 @@ static void leg_prefab_popup(leg_context *ctx, leg_ui *ui) {
 /* Hierarchy (select/expand/context/reparent).                        */
 /* ------------------------------------------------------------------ */
 
+static leg_icon_kind leg_hierarchy_icon(leg_context *ctx,
+                                         const le_object *handle) {
+    le_world *w = NULL;
+
+    if (ctx == NULL || handle == NULL) {
+        return LEG_ICON_OBJECT;
+    }
+    w = led_session_get_edit_world(ctx->session);
+    if (w == NULL) {
+        return LEG_ICON_OBJECT;
+    }
+    if (le_object_has_component(w, handle, LE_COMPONENT_CAMERA)) {
+        return LEG_ICON_CAMERA;
+    }
+    if (le_object_has_component(w, handle, LE_COMPONENT_LIGHT)) {
+        return LEG_ICON_LIGHT;
+    }
+    if (le_object_has_component(w, handle, LE_COMPONENT_SCRIPT)) {
+        return LEG_ICON_SCRIPT;
+    }
+    if (le_object_has_component(w, handle,
+                                LE_COMPONENT_RENDERABLE)) {
+        return LEG_ICON_BOX;
+    }
+    return LEG_ICON_OBJECT;
+}
+
 static void leg_hierarchy_row(leg_context *ctx, leg_ui *ui,
                               const led_hierarchy_node *node) {
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
@@ -486,6 +683,12 @@ static void leg_hierarchy_row(leg_context *ctx, leg_ui *ui,
                  node->handle.generation, node->handle.world_tag);
         ImGui::PushID(id);
         {
+            /* Type icon ahead of the tree row (same line; the tree
+             * node keeps its own arrow + selection highlight). */
+            leg_icon_draw(leg_hierarchy_icon(ctx, &node->handle),
+                          14.0f,
+                          ImGui::GetColorU32(ImGuiCol_Text));
+            ImGui::SameLine(0, 4);
             bool open = ImGui::TreeNodeEx(label, flags);
             /* Click-to-select (replaces; Ctrl toggles; Shift adds). */
             if (ImGui::IsItemClicked(0)) {
@@ -533,9 +736,23 @@ static void leg_hierarchy_row(leg_context *ctx, leg_ui *ui,
                 ImGui::Text("%s", label);
                 ImGui::EndDragDropSource();
             }
-            /* Context menu: subtree/duplicate/delete/unparent/
-             * reparent-to-selection. */
+            /* Context menu: rename/subtree/duplicate/delete/
+             * unparent/reparent-to-selection. */
             if (ImGui::BeginPopupContextItem("##hctx")) {
+                if (ImGui::MenuItem("Rename")) {
+                    const char *nm = (node->name != NULL)
+                                         ? node->name
+                                         : "";
+
+                    strncpy(ui->rename_stage, nm,
+                            sizeof(ui->rename_stage) - 1);
+                    ui->rename_stage[sizeof(ui->rename_stage) - 1] =
+                        '\0';
+                    ui->rename_target = node->handle;
+                    ui->has_rename_target = 1;
+                    ui->show_rename_popup = 1;
+                    ImGui::OpenPopup("Rename object");
+                }
                 if (ImGui::MenuItem("Select subtree")) {
                     led_selection_select_subtree(ctx->session,
                                                  &node->handle);
@@ -621,7 +838,14 @@ static void leg_panel_hierarchy(leg_context *ctx, leg_ui *ui) {
     n = led_hierarchy_refresh(ctx->session);
     nodes = led_hierarchy_nodes(ctx->session);
     if (n == 0 || nodes == NULL) {
-        ImGui::TextDisabled("(empty scene)");
+        ImGui::TextDisabled("Empty scene — nothing to show.");
+        if (ImGui::Button("Create object")) {
+            ui->create_name[0] = '\0';
+            ui->show_create_popup = 1;
+            ImGui::OpenPopup("Create object");
+        }
+        ImGui::End();
+        return;
     }
     /* Indentation follows snapshot depth (DFS order, absolute
      * depths; pop/push handled per-row delta). */
@@ -644,6 +868,35 @@ static void leg_panel_hierarchy(leg_context *ctx, leg_ui *ui) {
             depth--;
         }
     }
+    /* Rename popup (undoable SET_NAME on the stored target). */
+    if (ImGui::BeginPopupModal("Rename object", NULL,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::InputText("Name", ui->rename_stage,
+                         sizeof(ui->rename_stage));
+        if (ImGui::Button("Rename")) {
+            if (ui->has_rename_target) {
+                led_command cmd;
+
+                memset(&cmd, 0, sizeof(cmd));
+                cmd.kind = LED_CMD_SET_NAME;
+                snprintf(cmd.label, sizeof(cmd.label), "Rename");
+                cmd.target = ui->rename_target;
+                strncpy(cmd.name_value, ui->rename_stage,
+                        sizeof(cmd.name_value) - 1);
+                leg_run(ctx, &cmd, "Renamed");
+                ui->has_rename_target = 0;
+            }
+            ImGui::CloseCurrentPopup();
+            ui->show_rename_popup = 0;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            ImGui::CloseCurrentPopup();
+            ui->show_rename_popup = 0;
+            ui->has_rename_target = 0;
+        }
+        ImGui::EndPopup();
+    }
     ImGui::End();
 }
 
@@ -654,7 +907,17 @@ static void leg_panel_hierarchy(leg_context *ctx, leg_ui *ui) {
 static void leg_component_add_menu(leg_context *ctx, leg_ui *ui,
                                    const le_object *obj) {
     (void)ui;
-    if (ImGui::BeginMenu("Add component")) {
+    /* The inspector has no menu bar, so BeginMenu can never open
+     * here (Phase 33 shipped exactly that dead menu — the add path
+     * was unreachable). A button + popup carries the same items and
+     * actually opens. */
+    if (ImGui::Button("Add component...")) {
+        ImGui::OpenPopup("Add component");
+    }
+    if (!ImGui::BeginPopup("Add component")) {
+        return;
+    }
+    {
         struct {
             const char *label;
             le_component_type type;
@@ -755,8 +1018,8 @@ static void leg_component_add_menu(leg_context *ctx, leg_ui *ui,
                 leg_run(ctx, &cmd, "Component added");
             }
         }
-        ImGui::EndMenu();
     }
+    ImGui::EndPopup();
 }
 
 /* Component remove buttons (one per present component; undoable
@@ -804,6 +1067,45 @@ static void leg_component_remove_row(leg_context *ctx,
     }
 }
 
+/* Section title for an inspector row path ("transform.*" ->
+ * "Transform", "script.*" -> "Script", ...). Never NULL. */
+static const char *leg_inspector_section(const char *path) {
+    if (path == NULL) {
+        return "Properties";
+    }
+    if (strncmp(path, "transform.", 10) == 0) {
+        return "Transform";
+    }
+    if (strncmp(path, "object.", 7) == 0) {
+        return "Object";
+    }
+    if (strncmp(path, "camera.", 7) == 0) {
+        return "Camera";
+    }
+    if (strncmp(path, "light.", 6) == 0) {
+        return "Light";
+    }
+    if (strncmp(path, "renderable.", 11) == 0) {
+        return "Renderable";
+    }
+    if (strncmp(path, "script.", 7) == 0) {
+        return "Script";
+    }
+    if (strncmp(path, "rigidbody.", 10) == 0) {
+        return "Rigid body";
+    }
+    if (strncmp(path, "collider.", 9) == 0) {
+        return "Collider";
+    }
+    if (strncmp(path, "animator.", 9) == 0) {
+        return "Animator";
+    }
+    if (strncmp(path, "character.", 10) == 0) {
+        return "Character";
+    }
+    return "Properties";
+}
+
 static void leg_panel_inspector(leg_context *ctx, leg_ui *ui) {
     le_object sel = LE_OBJECT_INVALID;
     uint32_t count = 0;
@@ -821,8 +1123,11 @@ static void leg_panel_inspector(leg_context *ctx, leg_ui *ui) {
     ui->show_inspector = open ? 1 : 0;
     count = led_selection_get(ctx->session, &sel, 1);
     if (count != 1) {
-        ImGui::TextDisabled(count == 0 ? "(nothing selected)"
-                                       : "(multi-select: first shown)");
+        ImGui::TextDisabled("Nothing selected.");
+        ImGui::TextDisabled(count == 0
+                                ? "Select an object in the Hierarchy "
+                                  "or the Viewport."
+                                : "Multi-select: showing the first.");
         if (count == 0) {
             ImGui::End();
             return;
@@ -834,24 +1139,45 @@ static void leg_panel_inspector(leg_context *ctx, leg_ui *ui) {
         const char *nm =
             (w != NULL) ? le_object_get_name(w, &sel) : NULL;
 
-        ImGui::Text("Object: %s",
+        /* Object header: type icon + name (rename via Hierarchy). */
+        leg_icon_draw(leg_hierarchy_icon(ctx, &sel), 16.0f,
+                      ImGui::GetColorU32(ImGuiCol_Text));
+        ImGui::SameLine(0, 6);
+        ImGui::Text("%s",
                     (nm != NULL && nm[0] != '\0') ? nm : "(unnamed)");
     }
+    ImGui::Separator();
     {
         uint32_t rows = led_inspect(ctx->session, &sel);
         const led_inspector_row *prows =
             led_inspector_rows(ctx->session);
         uint32_t i = 0;
+        const char *cur_section = NULL;
 
         if (rows == 0 || prows == NULL) {
-            ImGui::TextDisabled("(no reflected properties)");
+            ImGui::TextDisabled("No editable properties.");
         }
+        /* Rows arrive grouped by component (static table order +
+         * appended script props): emit a section header on prefix
+         * change instead of a flat endless list. */
         for (i = 0; i < rows; i++) {
+            const char *sec =
+                leg_inspector_section(prows[i].desc.path);
+
+            if (cur_section == NULL ||
+                strcmp(sec, cur_section) != 0) {
+                cur_section = sec;
+                if (i > 0) {
+                    ImGui::Spacing();
+                }
+                ImGui::SeparatorText(sec);
+            }
             leg_widget_row(ctx, ui, (int)i, &prows[i], &sel);
         }
     }
-    /* Add/remove component (undoable commands; the menu needs a
-     * menu bar — inspector has none, so use plain buttons). */
+    /* Add/remove component (undoable commands; the add path is a
+     * button + popup — the inspector has no menu bar). */
+    ImGui::Spacing();
     ImGui::Separator();
     if (ImGui::CollapsingHeader("Components")) {
         le_world *w = led_session_get_edit_world(ctx->session);
@@ -907,9 +1233,14 @@ static void leg_panel_assets(leg_context *ctx, leg_ui *ui) {
         int type = ui->asset_type_filter;
         int sort = ui->asset_sort;
 
-        ImGui::InputText("Search", search, sizeof(ui->asset_search));
+        ImGui::SetNextItemWidth(-140);
+        ImGui::InputText("##asset-search", search,
+                         sizeof(ui->asset_search));
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Search assets (name or path)");
+        }
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(120);
+        ImGui::SetNextItemWidth(64);
         {
             const char *names = "All\0model\0texture\0script\0scene\0"
                                 "prefab\0";
@@ -918,7 +1249,7 @@ static void leg_panel_assets(leg_context *ctx, leg_ui *ui) {
             /* Filter combo covers persisted source types only
              * (sub-assets are DB-internal; mesh/material/skeleton/
              * clip resolve through their model record). */
-            if (ImGui::Combo("Type", &cur, names)) {
+            if (ImGui::Combo("##asset-type", &cur, names)) {
                 type = cur - 1;
                 if (type < -1) {
                     type = -1;
@@ -928,13 +1259,19 @@ static void leg_panel_assets(leg_context *ctx, leg_ui *ui) {
                 }
                 ui->asset_type_filter = type;
             }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Filter by type");
+            }
         }
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(140);
-        if (ImGui::Combo("Sort", &sort,
-                         "Path\0Name\0Type+Path\0")) {
+        ImGui::SetNextItemWidth(64);
+        if (ImGui::Combo("##asset-sort", &sort,
+                         "Path\0Name\0Type\0")) {
             sort = (sort < 0) ? 0 : ((sort > 2) ? 2 : sort);
             ui->asset_sort = sort;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Sort order");
         }
         {
             led_project_asset_type filter =
@@ -958,13 +1295,19 @@ static void leg_panel_assets(leg_context *ctx, leg_ui *ui) {
                 const char *p = (folders[i].path[0] != '\0')
                                     ? folders[i].path
                                     : "(root)";
+                char buf[640];
 
-                ImGui::BulletText("%s (%u assets)", p,
-                                  folders[i].asset_count);
+                leg_icon_draw(LEG_ICON_FOLDER, 14.0f,
+                              ImGui::GetColorU32(ImGuiCol_Text));
+                ImGui::SameLine(0, 4);
+                snprintf(buf, sizeof(buf), "%s — %u", p,
+                         folders[i].asset_count);
+                ImGui::TextDisabled("%s", buf);
             }
             ImGui::TreePop();
         }
     }
+    ImGui::Separator();
     /* Asset list (deterministic view order; click selects by UUID,
      * double-click opens scenes / instantiates prefabs /
      * creates prefabs from the selection). */
@@ -972,6 +1315,9 @@ static void leg_panel_assets(leg_context *ctx, leg_ui *ui) {
         uint32_t na = led_browser_asset_count(ctx->session);
         uint32_t i = 0;
 
+        if (na == 0) {
+            ImGui::TextDisabled("No assets match.");
+        }
         for (i = 0; i < na; i++) {
             led_asset_record rec;
 
@@ -980,19 +1326,47 @@ static void leg_panel_assets(leg_context *ctx, leg_ui *ui) {
                 continue;
             }
             {
+                /* File name first (scannable), type + status after.
+                 * Full source path rides the tooltip. */
+                const char *base = rec.source_path;
+                const char *slash = NULL;
+                const char *s = NULL;
+                const char *st = "";
                 char label[1152];
 
-                snprintf(label, sizeof(label), "%s [%s] %s",
-                         rec.source_path,
-                         leg_asset_type_name(rec.type),
-                         rec.status == LED_IMPORT_READY ? ""
-                         : rec.status == LED_IMPORT_STALE ? "(stale)"
-                         : rec.status == LED_IMPORT_FAILED
-                             ? "(failed)"
-                             : "(unimported)");
+                for (s = base; *s != '\0'; s++) {
+                    if (*s == '/' || *s == '\\') {
+                        slash = s;
+                    }
+                }
+                if (slash != NULL) {
+                    base = slash + 1;
+                }
+                if (rec.status == LED_IMPORT_STALE) {
+                    st = " · stale";
+                } else if (rec.status == LED_IMPORT_FAILED) {
+                    st = " · failed";
+                } else if (rec.status != LED_IMPORT_READY) {
+                    st = " · unimported";
+                }
+                snprintf(label, sizeof(label), "%s  [%s%s]", base,
+                         leg_asset_type_name(rec.type), st);
+                leg_icon_draw(
+                    leg_icon_for_asset(
+                        (int)rec.type,
+                        rec.status == LED_IMPORT_FAILED),
+                    14.0f,
+                    ImGui::GetColorU32(
+                        rec.status == LED_IMPORT_FAILED
+                            ? ImGuiCol_TextDisabled
+                            : ImGuiCol_Text));
+                ImGui::SameLine(0, 4);
                 if (ImGui::Selectable(label, false)) {
                     led_browser_clear_selection(ctx->session);
                     led_browser_select(ctx->session, &rec.id);
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", rec.source_path);
                 }
                 if (ImGui::IsItemHovered() &&
                     ImGui::IsMouseDoubleClicked(0)) {
@@ -1220,6 +1594,9 @@ static void leg_panel_console(leg_context *ctx, leg_ui *ui) {
     ImGui::BeginChild("console-scroll", ImVec2(0, 0), false,
                       ImGuiWindowFlags_HorizontalScrollbar);
     n = led_console_count(ctx->session);
+    if (n == 0) {
+        ImGui::TextDisabled("No messages.");
+    }
     for (i = 0; i < n; i++) {
         led_log_level lvl = LED_LOG_INFO;
         const char *tag = "";
@@ -1236,12 +1613,20 @@ static void leg_panel_console(leg_context *ctx, leg_ui *ui) {
             continue;
         }
         {
-            ImVec4 col = (lvl == LED_LOG_ERROR)
-                             ? ImVec4(1, 0.4f, 0.35f, 1)
-                         : (lvl == LED_LOG_WARNING)
-                             ? ImVec4(1, 0.85f, 0.4f, 1)
-                             : ImVec4(0.8f, 0.8f, 0.8f, 1);
+            /* Severity styling from the design roles (quiet info,
+             * amber warning, red error — no other colors). */
+            leg_roles roles;
+            ImVec4 col;
 
+            leg_theme_roles(&roles);
+            col = (lvl == LED_LOG_ERROR)
+                      ? ImVec4(roles.error[0], roles.error[1],
+                               roles.error[2], 1.0f)
+                  : (lvl == LED_LOG_WARNING)
+                      ? ImVec4(roles.warning[0], roles.warning[1],
+                               roles.warning[2], 1.0f)
+                      : ImVec4(roles.text_2nd[0], roles.text_2nd[1],
+                               roles.text_2nd[2], 1.0f);
             ImGui::TextColored(col, "[%s] %s",
                                (tag != NULL && tag[0] != '\0')
                                    ? tag
@@ -1259,6 +1644,7 @@ static void leg_panel_console(leg_context *ctx, leg_ui *ui) {
 static void leg_panel_status(leg_context *ctx, leg_ui *ui) {
     led_session_stats stats;
     led_history_stats hist;
+    leg_roles roles;
 
     if (!ui->show_status) {
         return;
@@ -1267,6 +1653,7 @@ static void leg_panel_status(leg_context *ctx, leg_ui *ui) {
     memset(&hist, 0, sizeof(hist));
     led_session_get_stats(ctx->session, &stats);
     led_history_get_stats(ctx->session, &hist);
+    leg_theme_roles(&roles);
     /* Status bar: bottom-docked panel (public docking API only —
      * BeginViewportSideBar lives in imgui_internal.h and is NOT
      * part of the confinement contract). No close button (status
@@ -1287,28 +1674,58 @@ static void leg_panel_status(leg_context *ctx, leg_ui *ui) {
                              ImGuiWindowFlags_NoDocking |
                              ImGuiWindowFlags_NoMove |
                              ImGuiWindowFlags_NoSavedSettings)) {
+            /* Luma identity dot (amber) ahead of the project name. */
+            ImGui::TextColored(
+                ImVec4(roles.accent[0], roles.accent[1],
+                       roles.accent[2], 1.0f),
+                "◆");
+            ImGui::SameLine(0, 4);
             if (ui->status_text[0] != '\0') {
                 ImVec4 col = ui->status_is_error
-                                 ? ImVec4(1, 0.4f, 0.35f, 1)
-                                 : ImVec4(0.6f, 0.9f, 0.6f, 1);
+                                 ? ImVec4(roles.error[0],
+                                          roles.error[1],
+                                          roles.error[2], 1.0f)
+                                 : ImVec4(roles.success[0],
+                                          roles.success[1],
+                                          roles.success[2], 1.0f);
 
                 ImGui::TextColored(col, "%s", ui->status_text);
+                ImGui::SameLine();
+                ImGui::TextDisabled("·");
                 ImGui::SameLine();
             }
             {
                 led_project_info info;
+                int playing = led_is_playing(ctx->session);
 
                 memset(&info, 0, sizeof(info));
                 led_project_get_info(ctx->session, &info);
                 ImGui::TextDisabled(
-                    "%s | sel %u | undo %u redo %u | %s%s | %s",
+                    "%s   %u selected   undo %u · redo %u   %s%s",
                     led_project_is_open(ctx->session) ? info.name
-                                                      : "(no project)",
+                                                      : "No project",
                     stats.selection_count, hist.undo_depth,
                     hist.redo_depth,
-                    led_is_playing(ctx->session) ? "PLAY" : "edit",
-                    led_is_dirty(ctx->session) ? " dirty" : "",
-                    led_scene_get_path(ctx->session));
+                    playing ? "PLAYING" : "edit",
+                    led_is_dirty(ctx->session) ? " ●" : "");
+                if (playing) {
+                    ImGui::SameLine(0, 4);
+                    ImGui::TextColored(
+                        ImVec4(roles.play[0], roles.play[1],
+                               roles.play[2], 1.0f),
+                        "●");
+                }
+                {
+                    const char *sp =
+                        led_scene_get_path(ctx->session);
+
+                    if (sp != NULL && sp[0] != '\0') {
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("·");
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("%s", sp);
+                    }
+                }
             }
         }
         ImGui::End();
@@ -1356,11 +1773,15 @@ static void leg_panel_viewport(leg_context *ctx, leg_ui *ui) {
         ImVec2 avail = ImGui::GetContentRegionAvail();
         ImVec2 origin = ImGui::GetCursorScreenPos();
 
-        if (avail.x < 64) {
-            avail.x = 64;
+        /* Minimum useful viewport (below this the composite still
+         * runs but the panel is a sliver — the default layout keeps
+         * it far above; the clamp only guards pathological manual
+         * docking). */
+        if (avail.x < 200) {
+            avail.x = 200;
         }
-        if (avail.y < 64) {
-            avail.y = 64;
+        if (avail.y < 150) {
+            avail.y = 150;
         }
         /* Resize policy: viewport struct follows the panel (the
          * scene target rebuilds in gui_viewport_tex.cpp; zero-size
@@ -1401,6 +1822,29 @@ static void leg_panel_viewport(leg_context *ctx, leg_ui *ui) {
         {
             int hovered = ImGui::IsItemHovered() ? 1 : 0;
 
+            /* Gizmo mode hotkeys (W/E/R): fresh press while the
+             * viewport is hovered, no Ctrl/Cmd held, not playing.
+             * Sets gizmo_switched_key so the overlay fly block skips
+             * flying that key this same frame. */
+            if (hovered && !leg_wants_keyboard(ctx) &&
+                !led_is_playing(ctx->session)) {
+                const ImGuiIO &hkio = ImGui::GetIO();
+
+                if (!hkio.KeyCtrl && !hkio.KeySuper) {
+                    if (ImGui::IsKeyPressed(ImGuiKey_W, false)) {
+                        ui->gizmo_mode = LED_GIZMO_TRANSLATE;
+                        ui->gizmo_switched_key = ImGuiKey_W;
+                    } else if (ImGui::IsKeyPressed(ImGuiKey_E,
+                                                   false)) {
+                        ui->gizmo_mode = LED_GIZMO_ROTATE;
+                        ui->gizmo_switched_key = ImGuiKey_E;
+                    } else if (ImGui::IsKeyPressed(ImGuiKey_R,
+                                                   false)) {
+                        ui->gizmo_mode = LED_GIZMO_SCALE;
+                        ui->gizmo_switched_key = ImGuiKey_R;
+                    }
+                }
+            }
             /* Camera owns input while orbiting (RMB drag / wheel /
              * WASD when the viewport is hovered and the GUI does not
              * want the keyboard). */
@@ -1557,10 +2001,14 @@ void leg_panels_frame(leg_context *ctx, led_viewport *vp, float dt) {
 
         led_focus_set(ctx->session, io.WantTextInput ? 1 : 0);
     }
-    /* Keyboard shortcuts (Ctrl+Z/Y/D/S, Del, F5/Shift+F5, F10, F):
-     * fire ONLY when the GUI does not want the keyboard (no text
-     * field focused) and this is a fresh press (no auto-repeat
-     * storm: IsKeyPressed with repeat=false). */
+    /* Keyboard shortcuts (Ctrl+Z/Y/D/S, Del, F5/Shift+F5, F10, F,
+     * W/E/R gizmo modes): fire ONLY when the GUI does not want the
+     * keyboard (no text field focused) and this is a fresh press (no
+     * auto-repeat storm: IsKeyPressed with repeat=false). W/E/R switch
+     * the gizmo mode when the viewport is hovered (the routing doc
+     * promises them); the fly block in the gizmo overlay skips the
+     * press frame for a switched key (see ui->gizmo_switched_key). */
+    ui->gizmo_switched_key = 0;
     if (!leg_wants_keyboard(ctx)) {
         struct {
             ImGuiKey key;
@@ -1611,22 +2059,43 @@ void leg_panels_frame(leg_context *ctx, led_viewport *vp, float dt) {
                                     g_vp_host.viewport);
             }
         }
+        /* NOTE: W/E/R gizmo-mode hotkeys live in the viewport panel
+         * (it alone knows this frame's hover state); the overlay's
+         * fly block skips the switch frame via gizmo_switched_key. */
     }
-    /* Dockspace root is opened by leg_frame_begin; panels dock in. */
     if (ImGui::BeginMainMenuBar()) {
         leg_menu_file(ctx, ui);
         leg_menu_edit(ctx, ui);
         leg_menu_view(ctx, ui);
         leg_menu_project(ctx, ui);
+        leg_menu_help(ctx, ui);
         ImGui::EndMainMenuBar();
     }
-    if (ui->show_toolbar) {
-        /* Toolbar: top-docked panel (same public-API discipline as
-         * the status bar). No close button: pass NULL. */
+    /* Chrome geometry: the menu bar reserves the viewport WorkPos
+     * top strip; the toolbar stacks directly below it and the dock
+     * host fills the remainder above the status bar. No overlaps by
+     * construction (verified headed via window-pos diagnostics). */
+    {
         ImGuiViewport *vp0 = ImGui::GetMainViewport();
-        float h = 36.0f;
+        float menu_h = vp0->WorkPos.y - vp0->Pos.y;
+        float tool_h = ui->show_toolbar ? 40.0f : 0.0f;
+        float status_h = ui->show_status ? 26.0f : 0.0f;
 
-        ImGui::SetNextWindowPos(vp0->Pos);
+        if (menu_h < 0) {
+            menu_h = 0;
+        }
+        ui->dock_y = menu_h + tool_h;
+        ui->dock_h = vp0->Size.y - menu_h - tool_h - status_h;
+    }
+    if (ui->show_toolbar) {
+        /* Toolbar: fixed chrome below the menu bar (same public-API
+         * discipline as the status bar). No close button: pass NULL.
+         * Height 40 = 28px tool buttons + padding (design system). */
+        ImGuiViewport *vp0 = ImGui::GetMainViewport();
+        float h = 40.0f;
+
+        ImGui::SetNextWindowPos(
+            ImVec2(vp0->Pos.x, vp0->Pos.y + (ui->dock_y - h)));
         ImGui::SetNextWindowSize(ImVec2(vp0->Size.x, h));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
@@ -1642,6 +2111,33 @@ void leg_panels_frame(leg_context *ctx, led_viewport *vp, float dt) {
         ImGui::End();
         ImGui::PopStyleVar(3);
     }
+    /* Dock host: fixed chrome window filling the panel area; the
+     * LEG_DOCK_ROOT dockspace lives inside it (public DockSpace API;
+     * the layout TU builds the default node tree on the same id). */
+    {
+        ImGuiViewport *vp0 = ImGui::GetMainViewport();
+
+        ImGui::SetNextWindowPos(
+            ImVec2(vp0->Pos.x, vp0->Pos.y + ui->dock_y));
+        ImGui::SetNextWindowSize(
+            ImVec2(vp0->Size.x, ui->dock_h));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                            ImVec2(0, 0));
+        if (ImGui::Begin("##dockhost", NULL,
+                         ImGuiWindowFlags_NoDecoration |
+                             ImGuiWindowFlags_NoDocking |
+                             ImGuiWindowFlags_NoMove |
+                             ImGuiWindowFlags_NoSavedSettings |
+                             ImGuiWindowFlags_NoBringToFrontOnFocus)) {
+            ImGui::DockSpace(LEG_DOCK_ROOT, ImVec2(0, 0),
+                             ImGuiDockNodeFlags_PassthruCentralNode);
+        }
+        ImGui::End();
+        ImGui::PopStyleVar(3);
+    }
+    leg_layout_ensure(ctx);
     leg_create_popup(ctx, ui);
     leg_prefab_popup(ctx, ui);
     leg_panel_viewport(ctx, ui);

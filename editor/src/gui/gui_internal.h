@@ -1,10 +1,12 @@
 /* Phase 33 GUI internals (C++-only; never public).
  *
  * This header is included ONLY by editor/src/gui/*.cpp. It is the one
- * place allowed to include imgui.h. It must never include Vulkan,
- * Win32/X11, engine/renderer internals, or Lua headers (enforced at
- * configure time by the GUI-confinement audit in
- * editor/CMakeLists.txt).
+ * place allowed to include imgui.h (gui_layout.cpp additionally uses
+ * imgui_internal.h DockBuilder* layout functions ONLY — see that
+ * file's header + docs/EDITOR_FRONTEND_DECISION.md). It must never
+ * include Vulkan, Win32/X11, engine/renderer internals, or Lua
+ * headers (enforced at configure time by the GUI-confinement audit
+ * in editor/CMakeLists.txt).
  */
 
 #ifndef LUMA_EDITOR_GUI_INTERNAL_H
@@ -74,6 +76,27 @@ struct leg_ui {
     float gizmo_start_world[3];
     float gizmo_plane_n[3];
     float gizmo_plane_d;
+    /* W/E/R mode-switch press this frame (viewport panel sets it;
+     * the overlay fly block skips flying that key this frame). */
+    int gizmo_switched_key;
+    /* Default dock layout state (gui_layout.cpp owner). */
+    int layout_built;
+    int layout_reset;
+    /* Rename popup state (hierarchy). */
+    int show_rename_popup;
+    char rename_stage[128];
+    le_object rename_target;
+    int has_rename_target;
+    /* Open/Save-As scene popups (File menu). */
+    int show_open_scene_popup;
+    int show_save_as_popup;
+    char scene_path_stage[1024];
+    /* About dialog (Help menu, Luma identity). */
+    int show_about;
+    /* Dock-host geometry (panels frame computes from chrome; the
+     * layout TU + viewport clamp read it). */
+    float dock_y;
+    float dock_h;
 };
 
 /* Viewport offscreen target: COMPLETE type here, opaque forward in
@@ -183,6 +206,83 @@ ImTextureID leg_viewport_render(leg_context *ctx,
                                 leg_viewport_target *vt,
                                 lc_command_encoder *enc,
                                 uint32_t w, uint32_t h);
+
+/* Root dockspace id (frame loop submits it; layout TU builds it).
+ * Fixed numeric id ("LUMA") so both TUs address the same node
+ * without a second DockSpace submit. */
+#define LEG_DOCK_ROOT ((ImGuiID)0x4C554D41u)
+
+/* Default dock layout (gui_layout.cpp; SINGLE imgui_internal.h
+ * exception — DockBuilder* only). Builds once per context; rebuilds
+ * when leg_layout_request_reset was called. Safe to call every
+ * panels frame (early-outs when built). */
+void leg_layout_ensure(leg_context *ctx);
+void leg_layout_request_reset(leg_context *ctx);
+
+/* Theme (gui_theme.cpp owner). leg_theme_apply sets the full
+ * ImGuiStyle from docs/EDITOR_DESIGN_SYSTEM.md (call once per
+ * context, before the first frame). leg_font_load runs the system
+ * font chain (1 = UI face loaded, 0 = default raster kept).
+ * leg_palette exposes the design roles (see leg_roles below). */
+void leg_theme_apply(void);
+int leg_font_load(void);
+
+/* Design-system color roles (docs/EDITOR_DESIGN_SYSTEM.md). */
+struct leg_roles {
+    float window_bg[3];
+    float child_bg[3];
+    float titlebar[3];
+    float titlebar_active[3];
+    float menu_bg[3];
+    float border[3];
+    float text[3];
+    float text_2nd[3];
+    float text_dis[3];
+    float accent[3];
+    float selection[4];
+    float hover[4];
+    float active_tool[4];
+    float play[3];
+    float warning[3];
+    float error[3];
+    float success[3];
+};
+void leg_theme_roles(leg_roles *out);
+
+/* Icons (gui_icons.cpp owner): vector glyphs, no font/texture. */
+enum leg_icon_kind {
+    LEG_ICON_OBJECT = 0,
+    LEG_ICON_PLAY,
+    LEG_ICON_PAUSE,
+    LEG_ICON_STOP,
+    LEG_ICON_STEP,
+    LEG_ICON_PLUS,
+    LEG_ICON_BOX,
+    LEG_ICON_FOLDER,
+    LEG_ICON_SCENE,
+    LEG_ICON_MESH,
+    LEG_ICON_MATERIAL,
+    LEG_ICON_TEXTURE,
+    LEG_ICON_SCRIPT,
+    LEG_ICON_PREFAB,
+    LEG_ICON_CAMERA,
+    LEG_ICON_LIGHT,
+    LEG_ICON_TRANSLATE,
+    LEG_ICON_ROTATE,
+    LEG_ICON_SCALE,
+    LEG_ICON_SEARCH,
+    LEG_ICON_REFRESH,
+    LEG_ICON_SAVE,
+    LEG_ICON_SETTINGS
+};
+void leg_icon_draw(leg_icon_kind kind, float size, ImU32 color);
+void leg_icon_draw_at(leg_icon_kind kind, ImVec2 origin, float size,
+                      ImU32 color);
+leg_icon_kind leg_icon_for_asset(int asset_type, int failed);
+/* Themed square tool button (frame + centered glyph + tooltip).
+ * Returns 1 when pressed. */
+int leg_tool_button(const char *id, leg_icon_kind kind,
+                    const char *tooltip, int active, float size);
 
 /* Destroy a viewport target + null it (gui_viewport_tex.cpp;
  * NULL-safe; views/target/set before images). */

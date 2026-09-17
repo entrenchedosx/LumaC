@@ -142,27 +142,36 @@ static int leg_map_one(ImGuiIO &io, const lc_window_event *event) {
         int down = (event->type == LC_EVENT_KEY_DOWN) ? 1 : 0;
 
         /* Modifier keys ALSO update the mod snapshot ImGui reads for
-         * shortcuts (Ctrl+Z etc.): mirror lc_key_mod -> io mods. */
-        if (event->key == LC_KEY_LEFT_SHIFT ||
-            event->key == LC_KEY_RIGHT_SHIFT) {
+         * shortcuts (Ctrl+Z etc.): mirror lc_key_mod -> io mods.
+         * Phase 33 forced the RIGHT side false on every modifier
+         * event, so right-side modifiers could never register
+         * (fixed in 33V: the event's own side follows mods, the
+         * other side is left untouched — physical truth for the
+         * pressed key, no guessing about the other). */
+        if (event->key == LC_KEY_LEFT_SHIFT) {
             io.AddKeyEvent(ImGuiKey_LeftShift,
                            (event->mods & LC_MOD_SHIFT) != 0);
-            io.AddKeyEvent(ImGuiKey_RightShift, false);
-        } else if (event->key == LC_KEY_LEFT_CONTROL ||
-                   event->key == LC_KEY_RIGHT_CONTROL) {
+        } else if (event->key == LC_KEY_RIGHT_SHIFT) {
+            io.AddKeyEvent(ImGuiKey_RightShift,
+                           (event->mods & LC_MOD_SHIFT) != 0);
+        } else if (event->key == LC_KEY_LEFT_CONTROL) {
             io.AddKeyEvent(ImGuiKey_LeftCtrl,
                            (event->mods & LC_MOD_CONTROL) != 0);
-            io.AddKeyEvent(ImGuiKey_RightCtrl, false);
-        } else if (event->key == LC_KEY_LEFT_ALT ||
-                   event->key == LC_KEY_RIGHT_ALT) {
+        } else if (event->key == LC_KEY_RIGHT_CONTROL) {
+            io.AddKeyEvent(ImGuiKey_RightCtrl,
+                           (event->mods & LC_MOD_CONTROL) != 0);
+        } else if (event->key == LC_KEY_LEFT_ALT) {
             io.AddKeyEvent(ImGuiKey_LeftAlt,
                            (event->mods & LC_MOD_ALT) != 0);
-            io.AddKeyEvent(ImGuiKey_RightAlt, false);
-        } else if (event->key == LC_KEY_LEFT_SUPER ||
-                   event->key == LC_KEY_RIGHT_SUPER) {
+        } else if (event->key == LC_KEY_RIGHT_ALT) {
+            io.AddKeyEvent(ImGuiKey_RightAlt,
+                           (event->mods & LC_MOD_ALT) != 0);
+        } else if (event->key == LC_KEY_LEFT_SUPER) {
             io.AddKeyEvent(ImGuiKey_LeftSuper,
                            (event->mods & LC_MOD_SUPER) != 0);
-            io.AddKeyEvent(ImGuiKey_RightSuper, false);
+        } else if (event->key == LC_KEY_RIGHT_SUPER) {
+            io.AddKeyEvent(ImGuiKey_RightSuper,
+                           (event->mods & LC_MOD_SUPER) != 0);
         }
         if (mapped == ImGuiKey_None) {
             return 0;

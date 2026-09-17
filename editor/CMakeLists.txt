@@ -122,6 +122,9 @@ add_library(luma_editor_gui STATIC
     src/gui/gui_inspector_widgets.cpp
     src/gui/gui_gizmo_overlay.cpp
     src/gui/gui_loop.cpp
+    src/gui/gui_theme.cpp
+    src/gui/gui_layout.cpp
+    src/gui/gui_icons.cpp
     "${LUMA_IMGUI_DIR}/imgui.cpp"
     "${LUMA_IMGUI_DIR}/imgui_draw.cpp"
     "${LUMA_IMGUI_DIR}/imgui_tables.cpp"
@@ -363,6 +366,18 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(luma_editor_app PRIVATE m)
 endif()
 
+# Phase 33V negative tests (headless): failure paths must fail
+# cleanly (bad project/scene paths, reparent cycles, stale handles,
+# missing prefabs, play/save guards, empty drop payloads).
+add_executable(test_editor_negative tests/test_editor_negative.c)
+target_link_libraries(test_editor_negative PRIVATE luma_editor)
+target_include_directories(test_editor_negative PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_editor_negative PRIVATE m)
+endif()
+add_test(NAME test_editor_negative COMMAND test_editor_negative)
+
 # Phase 33 demo project builder (headless, no window/GPU): builds
 # editor/demo/Phase33Demo/ (manifest + Assets/Orbit.lua +
 # Assets/Spinner.luprefab + Scenes/Main.luma_scene) through the
@@ -385,7 +400,7 @@ set_tests_properties(editor_demo_phase33 PROPERTIES
 # explicitly (no-op for static builds; set AFTER add_test so the
 # demo target exists in every tree, incl. shared).
 if(WIN32)
-    set_tests_properties(test_editor_core test_editor_history test_editor_play test_editor_viewport test_editor_reflect test_prefab_smoke test_project test_import test_assetdb test_project_editor test_gltf_identity test_prefab test_editor_gui test_editor_gui_gpu editor_demo_phase33 PROPERTIES
+    set_tests_properties(test_editor_core test_editor_history test_editor_play test_editor_viewport test_editor_reflect test_prefab_smoke test_project test_import test_assetdb test_project_editor test_gltf_identity test_prefab test_editor_gui test_editor_gui_gpu test_editor_negative editor_demo_phase33 PROPERTIES
         ENVIRONMENT "PATH=$<TARGET_FILE_DIR:lumac>\;$ENV{PATH}")
 endif()
 

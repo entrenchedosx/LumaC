@@ -633,15 +633,18 @@ void leg_viewport_camera_update(leg_context *ctx, leg_ui *ui,
         ImGui::ResetMouseDragDelta(2);
         return;
     }
-    /* WASD/QE fly (viewport hovered + GUI yields keyboard). */
+    /* WASD/QE fly (viewport hovered + GUI yields keyboard).
+     * A W/E/R mode-switch press this frame suppresses flying that
+     * same key (the press already did its job as a hotkey). */
     if (!leg_wants_keyboard(ctx)) {
         float speed = vp->distance *
                       (float)ui->camera_speed / 100.0f * dt;
         float fwd[2] = { 0, 0 };
         float strafe = 0.0f;
         float rise = 0.0f;
+        int skip = (ui != NULL) ? ui->gizmo_switched_key : 0;
 
-        if (ImGui::IsKeyDown(ImGuiKey_W)) {
+        if (skip != (int)ImGuiKey_W && ImGui::IsKeyDown(ImGuiKey_W)) {
             fwd[0] += 1.0f;
         }
         if (ImGui::IsKeyDown(ImGuiKey_S)) {
@@ -653,7 +656,7 @@ void leg_viewport_camera_update(leg_context *ctx, leg_ui *ui,
         if (ImGui::IsKeyDown(ImGuiKey_A)) {
             strafe -= 1.0f;
         }
-        if (ImGui::IsKeyDown(ImGuiKey_E)) {
+        if (skip != (int)ImGuiKey_E && ImGui::IsKeyDown(ImGuiKey_E)) {
             rise += 1.0f;
         }
         if (ImGui::IsKeyDown(ImGuiKey_Q)) {
