@@ -612,6 +612,7 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
                 const ImDrawCmd *cmd = &list->CmdBuffer[ci];
                 uint64_t tex_id = 0;
                 uint32_t slot = 0;
+                lc_binding_set *bound_set = NULL;
                 lc_scissor_rect sc;
 
                 if (cmd->UserCallback != NULL) {
@@ -619,13 +620,32 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
                 }
                 tex_id = (uint64_t)cmd->GetTexID();
                 if (tex_id == (uint64_t)ImTextureID_Invalid ||
-                    tex_id == 0 || tex_id > LEG_TEX_MAX - 1) {
+                    tex_id == 0) {
                     return 0; /* missing texture (sync failed?) */
                 }
-                slot = (uint32_t)(tex_id - 1);
-                if (!gpu->tex[slot].used ||
-                    gpu->tex[slot].set == NULL) {
-                    return 0;
+                if (tex_id <= LEG_TEX_MAX - 1) {
+                    /* Font table ID (slot+1): bind the slot set. */
+                    slot = (uint32_t)(tex_id - 1);
+                    if (!gpu->tex[slot].used ||
+                        gpu->tex[slot].set == NULL) {
+                        return 0;
+                    }
+                    bound_set = gpu->tex[slot].set;
+                } else {
+                    /* Viewport ID: binding-set pointer round-tripped
+                     * through leg_viewport_render (gui_viewport_tex).
+                     * Validate it names the context's live viewport
+                     * target set before binding (never bind a stale
+                     * pointer after a resize destroyed it). */
+                    lc_binding_set *vs =
+                        (lc_binding_set *)(uintptr_t)tex_id;
+
+                    if (vs == NULL ||
+                        ctx->viewport_target == NULL ||
+                        vs != ctx->viewport_target->set) {
+                        return 0;
+                    }
+                    bound_set = vs;
                 }
                 /* ClipRect is DisplayPos-relative; the pass extent is
                  * framebuffer px (scale 1 in this bridge). */
@@ -642,7 +662,7 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
                     return 0;
                 }
                 if (lc_encoder_bind_binding_set(enc, gpu->pipeline, 0,
-                                                gpu->tex[slot].set) !=
+                                                bound_set) !=
                     LC_SUCCESS) {
                     return 0;
                 }

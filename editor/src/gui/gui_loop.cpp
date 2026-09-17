@@ -2,11 +2,12 @@
  *
  * Hosts the desktop frame: leg_frame_begin drains the lc_window queue
  * (each event mapped once into io) + sets display extent/dt and opens
- * the dockspace root; panels record between begin/end; leg_frame_end
- * closes the root, renders ImDrawData into stats (user callbacks are
- * skipped, counted, reported — never executed), and leaves GPU
- * recording to gui_draw.cpp's walk (same pass, blended pipeline,
- * per-draw scissor).
+ * the dockspace root; the HOST calls leg_panels_frame between
+ * begin/end (viewport + hierarchy + inspector + assets + console +
+ * status); leg_frame_end closes the root, renders ImDrawData into
+ * stats (user callbacks are skipped, counted, reported — never
+ * executed), and leaves GPU recording to gui_draw.cpp's walk (same
+ * pass, blended pipeline, per-draw scissor).
  *
  * Event-queue contract (no double-consume, no leak): while a GUI
  * context is active the host must NOT drain lc_window_read_event
@@ -16,6 +17,19 @@
  * host observes them through its own frame-input + should_close
  * polling, NOT by re-draining the queue. leg_feed_event maps one
  * caller-owned value (synthetic/headless) and never drains.
+ *
+ * Engine-input contract (no leaks into gameplay): the host pumps
+ * lc_poll_events() BEFORE leg_frame_begin (the drain ingests OS
+ * events into the lc queue). leg_frame_begin then maps each event
+ * into ImGui io AND the engine observes the same queue? NO — the
+ * engine drains via le_engine_begin_frame -> le_input_poll_platform
+ * (lc_window_read_event). To avoid double-consume, the app attaches
+ * NO window to the engine (le_engine_attach_window is never called
+ * for the editor window): gameplay input during Play comes from
+ * le_input_inject_* (driven by viewport hover + io state), never
+ * from the OS queue behind the GUI's back. Text fields therefore
+ * never leak keystrokes into gameplay, and Play never starves the
+ * GUI: one queue, one drainer (the GUI), explicit injection across.
  */
 
 #include <cstring>

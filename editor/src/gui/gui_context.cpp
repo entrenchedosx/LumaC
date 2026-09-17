@@ -92,6 +92,14 @@ void leg_context_destroy(leg_context *context) {
         leg_gpu_teardown(context, context->gpu);
         context->gpu = NULL;
     }
+    /* Panels UI state (no device objects; order vs GPU irrelevant). */
+    if (context->ui != NULL) {
+        leg_ui_teardown(context);
+    }
+    /* Viewport target (lc_* objects; freed while the device lives). */
+    if (context->viewport_target != NULL) {
+        leg_viewport_target_destroy(&context->viewport_target);
+    }
     if (context->imgui != NULL) {
         ImGui::SetCurrentContext(context->imgui);
         ImGui::DestroyContext(context->imgui);
