@@ -328,6 +328,17 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
                            lc_command_encoder *enc,
                            const ImDrawData *draw,
                            lc_format target_format);
+/* Last record failure (0 none; 1 gpu-ensure; 2 font-sync; 3 budget;
+ * 4 vtx buffer; 5 idx buffer; 6 vtx upload; 7 idx upload; 8 bind
+ * pipeline; 9 bind vtx; 10 bind idx; 11 push; 12 sampler set;
+ * 13 per-draw tex/bind/scissor/draw; 14 bad display size). Test +
+ * app diagnostics (never silent on GPU failure). */
+static int g_leg_record_step = 0;
+
+int leg_record_step_last(void) {
+    return g_leg_record_step;
+}
+
 led_result leg_record_gui(leg_context *context,
                           lc_command_encoder *encoder,
                           lc_format target_format) {
@@ -483,35 +494,43 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
     int li = 0;
 
     if (ctx == NULL || gpu == NULL || enc == NULL || draw == NULL) {
+        g_leg_record_step = 14;
         return 0;
     }
     if (!draw->Valid) {
+        g_leg_record_step = 14;
         return 0;
     }
     if (draw->TotalVtxCount <= 0 || draw->TotalIdxCount <= 0) {
         return 1; /* nothing to draw (valid empty frame) */
     }
     if (!leg_gpu_ensure(ctx, gpu, target_format)) {
+        g_leg_record_step = 1;
         return 0;
     }
     if (!gpu->ready || gpu->pipeline == NULL) {
+        g_leg_record_step = 1;
         return 0;
     }
     if (!leg_font_sync(ctx, gpu)) {
+        g_leg_record_step = 2;
         return 0;
     }
     leg_draw_budget((uint32_t)draw->TotalVtxCount,
                     (uint32_t)draw->TotalIdxCount, &vb_need, &ib_need,
                     &ov);
     if (ov) {
+        g_leg_record_step = 3;
         return 0;
     }
     if (!leg_buf_ensure(ctx->device, &gpu->vtx, &gpu->vtx_cap, vb_need,
                         LC_BUFFER_USAGE_VERTEX)) {
+        g_leg_record_step = 4;
         return 0;
     }
     if (!leg_buf_ensure(ctx->device, &gpu->idx, &gpu->idx_cap, ib_need,
                         LC_BUFFER_USAGE_INDEX)) {
+        g_leg_record_step = 5;
         return 0;
     }
     /* Upload: pack every list contiguously (global offsets mirror the
@@ -528,6 +547,7 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
             if (lc_buffer_write(gpu->vtx, vtx_base,
                                 list->VtxBuffer.Data,
                                 bytes) != LC_SUCCESS) {
+                g_leg_record_step = 6;
                 return 0;
             }
             vtx_base += bytes;
@@ -538,6 +558,7 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
             if (lc_buffer_write(gpu->idx, idx_base,
                                 list->IdxBuffer.Data,
                                 bytes) != LC_SUCCESS) {
+                g_leg_record_step = 7;
                 return 0;
             }
             idx_base += bytes;
@@ -545,6 +566,7 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
     }
     /* Projection (upstream math; DisplayPos almost always 0,0). */
     if (draw->DisplaySize.x <= 0.0f || draw->DisplaySize.y <= 0.0f) {
+        g_leg_record_step = 14;
         return 0;
     }
     push[0] = 2.0f / draw->DisplaySize.x;
@@ -552,19 +574,23 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
     push[2] = -1.0f - draw->DisplayPos.x * push[0];
     push[3] = -1.0f - draw->DisplayPos.y * push[1];
     if (lc_encoder_bind_pipeline(enc, gpu->pipeline) != LC_SUCCESS) {
+        g_leg_record_step = 8;
         return 0;
     }
     if (lc_encoder_bind_vertex_buffer(enc, 0, gpu->vtx, 0) !=
         LC_SUCCESS) {
+        g_leg_record_step = 9;
         return 0;
     }
     if (lc_encoder_bind_index_buffer(enc, gpu->idx, 0,
                                      LC_INDEX_UINT16) != LC_SUCCESS) {
+        g_leg_record_step = 10;
         return 0;
     }
     if (lc_encoder_push_constants(enc, gpu->pipeline,
                                   LC_SHADER_VISIBILITY_VERTEX, 0,
                                   sizeof(push), push) != LC_SUCCESS) {
+        g_leg_record_step = 11;
         return 0;
     }
     /* Sampler set is constant all frame (shared linear sampler,
@@ -579,6 +605,7 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
             memset(&w, 0, sizeof(w));
             if (lc_binding_set_create(gpu->samp_layout, &samp_set) !=
                 LC_SUCCESS) {
+                g_leg_record_step = 12;
                 return 0;
             }
             w.binding = 0;
@@ -587,12 +614,14 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
             w.u.sampler.sampler = gpu->linear_sampler;
             if (lc_binding_set_update(samp_set, &w, 1) != LC_SUCCESS) {
                 lc_binding_set_destroy(samp_set);
+                g_leg_record_step = 12;
                 return 0;
             }
             gpu->tex[LEG_TEX_MAX - 1].set = samp_set;
         }
         if (lc_encoder_bind_binding_set(enc, gpu->pipeline, 1,
                                         samp_set) != LC_SUCCESS) {
+            g_leg_record_step = 12;
             return 0;
         }
     }
@@ -621,6 +650,7 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
                 tex_id = (uint64_t)cmd->GetTexID();
                 if (tex_id == (uint64_t)ImTextureID_Invalid ||
                     tex_id == 0) {
+                    g_leg_record_step = 13;
                     return 0; /* missing texture (sync failed?) */
                 }
                 if (tex_id <= LEG_TEX_MAX - 1) {
@@ -628,6 +658,7 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
                     slot = (uint32_t)(tex_id - 1);
                     if (!gpu->tex[slot].used ||
                         gpu->tex[slot].set == NULL) {
+                        g_leg_record_step = 13;
                         return 0;
                     }
                     bound_set = gpu->tex[slot].set;
@@ -643,6 +674,7 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
                     if (vs == NULL ||
                         ctx->viewport_target == NULL ||
                         vs != ctx->viewport_target->set) {
+                        g_leg_record_step = 13;
                         return 0;
                     }
                     bound_set = vs;
@@ -659,11 +691,13 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
                     continue; /* fully clipped: skip the draw */
                 }
                 if (lc_encoder_set_scissor(enc, &sc) != LC_SUCCESS) {
+                    g_leg_record_step = 13;
                     return 0;
                 }
                 if (lc_encoder_bind_binding_set(enc, gpu->pipeline, 0,
                                                 bound_set) !=
                     LC_SUCCESS) {
+                    g_leg_record_step = 13;
                     return 0;
                 }
                 if (lc_encoder_draw_indexed(
@@ -671,6 +705,7 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
                         cmd->IdxOffset + global_idx,
                         (int32_t)(cmd->VtxOffset + global_vtx),
                         0) != LC_SUCCESS) {
+                    g_leg_record_step = 13;
                     return 0;
                 }
             }
@@ -692,6 +727,7 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
             lc_encoder_set_scissor(enc, &full);
         }
     }
+    g_leg_record_step = 0;
     return 1;
 }
 
@@ -938,24 +974,12 @@ static int leg_tex_upload_rgba_fwd(leg_context *ctx, leg_gpu *gpu,
         write.array_element = 0;
         write.type = LC_BINDING_SAMPLED_IMAGE;
         write.u.image.view = gpu->tex[slot].view;
-        if (lc_binding_set_create(gpu->tex_layout,
-                                  &gpu->tex[slot].set) != LC_SUCCESS) {
-            lc_image_view_destroy(gpu->tex[slot].view);
-            lc_image_destroy(gpu->tex[slot].image);
-            gpu->tex[slot].view = NULL;
-            gpu->tex[slot].image = NULL;
-            return 0;
-        }
-        if (lc_binding_set_update(gpu->tex[slot].set, &write, 1) !=
-            LC_SUCCESS) {
-            lc_binding_set_destroy(gpu->tex[slot].set);
-            lc_image_view_destroy(gpu->tex[slot].view);
-            lc_image_destroy(gpu->tex[slot].image);
-            gpu->tex[slot].set = NULL;
-            gpu->tex[slot].view = NULL;
-            gpu->tex[slot].image = NULL;
-            return 0;
-        }
+        /* NOTE: the image is UNDEFINED-state here (fresh create, no
+         * upload yet) — the set update MUST come after the first
+         * upload (which transitions to SHADER_READ). Validated at
+         * update time: sampled images require SHADER_READ. So: do
+         * NOT create+update the set here; fall through to the upload
+         * below, then create+update the set on first success. */
         gpu->tex[slot].width = width;
         gpu->tex[slot].height = height;
     }
@@ -973,8 +997,14 @@ static int leg_tex_upload_rgba_fwd(leg_context *ctx, leg_gpu *gpu,
     if (lc_image_write(gpu->tex[slot].image, &up) != LC_SUCCESS) {
         return 0;
     }
-    /* Refresh the binding (re-validate sampled-readable state after
-     * the upload transitioned the image). */
+    /* First upload done: image is SHADER_READ — create+update the
+     * set NOW (fresh slots) or refresh it (reused slots). */
+    if (gpu->tex[slot].set == NULL) {
+        if (lc_binding_set_create(gpu->tex_layout,
+                                  &gpu->tex[slot].set) != LC_SUCCESS) {
+            return 0;
+        }
+    }
     memset(&write, 0, sizeof(write));
     write.binding = 0;
     write.array_element = 0;

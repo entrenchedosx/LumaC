@@ -1182,6 +1182,17 @@ LED_API led_result leg_frame_begin(leg_context *context,
  *  frame began minimized. */
 LED_API led_result leg_frame_end(leg_context *context);
 
+/** Record all editor panels for the current frame (menu, toolbar,
+ *  viewport, hierarchy, inspector, assets, console, status). Call
+ *  between leg_frame_begin and leg_frame_end; `viewport` is the
+ *  host-owned orbit state the viewport panel + gizmo overlay drive
+ *  (may be NULL for a headless frame — panels render, camera and
+ *  picking idle). `dt` is the frame delta in seconds (clamped by
+ *  the panels to (0, 0.25]). NULL context is a no-op (NULL-safe so
+ *  hosts can call unconditionally). */
+LED_API void leg_panels_frame(leg_context *context,
+                              led_viewport *viewport, float dt);
+
 /** Record the current frame's GUI draws into the caller's open pass
  *  (Phase 33 draw walk: blended pipeline, per-draw scissor, font
  *  texture sync). Call between leg_frame_end and present, inside ONE
@@ -1237,6 +1248,13 @@ LED_API int leg_clip_to_scissor(float clip_min_x, float clip_min_y,
                                 float clip_max_x, float clip_max_y,
                                 uint32_t pass_w, uint32_t pass_h,
                                 lc_scissor_rect *out_rect);
+
+/** Last GUI record failure step (diagnostics; 0 = none/last-OK,
+ *  1 gpu-ensure, 2 font-sync, 3 budget, 4 vtx buffer, 5 idx buffer,
+ *  6 vtx upload, 7 idx upload, 8 bind pipeline, 9 bind vtx, 10 bind
+ *  idx, 11 push, 12 sampler set, 13 per-draw tex/bind/scissor/draw,
+ *  14 bad input). Pure query; 0 for NULL. */
+LED_API int leg_record_step_last(void);
 
 /** Draw-walk budget probe (pure math, headless-testable): estimates
  *  vertex/index buffer bytes for `vertex_count` ImDrawVert (pos+uv+

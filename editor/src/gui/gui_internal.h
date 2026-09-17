@@ -142,8 +142,13 @@ void leg_ui_teardown(leg_context *ctx);
 void leg_status(leg_context *ctx, const char *text, int error);
 
 /* Panels frame entry (gui_panels.cpp; records all panels between
- * leg_frame_begin/end). NULL-safe. */
+ * leg_frame_begin/end). NULL-safe. Hosts (the app + GPU proofs) call
+ * this between begin/end; takes the session viewport + frame dt. */
 void leg_panels_frame(leg_context *ctx, led_viewport *vp, float dt);
+
+/* Viewport host hook (gui_panels.cpp owner): the panels frame caches
+ * the viewport pointer for the gizmo overlay/camera update. */
+void leg_viewport_host_set(led_viewport *vp, float dt);
 
 /* One inspector row -> typed widget (gui_inspector_widgets.cpp).
  * Returns 1 when the row drew (0 for NULL args). */
@@ -161,6 +166,13 @@ int leg_gizmo_overlay(leg_context *ctx, leg_ui *ui,
 void leg_viewport_camera_update(leg_context *ctx, leg_ui *ui,
                                 led_viewport *vp, int hovered,
                                 float dt);
+
+/* Last record failure step (gui_draw.cpp owner; 0 = none/last-OK;
+ * 1 gpu-ensure, 2 font-sync, 3 budget, 4 vtx buffer, 5 idx buffer,
+ * 6 vtx upload, 7 idx upload, 8 bind pipeline, 9 bind vtx, 10 bind
+ * idx, 11 push, 12 sampler set, 13 per-draw, 14 bad input). Test +
+ * app diagnostics (never silent on GPU failure). */
+int leg_record_step_last(void);
 
 /* Viewport bridge (gui_viewport_tex.cpp): render the session world
  * into the panel-sized target + return the ImGui TexID for the panel
