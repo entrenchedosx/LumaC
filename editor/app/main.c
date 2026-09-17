@@ -37,8 +37,15 @@
  *
  * Usage: luma_editor [--project DIR] [--scene FILE] [--frames N]
  *   [--no-validation] [--no-vsync] [--screenshot out.png]
+ *   [--import-all]
  *   --frames 0 (default) runs until the window closes; N > 0 runs
  *   N frames (CI/screenshot discipline, like engine_scene).
+ *   --import-all imports every UNIMPORTED record via led_import_asset
+ *   (the exact function the Assets panel Import button calls) after
+ *   project open, before scene open: batch/CI project warmup so a
+ *   fresh process can open mesh-bearing scenes without manual
+ *   per-asset clicks. Interactive sessions keep the lazy contract
+ *   (open never uploads GPU resources unless --import-all is given).
  * No absolute paths are stored: project/scene CLI values resolve at
  * startup only; the session remembers the scene path as given.
  */
@@ -120,9 +127,13 @@ int main(int argc, char **argv) {
     const char *project_dir = NULL;
     const char *scene_file = NULL;
     const char *screenshot_path = NULL;
+    const char *select_name = NULL;
+    const char *size_arg = NULL;
+    int play_at_start = 0;
     unsigned long max_frames = 0;
     int use_validation = 1;
     int use_vsync = 1;
+    int import_all = 0;
     unsigned long i = 0;
     lc_window_desc window_desc;
     lc_window *window = NULL;
@@ -163,11 +174,28 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--screenshot") == 0 &&
                    i + 1 < argc) {
             screenshot_path = argv[++i];
+        } else if (strcmp(argv[i], "--import-all") == 0) {
+            import_all = 1;
+        } else if (strcmp(argv[i], "--select") == 0 &&
+                   i + 1 < argc) {
+            /* Automation/verification selection (same
+             * led_selection_set the Hierarchy click path calls). */
+            select_name = argv[++i];
+        } else if (strcmp(argv[i], "--size") == 0 &&
+                   i + 1 < argc) {
+            /* Verification window size (e.g. 1920x1080, 1280x720). */
+            size_arg = argv[++i];
+        } else if (strcmp(argv[i], "--play") == 0) {
+            /* Enter Play after setup (same led_play_enter the Play
+             * button calls; Play/Stop isolation verified headed). */
+            play_at_start = 1;
         } else {
             fprintf(stderr,
                     "usage: luma_editor [--project DIR] "
                     "[--scene FILE] [--frames N] [--no-validation] "
-                    "[--no-vsync] [--screenshot out.png]\n");
+                    "[--no-vsync] [--screenshot out.png] "
+                    "[--import-all] [--select NAME] [--size WxH] "
+                    "[--play]\n");
             return 1;
         }
     }
@@ -179,6 +207,19 @@ int main(int argc, char **argv) {
     window_desc.title = "Luma Editor (Phase 33)";
     window_desc.width = 1280;
     window_desc.height = 800;
+    if (size_arg != NULL) {
+        unsigned long sw = 0;
+        unsigned long sh = 0;
+
+        if (sscanf(size_arg, "%lux%lu", &sw, &sh) == 2 && sw >= 640 &&
+            sh >= 480 && sw <= 3840 && sh <= 2160) {
+            window_desc.width = (uint32_t)sw;
+            window_desc.height = (uint32_t)sh;
+        } else {
+            fprintf(stderr, "warning: bad --size '%s' (want WxH)\n",
+                    size_arg);
+        }
+    }
     if (lc_window_create(&window_desc, &window) != LC_SUCCESS) {
         fprintf(stderr, "lc_window_create failed\n");
         lc_shutdown();
@@ -251,6 +292,35 @@ int main(int argc, char **argv) {
         if (led_project_open(session, project_dir) != LED_SUCCESS) {
             fprintf(stderr, "warning: project open failed (%s)\n",
                     project_dir);
+        } else if (import_all) {
+            /* Batch warmup: import every UNIMPORTED record through
+             * the same led_import_asset the GUI Import button calls
+             * (per-record result; a single bad asset never aborts
+             * the batch — mirrors the panel's per-click errors). */
+            uint32_t n = led_assetdb_count(session);
+            uint32_t k = 0;
+            uint32_t ok_imports = 0;
+
+            for (k = 0; k < n; k++) {
+                led_asset_record rec;
+
+                memset(&rec, 0, sizeof(rec));
+                if (!led_assetdb_get(session, k, &rec)) {
+                    continue;
+                }
+                if (rec.status != LED_IMPORT_UNIMPORTED) {
+                    continue;
+                }
+                if (led_import_asset(session, rec.source_path) ==
+                    LED_SUCCESS) {
+                    ok_imports++;
+                } else {
+                    fprintf(stderr,
+                            "warning: import failed (%s)\n",
+                            rec.source_path);
+                }
+            }
+            printf("import-all: %u ok\n", ok_imports);
         }
     }
     if (scene_file != NULL) {
@@ -302,12 +372,30 @@ int main(int argc, char **argv) {
         led_execute(session, &cmd);
         led_history_clear(session);
     }
+    if (select_name != NULL) {
+        le_object found = LE_OBJECT_INVALID;
+
+        if (le_world_find_by_name(world, select_name, &found)) {
+            led_selection_set(session, &found, 1);
+            printf("selected '%s'\n", select_name);
+        } else {
+            fprintf(stderr, "warning: select target '%s' not found\n",
+                    select_name);
+        }
+    }
 
     printf("Luma Editor (Phase 33): %s | %s\n", lc_get_version_string(),
            led_project_is_open(session) ? "project open"
                                         : "no project");
     printf("Author: open project -> browse -> scene -> create -> "
            "gizmo -> prefab -> undo -> save -> play -> stop.\n");
+    if (play_at_start) {
+        if (led_play_enter(session) == LED_SUCCESS) {
+            printf("playing (via --play)\n");
+        } else {
+            fprintf(stderr, "warning: --play enter failed\n");
+        }
+    }
 
     for (frame = 0; max_frames == 0 || frame < max_frames; frame++) {
         leg_frame_input in;

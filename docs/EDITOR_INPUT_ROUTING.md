@@ -1,4 +1,4 @@
-# Editor Input Routing (Phase 33)
+# Editor Input Routing (Phase 33V — audited)
 
 Exactly one owner per event stream. No leaks between GUI and
 gameplay.
@@ -11,7 +11,8 @@ gameplay.
   (`le_engine_attach_window` is never called by the app): no
   engine event pump competes with the GUI.
 - `leg_feed_event` NEVER drains (synthetic/headless injection
-  only — used by tests).
+  only — used by tests; positive mapping matrix in
+  `test_editor_gui_gpu` since 33V).
 - `leg_wants_keyboard` / `leg_wants_mouse` mirror capture
   state: when the GUI captures (typing in a field, dragging a
   gizmo, hovering a panel), Play injection is suppressed for
@@ -21,25 +22,42 @@ gameplay.
 
 `lc_keycode` -> GUI keys: full A-Z / 0-9 / modifiers / arrows /
 nav / F-keys / punctuation / numpad (unmapped -> none).
-Modifier mirror (Shift/Ctrl/Alt/Super both sides), UTF-8 CHAR
-decode for text fields, mouse buttons + wheel (both axes).
+Modifier mirror follows the event's own side (33V fix: Phase 33
+forced every RIGHT modifier false, so right-side modifiers could
+never register). UTF-8 CHAR decode for text fields (control chars
+refused), mouse buttons + wheel (both axes). Host-owned events
+(focus/close/resize) are never consumed as GUI input.
 
 ## Play contract (`app_inject_play_input`, `editor/app/main.c`)
 
-While `led_is_playing`, each frame maps the CURRENT `lc_*`
-key state to `le_input_inject_*` on the runtime engine —
-but ONLY for keys the GUI does not want
-(`leg_wants_keyboard` gate per key class; mouse injection
-likewise gated on `leg_wants_mouse`). Per-key injection of
-arbitrary GUI key events into the runtime is deferred to
-Phase 34; Phase 33 Play = runtime tick + isolation (scripts
-run, edit stays byte-identical).
+Honest 33V statement (the Phase 33 doc overstated this):
+`app_inject_play_input` is a STUB — per-key gameplay injection
+from the OS queue while the GUI owns the drain is a documented
+non-goal. Phase 33V Play = runtime world ticks (scripts run,
+physics integrates), edit world stays paused + byte-identical
+(canonical oracle in tests), viewport composites the RUNTIME
+world (33V fix: the active camera is carried into the runtime
+world; before, Play rendered black). Text fields never leak
+keystrokes into gameplay (`leg_wants_keyboard` gate); the engine
+never starves the GUI (one queue, one drainer).
 
 ## Focus
 
-Panels mirror GUI focus into `led_shortcut_focus_*` so the
-shortcut table (`Ctrl+Z/Y/S`, `F5` play toggle, `F10` step,
-`Delete`, `Ctrl+D` duplicate, `Ctrl+N` new, `W/E/R` gizmo
-modes) fires only when no text field is active. Play-mode
-guards stay engine-side (`ALREADY_PLAYING` for
-new/open/revert; save allowed mid-play on the edit world).
+- Focus loss releases held keys: the frame drain calls
+  `io.ClearInputKeys()` on `LC_EVENT_FOCUS_LOST` (33V fix: Phase
+  33 documented the release but no-op'd it).
+- Shortcuts fire only when no text field is active
+  (`leg_wants_keyboard` gate, fresh presses, no auto-repeat):
+  `Ctrl+Z/Y/D/S` undo/redo/duplicate/save, `Delete` delete,
+  `F` focus selection, `F5` play / `Shift+F5` stop, `F10` step.
+  (`Ctrl+N` was listed here in Phase 33 but has never been bound
+  — removed from the list rather than left as a false promise.)
+- `W/E/R` switch translate/rotate/scale when the viewport is
+  hovered, no modifiers held, not playing (33V: implemented to
+  match this doc's long-standing promise; the overlay fly block
+  skips the switch frame for the switched key so a tap doesn't
+  also fly). `WASD/QE` fly, `RMB` orbit, `MMB/Shift+RMB` pan,
+  wheel dolly, `F` focus — all hover-gated to the viewport.
+- Play-mode guards stay engine-side (`ALREADY_PLAYING` for
+  enter/new/open/revert; save allowed mid-play on the edit
+  world; reimport/prefab authoring rejected during play).
