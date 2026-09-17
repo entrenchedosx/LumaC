@@ -71,10 +71,10 @@ poll events -> resize/recreate -> session tick (+ play tick)
   offscreen RGBA8 target after the swapchain pass, then
   readbacks + writes PNG (same discipline as
   `examples/engine_scene`).
-- Demo: `editor/demo/Phase33Demo/` (built headless by
-  `editor_demo_phase33` through the public `led_*` API:
-  manifest + `Assets/Orbit.lua` + `Assets/Spinner.luprefab` +
-  `Scenes/Main.luma_scene`) opens with
+- Demo: `editor/demo/Phase33Demo/` (git-ignored generated output;
+  rebuilt headless by `editor_demo_phase33` through the public
+  `led_*` API: manifest + `Assets/Orbit.lua` +
+  `Assets/Spinner.luprefab` + `Scenes/Main.luma_scene`) opens with
   `--project editor/demo/Phase33Demo
     --scene editor/demo/Phase33Demo/Scenes/Main.luma_scene`.
 

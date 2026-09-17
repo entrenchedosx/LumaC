@@ -67,5 +67,9 @@ desktop.ini
 *.log
 *.ppm
 
+# Generated demo project (rebuilt headless by editor_demo_phase33;
+# UUIDs churn per rebuild — the builder is the source of truth)
+editor/demo/Phase33Demo/
+
 # Scratch screenshots at repo root (use docs/images/ instead)
 hiz-debug.png

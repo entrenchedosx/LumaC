@@ -47,8 +47,10 @@ builder). 1k Play/Stop cycles stay identical (stress in
 
 ## Demo
 
-`editor/demo/Phase33Demo/` (rebuild with
-`editor_demo_phase33`, idempotent): CameraRig + Camera + Sun
+`editor/demo/Phase33Demo/` (NOT tracked — rebuilt headless and
+idempotently by `editor_demo_phase33` via CTest; generated UUIDs
+churn per rebuild so outputs are git-ignored and the builder is
+the source of truth): CameraRig + Camera + Sun
 + Ground + scripted Spinner + one prefab instance;
 `Scenes/Main.luma_scene` reopens in a fresh process
 (portable: session-local script refs detached before save;
