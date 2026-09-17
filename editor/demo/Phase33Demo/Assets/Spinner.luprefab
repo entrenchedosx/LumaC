@@ -1,0 +1,11 @@
+LUMA_PREFAB 1
+prefab 66d3589b750bb9ba81e30b9a614251ec
+object aca6c4d91e4670216939538abca21b96
+name "Spinner"
+enabled 1
+parent nil
+position 0 0 0
+rotation 0 0 0 1
+scale 1 1 1
+end
+prefab_root aca6c4d91e4670216939538abca21b96

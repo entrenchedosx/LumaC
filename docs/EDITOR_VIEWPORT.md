@@ -1,8 +1,9 @@
-# Editor Viewport (Phase 31)
+# Editor Viewport (Phase 31; rendering in Phase 33)
 
 Headless orbit/pick/frame math. No window, no GPU, no renderer
 submission — the engine render trio stays engine-side; a Phase-32
-GUI renders these models.
+GUI renders these models. Phase 33 did exactly that; see
+`EDITOR_VIEWPORT_RENDERING.md` for the composite + camera update.
 
 ## Orbit camera
 

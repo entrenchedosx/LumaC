@@ -497,6 +497,94 @@ int main(void) {
 
     /* Teardown (context first: GPU bridge dies while device lives). */
     leg_context_destroy(gui);
+
+    /* Phase 33-E stress (GUI context torn down; session/engine stay):
+     * 1k Play/Stop cycles (enter+tick+exit) with edit byte-identical
+     * at the end; scene switch (save-as -> new -> open round-trip
+     * via TEMP file, failed open preserves); revert oracle. These
+     * are the headed-app's Play/Stop + scene-switch paths driven
+     * headless through the same public led_* API. */
+    {
+        char *steady = NULL;
+        size_t steady_size = 0;
+        unsigned long cycle = 0;
+
+        steady = capture_canonical(engine, world, &steady_size);
+        TEST_CHECK(steady != NULL, "stress baseline capture");
+        for (cycle = 0; cycle < 1000; cycle++) {
+            if (led_play_enter(session) != LED_SUCCESS) {
+                TEST_CHECK(0, "stress enter 1k");
+                break;
+            }
+            if (!led_play_is_paused(session)) {
+                if (led_play_tick(session, 1.0f / 60.0f) !=
+                    LED_SUCCESS) {
+                    TEST_CHECK(0, "stress tick 1k");
+                    led_play_exit(session);
+                    break;
+                }
+            }
+            if (led_play_exit(session) != LED_SUCCESS) {
+                TEST_CHECK(0, "stress exit 1k");
+                break;
+            }
+        }
+        TEST_CHECK(cycle == 1000, "play/stop 1k cycles");
+        TEST_CHECK(!led_is_playing(session),
+                   "not playing after 1k");
+        {
+            char *after = NULL;
+            size_t after_size = 0;
+
+            after = capture_canonical(engine, world, &after_size);
+            TEST_CHECK(after != NULL, "stress after capture");
+            TEST_CHECK(after != NULL && steady != NULL &&
+                           after_size == steady_size &&
+                           strcmp(after, steady) == 0,
+                       "edit byte-identical after 1k play/stop");
+            if (after != NULL) {
+                le_scene_free_text(after);
+            }
+        }
+        if (steady != NULL) {
+            le_scene_free_text(steady);
+        }
+    }
+    {
+        const char *tmp = getenv("TEMP");
+        const char *tmp2 = getenv("TMP");
+        char path[1024];
+        uint32_t before = le_world_get_object_count(world);
+
+        if (tmp == NULL || tmp[0] == '\0') {
+            tmp = tmp2;
+        }
+        if (tmp == NULL || tmp[0] == '\0') {
+            tmp = ".";
+        }
+        memset(path, 0, sizeof(path));
+        snprintf(path, sizeof(path),
+                 "%s/phase33_gui_stress.luma_scene", tmp);
+        TEST_CHECK(led_scene_save_as(session, path) == LED_SUCCESS,
+                   "stress save as");
+        TEST_CHECK(led_scene_new(session) == LED_SUCCESS,
+                   "stress scene new");
+        TEST_CHECK(le_world_get_object_count(world) == 0,
+                   "stress world cleared");
+        TEST_CHECK(led_scene_open(session, path) == LED_SUCCESS,
+                   "stress scene open");
+        TEST_CHECK(le_world_get_object_count(world) == before,
+                   "stress switch restored census");
+        TEST_CHECK(led_scene_open(session,
+                                  "phase33_gui_missing_xyz") !=
+                       LED_SUCCESS,
+                   "stress missing open fails");
+        TEST_CHECK(le_world_get_object_count(world) == before,
+                   "stress failed open preserves world");
+        TEST_CHECK(led_scene_revert(session) == LED_SUCCESS,
+                   "stress revert ok");
+        remove(path);
+    }
     led_session_destroy(session);
     lc_render_target_destroy(target);
     lc_image_view_destroy(color_view);

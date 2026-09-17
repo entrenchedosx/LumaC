@@ -1,8 +1,10 @@
-# Editor Architecture (Phase 31)
+# Editor Architecture (Phase 31; GUI in Phase 33)
 
 Godot-like editor **foundation**, not a full editor. Headless
 `EditorCore` + headless `EditorGUI` models, proven by CTest without
-any window, GPU, or GUI framework.
+any window, GPU, or GUI framework. Phase 33 connects the real
+desktop view; see `EDITOR_GUI.md` for the `leg_*` layer and
+`editor/app/main.c` for the host.
 
 ## Layering
 

@@ -1,0 +1,52 @@
+LUMA_SCENE 1
+object 188be95c39cce0c51ff289309e3242e4
+name "Sun"
+enabled 1
+parent nil
+position 0 0 0
+rotation 0 0 0 1
+scale 1 1 1
+light dir 1 1 1 3 0 0 0
+shadow 0
+end
+object 3c5ab9803cc4bce45689fb882a744949
+name "Spinner"
+enabled 1
+parent nil
+position 0 0 0
+rotation 0 0 0 1
+scale 1 1 1
+end
+object 43f26b29b39ff58d99f7b147e0df6ce2
+name "CameraRig"
+enabled 1
+parent nil
+position 0 4 10
+rotation 0 0 0 1
+scale 1 1 1
+end
+object 6be23662a79197ccfca4ba5ef10f6af1
+name "Ground"
+enabled 1
+parent nil
+position 0 0 0
+rotation 0 0 0 1
+scale 1 1 1
+end
+object 7e450a849a0467a844ddd347a020c434
+name "Camera"
+enabled 1
+parent 43f26b29b39ff58d99f7b147e0df6ce2
+position 0 0 0
+rotation 0 0 0 1
+scale 1 1 1
+camera persp 1.04719758 1.77777779 0.100000001 1000
+end
+object aca6c4d91e4670216939538abca21b96
+name "Spinner"
+enabled 1
+parent nil
+position 0 0 0
+rotation 0 0 0 1
+scale 1 1 1
+end

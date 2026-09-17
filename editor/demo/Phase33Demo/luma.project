@@ -1,0 +1,6 @@
+LUMA_PROJECT 1
+name Phase33Demo
+startup_scene -
+asset_root Assets
+asset_root Scenes
+window 1280 720 Luma

@@ -371,6 +371,25 @@ if(WIN32)
         ENVIRONMENT "PATH=$<TARGET_FILE_DIR:lumac>\;$ENV{PATH}")
 endif()
 
+# Phase 33 demo project builder (headless, no window/GPU): builds
+# editor/demo/Phase33Demo/ (manifest + Assets/Orbit.lua +
+# Assets/Spinner.luprefab + Scenes/Main.luma_scene) through the
+# public led_* API. CTest runs it from the REPO ROOT (WORKING_
+# DIRECTORY) so the demo lands in the source tree, then asserts
+# the four files exist (portability: no absolute paths stored).
+add_executable(editor_demo_phase33 demo/phase33_builder.c)
+target_link_libraries(editor_demo_phase33 PRIVATE luma_editor)
+target_include_directories(editor_demo_phase33 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../engine/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(editor_demo_phase33 PRIVATE m)
+endif()
+add_test(NAME editor_demo_phase33
+    COMMAND editor_demo_phase33)
+set_tests_properties(editor_demo_phase33 PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/..")
+
 # Backend-independence guard for the app (same rule as GUARD 1 but
 # covering editor/app + editor/tests: no backend/engine-internal/Lua
 # spellings — the app talks lc_*/lr_*/le_*/led_*/leg_* ONLY — and no

@@ -1,5 +1,61 @@
 # Changelog
 
+## Phase 33
+
+- Added the interactive graphical editor (`editor/src/gui/`,
+  `luma_editor_gui` C++11 lib over a `leg_*` C ABI; `editor/app/`,
+  `luma_editor_app` C11 desktop host): vendored docking
+  immediate-mode GUI (`third_party/imgui/`,
+  `v1.92.9b-docking`, pinned tarball + compiled-core-subset
+  extraction, unmodified upstream, configure-time GUI/backend/
+  Lua-confinement audits), docking panels (menu/toolbar/create/
+  prefab, hierarchy with select/reparent, reflection/command
+  inspector with per-type widgets, asset browser with drag
+  payloads + Import/Reimport + prefab-from-selection, console
+  with script-error mirror, status, rendered viewport),
+  offscreen scene composite sampled as a GUI texture (two-
+  layout texture/sampler discipline, per-(color,depth) blended
+  pipeline, scissor walk with full-target restore, font atlas
+  SHADER_READ ordering), screen-space TRS gizmo overlay
+  (ray-plane drags through `led_gizmo_begin/apply`, snap +
+  Escape-cancel, coalesced undo), single-owner input routing
+  (GUI drains `lc_window_read_event` once; engine never
+  attaches the window; Play injection gated on GUI capture),
+  CLI (`--project/--scene/--frames/--no-validation/--no-vsync/
+  --screenshot` with offscreen re-record + PNG readback), and a
+  portable demo project (`editor/demo/Phase33Demo/`, rebuilt
+  headless by `editor_demo_phase33` through the public API).
+  LumaC additions: `lc_blend_attachment`/`lc_blend_factor`/
+  `lc_blend_op` on graphics pipelines + `lc_scissor_rect` with
+  `lc_encoder_set_scissor`/`lc_encoder_get_scissor`.
+- Fixed along the way: font/texture sets created+updated AFTER
+  `lc_image_write` (fresh images are UNDEFINED pre-transition);
+  GUI pipeline signature carries the pass depth (swapchain
+  passes name depth); composite-before-panels + generation gate
+  (no stale-TexID first frame); viewport texture split to two
+  layouts mirroring the font walk (combined layout fails
+  PIPELINE_INCOMPATIBLE); swapchain CLEAR pass for present
+  legality; screenshot re-records the same draw data into an
+  offscreen target (never reads an unrendered image).
+- Tests: `test_editor_gui` (33, headless: NULL guards, clip
+  matrix, budgets), `test_editor_gui_gpu` (52, Vulkan-gated:
+  context, offscreen RGBA8 pass, panels stats, record walk +
+  scissor restore, present legality, gizmo +1X + undo, CREATE
+  funnel + play + byte-identical + undo/redo, 1k Play/Stop
+  stress + scene-switch oracles), `editor_demo_phase33`
+  (CTest: idempotent demo rebuild + Play oracle); headed
+  `luma_editor_app --frames 30 --screenshot` on the demo
+  project (validation SILENT, 0 ERROR / 0 VUID).
+- Docs: `docs/{EDITOR_GUI,EDITOR_VIEWPORT_RENDERING,
+  EDITOR_INPUT_ROUTING,EDITOR_GIZMOS,EDITOR_WORKFLOW}.md` +
+  `docs/images/editor-phase33-demo.png`; updated `README.md`,
+  `CHANGELOG.md`.
+- Deferred (tracked, not hidden): per-key Play injection of
+  arbitrary GUI key events (Phase 34); prefab overrides;
+  animation timeline; navmesh; material-graph; visual
+  scripting; profiler; plugins; exporter; D3D12 (record
+  replacement point = `editor/src/gui/gui_draw.cpp`).
+
 ## Phase 32
 
 - Added the Luma Project system (`editor/src/project/`, same

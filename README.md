@@ -1,5 +1,24 @@
 # LumaC
 
+Phase 33 connects a real windowed desktop UI to EditorCore +
+Project System + Asset DB + reflection + commands + undo/redo
++ scene + prefab + play + renderer + input: docking immediate-
+mode GUI (`v1.92.9b-docking`, C++ confined to `editor/src/gui/`
+over a `leg_*` C ABI), rendered scene viewport (offscreen
+engine-trio composite sampled as a GUI texture), visual TRS
+gizmos (undoable, coalesced), reflection/command inspector,
+hierarchy select/reparent, asset drag payloads, prefab
+instantiate via GUI, Play/Stop with edit byte-identical, and a
+real `luma_editor_app` desktop host (`--project/--scene/
+--frames/--screenshot`) plus a portable demo project
+(`editor/demo/Phase33Demo/`). All proven (2 new suites +
+headed screenshot, validation silent). See
+`docs/EDITOR_GUI.md`, `docs/EDITOR_VIEWPORT_RENDERING.md`,
+`docs/EDITOR_INPUT_ROUTING.md`, `docs/EDITOR_GIZMOS.md`,
+`docs/EDITOR_WORKFLOW.md`.
+
+![Luma Editor Phase 33 demo](docs/images/editor-phase33-demo.png)
+
 Phase 32 turns engine + scenes + editor core into a **Luma
 Project**: portable project roots (`luma.project` manifest),
 sidecar-based asset database (stable UUIDs across
