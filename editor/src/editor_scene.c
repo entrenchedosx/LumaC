@@ -141,6 +141,44 @@ led_result led_scene_open(led_session *session, const char *path) {
         session->last_engine_error = (int)rc;
         return LED_ERROR_ENGINE;
     }
+    /* Phase 33V fix (verified headed: viewport rendered black after
+     * every scene open): the scene format carries camera COMPONENTS
+     * but no active-camera selection, so the opened world had cameras
+     * yet no active one — render fell back to the default origin
+     * camera and mesh content missed the frame. Adopt the first live
+     * camera object as active (view state like selection: not undo-
+     * tracked, not dirty). Scenes without cameras keep the default. */
+    {
+        le_object probe = LE_OBJECT_INVALID;
+
+        if (!le_world_get_active_camera(session->edit_world,
+                                        &probe)) {
+            uint32_t live =
+                le_world_get_object_count(session->edit_world);
+
+            if (live > 0) {
+                le_object *all =
+                    (le_object *)malloc(live * sizeof(*all));
+
+                if (all != NULL) {
+                    uint32_t got = le_world_get_all_objects(
+                        session->edit_world, all, live);
+                    uint32_t i = 0;
+
+                    for (i = 0; i < got; i++) {
+                        if (le_object_has_component(
+                                session->edit_world, &all[i],
+                                LE_COMPONENT_CAMERA)) {
+                            le_world_set_active_camera(
+                                session->edit_world, &all[i]);
+                            break;
+                        }
+                    }
+                    free(all);
+                }
+            }
+        }
+    }
     session->selection_count = 0;
     led_history_clear(session);
     session->dirty = 0;

@@ -74,6 +74,35 @@ led_result led_play_enter(led_session *session) {
             return LED_ERROR_PLAY_FAILED;
         }
     }
+    /* Phase 33V fix (verified headed: viewport rendered black during
+     * Play): the captured scene carries camera components but no
+     * active-camera selection, so the runtime world had cameras yet
+     * none active — render fell back to the default origin camera
+     * (same root cause as the scene-open fix in editor_scene.c).
+     * Carry the edit world's active camera by name (verified to
+     * still carry a camera component after instantiate). */
+    {
+        le_object edit_cam = LE_OBJECT_INVALID;
+
+        if (le_world_get_active_camera(session->edit_world,
+                                       &edit_cam)) {
+            const char *nm =
+                le_object_get_name(session->edit_world, &edit_cam);
+
+            if (nm != NULL && nm[0] != '\0') {
+                le_object run_cam = LE_OBJECT_INVALID;
+
+                if (le_world_find_by_name(session->play_world, nm,
+                                          &run_cam) &&
+                    le_object_has_component(session->play_world,
+                                            &run_cam,
+                                            LE_COMPONENT_CAMERA)) {
+                    le_world_set_active_camera(session->play_world,
+                                               &run_cam);
+                }
+            }
+        }
+    }
     session->edit_paused_before_play =
         le_world_is_paused(session->edit_world);
     le_world_set_paused(session->edit_world, 1);
