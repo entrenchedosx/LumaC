@@ -357,7 +357,8 @@ int main(void) {
                        "offscreen pass begin");
             {
                 led_result rrc = leg_record_gui(gui, enc,
-                                                LC_FORMAT_RGBA8_UNORM);
+                                                LC_FORMAT_RGBA8_UNORM,
+                                                LC_FORMAT_UNDEFINED);
 
                 TEST_CHECK(rrc == LED_SUCCESS,
                            "record gui (blended+scissor walk)");

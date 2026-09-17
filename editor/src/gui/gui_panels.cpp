@@ -1373,11 +1373,15 @@ static void leg_panel_viewport(leg_context *ctx, leg_ui *ui) {
          * frame encoder BEFORE panels record (scene pass first,
          * then the swapchain pass holds panels+GUI). The panel
          * samples the live target set here (one frame of latency,
-         * zero pass conflicts). Until the first composite lands,
-         * the camera/state readout keeps the panel honest. */
+         * zero pass conflicts). Until the first composite lands
+         * (generation 0 = never composited, or a NULL set), the
+         * camera/state readout keeps the panel honest — submitting
+         * Image() with a never-composited set would fail the draw
+         * walk (stale TexID) on the very first frame. */
         if (g_vp_host.viewport != NULL &&
             ctx->viewport_target != NULL &&
-            ctx->viewport_target->set != NULL) {
+            ctx->viewport_target->set != NULL &&
+            ctx->viewport_target->generation > 0) {
             ImTextureID scene_tex =
                 (ImTextureID)(uint64_t)(uintptr_t)
                     ctx->viewport_target->set;

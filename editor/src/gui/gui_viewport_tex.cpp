@@ -20,48 +20,66 @@
 
 #include "gui_internal.h"
 
-/* Shared viewport binding layout (lazily created: one sampled image
- * + one sampler in a SINGLE set — unlike the GUI font walk which
- * uses two sets, the viewport image is sampled through one combined
- * layout so ImGui::Image needs one TexID).
- *
- * NOTE: struct leg_viewport_target is COMPLETE in gui_internal.h
- * (draw/panels TUs read ->set); only the functions live here. */
+/* Shared viewport binding layout (lazily created): slot 0 =
+ * sampled image (fragment), slot 1 = sampler (fragment) — TWO
+ * layouts, mirroring the GUI font walk (gui_draw.cpp: set 0 =
+ * texture via tex_layout, set 1 = sampler via samp_layout). The
+ * viewport panel Image() TexID round-trips the TEXTURE set (slot 0
+ * layout); the draw walk binds it at pipeline slot 0. A combined
+ * single-layout set would NEVER match the pipeline's slot-0
+ * signature (count 2 != 1) — that mismatch was a REAL bug caught by
+ * the headed app run (bind step 18), not harness noise. */
 struct leg_viewport_layout {
-    lc_binding_layout *layout;
+    lc_binding_layout *tex_layout;
+    lc_binding_layout *samp_layout;
     lc_sampler *sampler;
+    lc_binding_set *samp_set; /* shared sampler set (slot 1) */
 };
 
 static leg_viewport_layout g_vp_layout;
 
-/* Ensure the shared layout exists (idempotent; 1 on success). */
+/* Ensure the shared layouts exist (idempotent; 1 on success). */
 static int leg_viewport_layout_ensure(lc_device *device) {
-    lc_binding_desc b[2];
+    lc_binding_desc b;
     lc_binding_layout_desc ld;
     lc_sampler_desc sd;
 
     if (device == NULL) {
         return 0;
     }
-    if (g_vp_layout.layout != NULL && g_vp_layout.sampler != NULL) {
+    if (g_vp_layout.tex_layout != NULL &&
+        g_vp_layout.samp_layout != NULL &&
+        g_vp_layout.sampler != NULL) {
         return 1;
     }
-    memset(b, 0, sizeof(b));
-    b[0].binding = 0;
-    b[0].type = LC_BINDING_SAMPLED_IMAGE;
-    b[0].count = 1;
-    b[0].visibility = LC_SHADER_VISIBILITY_FRAGMENT;
-    b[1].binding = 1;
-    b[1].type = LC_BINDING_SAMPLER;
-    b[1].count = 1;
-    b[1].visibility = LC_SHADER_VISIBILITY_FRAGMENT;
+    memset(&b, 0, sizeof(b));
+    b.binding = 0;
+    b.type = LC_BINDING_SAMPLED_IMAGE;
+    b.count = 1;
+    b.visibility = LC_SHADER_VISIBILITY_FRAGMENT;
     memset(&ld, 0, sizeof(ld));
-    ld.bindings = b;
-    ld.binding_count = 2;
+    ld.bindings = &b;
+    ld.binding_count = 1;
     if (lc_binding_layout_create(device, &ld,
-                                 &g_vp_layout.layout) !=
+                                 &g_vp_layout.tex_layout) !=
         LC_SUCCESS) {
-        g_vp_layout.layout = NULL;
+        g_vp_layout.tex_layout = NULL;
+        return 0;
+    }
+    memset(&b, 0, sizeof(b));
+    b.binding = 0;
+    b.type = LC_BINDING_SAMPLER;
+    b.count = 1;
+    b.visibility = LC_SHADER_VISIBILITY_FRAGMENT;
+    memset(&ld, 0, sizeof(ld));
+    ld.bindings = &b;
+    ld.binding_count = 1;
+    if (lc_binding_layout_create(device, &ld,
+                                 &g_vp_layout.samp_layout) !=
+        LC_SUCCESS) {
+        lc_binding_layout_destroy(g_vp_layout.tex_layout);
+        g_vp_layout.tex_layout = NULL;
+        g_vp_layout.samp_layout = NULL;
         return 0;
     }
     memset(&sd, 0, sizeof(sd));
@@ -77,8 +95,10 @@ static int leg_viewport_layout_ensure(lc_device *device) {
     sd.max_anisotropy = 1.0f;
     if (lc_sampler_create(device, &sd, &g_vp_layout.sampler) !=
         LC_SUCCESS) {
-        lc_binding_layout_destroy(g_vp_layout.layout);
-        g_vp_layout.layout = NULL;
+        lc_binding_layout_destroy(g_vp_layout.samp_layout);
+        lc_binding_layout_destroy(g_vp_layout.tex_layout);
+        g_vp_layout.samp_layout = NULL;
+        g_vp_layout.tex_layout = NULL;
         g_vp_layout.sampler = NULL;
         return 0;
     }
@@ -130,7 +150,7 @@ static int leg_viewport_create_objects(leg_context *ctx,
     lc_image_view_desc vdesc;
     lc_render_target_create_desc rtdesc;
     lc_render_target_attachment ratt;
-    lc_binding_write writes[2];
+    lc_binding_write write;
 
     if (ctx == NULL || vt == NULL || w == 0 || h == 0) {
         return 0;
@@ -229,24 +249,51 @@ static int leg_viewport_create_objects(leg_context *ctx,
         leg_viewport_destroy_objects(vt);
         return 0;
     }
-    if (lc_binding_set_create(g_vp_layout.layout, &vt->set) !=
+    if (lc_binding_set_create(g_vp_layout.tex_layout, &vt->set) !=
         LC_SUCCESS) {
         vt->set = NULL;
         leg_viewport_destroy_objects(vt);
         return 0;
     }
-    memset(writes, 0, sizeof(writes));
-    writes[0].binding = 0;
-    writes[0].array_element = 0;
-    writes[0].type = LC_BINDING_SAMPLED_IMAGE;
-    writes[0].u.image.view = vt->color_view;
-    writes[1].binding = 1;
-    writes[1].array_element = 0;
-    writes[1].type = LC_BINDING_SAMPLER;
-    writes[1].u.sampler.sampler = g_vp_layout.sampler;
-    if (lc_binding_set_update(vt->set, writes, 2) != LC_SUCCESS) {
+    /* Texture set FIRST (SHADER_READ guaranteed by the primer
+     * upload above — same ordering discipline as the font walk:
+     * never update a sampled set over a non-readable image). */
+    memset(&write, 0, sizeof(write));
+    write.binding = 0;
+    write.array_element = 0;
+    write.type = LC_BINDING_SAMPLED_IMAGE;
+    write.u.image.view = vt->color_view;
+    if (lc_binding_set_update(vt->set, &write, 1) != LC_SUCCESS) {
         leg_viewport_destroy_objects(vt);
         return 0;
+    }
+    /* Shared sampler set (slot 1) for the walk: created once (the
+     * GUI font walk keeps its OWN sampler set — layouts differ per
+     * bridge... actually the layouts are content-identical (one
+     * sampler slot) but distinct OBJECTS; sets borrow their layout
+     * object, so each bridge keeps its own set). */
+    if (g_vp_layout.samp_set == NULL) {
+        lc_binding_write sw;
+
+        memset(&sw, 0, sizeof(sw));
+        if (lc_binding_set_create(g_vp_layout.samp_layout,
+                                  &g_vp_layout.samp_set) !=
+            LC_SUCCESS) {
+            g_vp_layout.samp_set = NULL;
+            leg_viewport_destroy_objects(vt);
+            return 0;
+        }
+        sw.binding = 0;
+        sw.array_element = 0;
+        sw.type = LC_BINDING_SAMPLER;
+        sw.u.sampler.sampler = g_vp_layout.sampler;
+        if (lc_binding_set_update(g_vp_layout.samp_set, &sw, 1) !=
+            LC_SUCCESS) {
+            lc_binding_set_destroy(g_vp_layout.samp_set);
+            g_vp_layout.samp_set = NULL;
+            leg_viewport_destroy_objects(vt);
+            return 0;
+        }
     }
     vt->width = w;
     vt->height = h;
@@ -368,4 +415,43 @@ void leg_viewport_target_destroy(leg_viewport_target **vt) {
     leg_viewport_destroy_objects(*vt);
     delete *vt;
     *vt = NULL;
+}
+
+/* App-facing accessors (public C ABI in luma_editor.h; the app never
+ * includes gui_internal.h or imgui.h — confinement holds). */
+
+/* Borrow-or-create the context's viewport target (NULL on bad
+ * context; the target is context-owned, destroyed with it). */
+struct leg_viewport_target *leg_viewport_target_for(
+    leg_context *ctx) {
+    if (ctx == NULL) {
+        return NULL;
+    }
+    if (ctx->viewport_target == NULL) {
+        ctx->viewport_target = new (std::nothrow)
+            leg_viewport_target;
+
+        if (ctx->viewport_target == NULL) {
+            return NULL;
+        }
+        memset(ctx->viewport_target, 0,
+               sizeof(*ctx->viewport_target));
+    }
+    return ctx->viewport_target;
+}
+
+/* Composite the session world into the panel-sized target (engine
+ * trio, NO open pass on enc) + return the panel TexID (0 when
+ * nothing to show — panel falls back to the state readout). */
+unsigned long long leg_viewport_composite(
+    leg_context *ctx, struct leg_viewport_target *vt,
+    lc_command_encoder *enc, unsigned w, unsigned h) {
+    ImTextureID id;
+
+    if (ctx == NULL || vt == NULL || enc == NULL) {
+        return 0ull;
+    }
+    id = leg_viewport_render(ctx, vt, enc, (uint32_t)w,
+                             (uint32_t)h);
+    return (unsigned long long)(uint64_t)id;
 }

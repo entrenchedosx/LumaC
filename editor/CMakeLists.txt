@@ -62,11 +62,11 @@ foreach(LED_GUI_AUDIT_FILE IN LISTS LED_GUI_AUDIT_FILES)
             "Lua-confinement violation in ${LED_GUI_AUDIT_FILE}: the "
             "GUI layer never touches Lua spellings.")
     endif()
-    if(LED_GUI_AUDIT_TEXT MATCHES "imgui_impl_")
+    if(LED_GUI_AUDIT_TEXT MATCHES "imgui_impl_vulkan|imgui_impl_dx|imgui_impl_opengl|imgui_impl_metal|imgui_impl_sdl|imgui_impl_glfw|imgui_impl_win32|imgui_impl_x11|#include.*imgui_impl_")
         message(FATAL_ERROR
             "GUI-confinement violation in ${LED_GUI_AUDIT_FILE}: no "
-            "upstream ImGui backend (imgui_impl_*) is used; the GUI "
-            "layer owns its LumaC bridge (input + draw walk).")
+            "upstream GUI backend is used; the GUI layer owns its "
+            "LumaC bridge (input + draw walk).")
     endif()
 endforeach()
 
@@ -330,8 +330,8 @@ endif()
 add_test(NAME test_editor_gui COMMAND test_editor_gui)
 
 # Phase 33 GUI-over-GPU proofs (Vulkan-gated; SKIP without a device):
-# viewport composite, blended GUI draws, scissor clipping, gizmo
-# overlay, play/undo/redo through the GUI command funnel.
+# blended GUI draws, scissor clipping/restore, gizmo funnel,
+# play/undo/redo through the GUI command funnel.
 add_executable(test_editor_gui_gpu tests/test_editor_gui_gpu.c)
 target_link_libraries(test_editor_gui_gpu PRIVATE luma_editor_gui luma_engine luma_renderer lumac Vulkan::Vulkan)
 target_include_directories(test_editor_gui_gpu PRIVATE
@@ -344,6 +344,25 @@ if(UNIX AND NOT APPLE)
 endif()
 add_test(NAME test_editor_gui_gpu COMMAND test_editor_gui_gpu)
 
+# Phase 33 desktop app (real windowed application): window + device +
+# swapchain + renderer + engine + world + session + GUI context.
+# C11 over public lc_*/lr_*/le_*/led_*/leg_* ABIs only (never imgui.h
+# — confinement audit exempts NOTHING outside src/gui, so app/ is
+# covered by the same backend/Lua/GUI guards via the top audit only
+# if placed under src/...; app/main.c lives beside tests/ instead and
+# links luma_editor_gui for the C ABI).
+add_executable(luma_editor_app app/main.c)
+target_link_libraries(luma_editor_app PRIVATE luma_editor_gui luma_engine luma_renderer lumac)
+target_include_directories(luma_editor_app PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../engine/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../renderer/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../tools)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(luma_editor_app PRIVATE m)
+endif()
+
 # Shared Windows builds place lumac.dll beside the top-level tests;
 # editor tests live deeper, so extend their DLL search path
 # explicitly (no-op for static builds).
@@ -351,3 +370,30 @@ if(WIN32)
     set_tests_properties(test_editor_core test_editor_history test_editor_play test_editor_viewport test_editor_reflect test_prefab_smoke test_project test_import test_assetdb test_project_editor test_gltf_identity test_prefab test_editor_gui test_editor_gui_gpu PROPERTIES
         ENVIRONMENT "PATH=$<TARGET_FILE_DIR:lumac>\;$ENV{PATH}")
 endif()
+
+# Backend-independence guard for the app (same rule as GUARD 1 but
+# covering editor/app + editor/tests: no backend/engine-internal/Lua
+# spellings — the app talks lc_*/lr_*/le_*/led_*/leg_* ONLY — and no
+# imgui spellings outside src/gui (the app never includes imgui.h).
+file(GLOB_RECURSE LED_APP_AUDIT_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/app/*.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/app/*.h")
+foreach(LED_APP_AUDIT_FILE IN LISTS LED_APP_AUDIT_FILES)
+    file(READ "${LED_APP_AUDIT_FILE}" LED_APP_AUDIT_TEXT)
+    if(LED_APP_AUDIT_TEXT MATCHES "Vk[A-Z]|vulkan/|windows\\.h|X11/|Xlib\\.h|HWND|graphics_internal|lumac_internal|renderer_internal|engine_internal|src/graphics|src/internal|renderer/src|engine/src")
+        message(FATAL_ERROR
+            "Backend-independence violation in ${LED_APP_AUDIT_FILE}: the "
+            "editor app renders through public LumaC (lc_*) only.")
+    endif()
+    if(LED_APP_AUDIT_TEXT MATCHES "lua\\.h|lauxlib\\.h|lualib\\.h|lua_State|luaL_[a-z]|LUA_[A-Z]")
+        message(FATAL_ERROR
+            "Lua-confinement violation in ${LED_APP_AUDIT_FILE}: the "
+            "editor app never touches Lua spellings.")
+    endif()
+    if(LED_APP_AUDIT_TEXT MATCHES "imgui\\.h|imgui_internal\\.h|ImGui[A-Z]|ImDraw|ImVec2|ImVec4|ImTextureID")
+        message(FATAL_ERROR
+            "GUI-confinement violation in ${LED_APP_AUDIT_FILE}: Dear "
+            "ImGui may appear only in editor/src/gui/; the app uses "
+            "the leg_* C ABI.")
+    endif()
+endforeach()

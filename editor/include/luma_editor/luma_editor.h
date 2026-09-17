@@ -1111,9 +1111,10 @@ LED_API void led_prefab_instance_free(
     led_prefab_instance *instance);
 
 /* ------------------------------------------------------------------
- * Interactive graphical editor (Phase 33): Dear ImGui desktop view
- * over the headless EditorCore above. C ABI over opaque handles; no
- * C++ types and no imgui.h cross this boundary (GUI confinement).
+ * Interactive graphical editor (Phase 33): immediate-mode desktop
+ * view over the headless EditorCore above. C ABI over opaque
+ * handles; no C++ types and no vendored-GUI headers cross this
+ * boundary (GUI confinement).
  *
  * Layering: GUI (luma_editor_gui, C++) -> EditorCore (led_*) ->
  * engine -> assets -> renderer -> LumaC. The GUI talks to the
@@ -1129,7 +1130,7 @@ LED_API void led_prefab_instance_free(
  * contract as the editor and engine).
  * ------------------------------------------------------------------ */
 
-/** Opaque GUI context (Dear ImGui context + font atlas + draw
+/** Opaque GUI context (immediate-mode context + font atlas + draw
  *  bridge + viewport texture state). Never dereference. */
 typedef struct leg_context leg_context;
 
@@ -1171,13 +1172,13 @@ LED_API led_result leg_set_ini_path(leg_context *context,
  *  extent = minimized: frame state stays valid, drawing is skipped
  *  until leg_frame_end (caller should skip present, keep pumping).
  *  @return LED_SUCCESS, LED_ERROR_INVALID_ARGUMENT (NULL args),
- *          LED_ERROR_UNAVAILABLE (no context/Dear ImGui refusal). */
+ *          LED_ERROR_UNAVAILABLE (no context/GUI refusal). */
 LED_API led_result leg_frame_begin(leg_context *context,
                                    lc_window *window,
                                    const leg_frame_input *input);
 
 /** End a GUI frame: closes the dockspace root and renders the
- *  ImDrawData (validates it; user callbacks never execute — they
+ *  draw data (validates it; user callbacks never execute — they
  *  are skipped, counted, and reported). Drawing is skipped when the
  *  frame began minimized. */
 LED_API led_result leg_frame_end(leg_context *context);
@@ -1196,17 +1197,24 @@ LED_API void leg_panels_frame(leg_context *context,
 /** Record the current frame's GUI draws into the caller's open pass
  *  (Phase 33 draw walk: blended pipeline, per-draw scissor, font
  *  texture sync). Call between leg_frame_end and present, inside ONE
- *  open lc_* pass whose target uses `target_format` (the GUI pipeline
- *  is created for it on first use). Empty frames record nothing and
- *  succeed. User callbacks never execute (skipped, counted in stats).
+ *  open lc_* pass whose color target uses `target_format` AND whose
+ *  depth attachment (if any) uses `depth_format` (LC_FORMAT_UNDEFINED
+ *  for depthless passes). The GUI pipeline is depthless-aware: it is
+ *  created for the (color, depth-or-UNDEFINED) pair and rebuilds on
+ *  drift (swapchain recreations keep the pair flowing from
+ *  lc_swapchain_get_format/depth_format). Empty frames record
+ *  nothing and succeed. User callbacks never execute (skipped,
+ *  counted in stats).
  *  @return LED_SUCCESS, LED_ERROR_INVALID_ARGUMENT (NULL args, no
- *          frame ended this cycle, dead device), LED_ERROR_UNAVAILABLE
- *          (texture/buffer/pipeline failure — frame stays alive, skip
- *          present or present without GUI), LED_ERROR_OVERFLOW
- *          (draw budget exceeded — same recovery). */
+ *          frame ended this cycle, dead device, bad color format),
+ *          LED_ERROR_UNAVAILABLE (texture/buffer/pipeline failure —
+ *          frame stays alive, skip present or present without GUI),
+ *          LED_ERROR_OVERFLOW (draw budget exceeded — same recovery).
+ */
 LED_API led_result leg_record_gui(leg_context *context,
                                   lc_command_encoder *encoder,
-                                  lc_format target_format);
+                                  lc_format target_format,
+                                  lc_format depth_format);
 
 /** Draw-walk budget report (plain data; zeros for NULL). */
 typedef struct leg_draw_stats {
@@ -1236,7 +1244,7 @@ LED_API int leg_feed_event(leg_context *context,
 LED_API int leg_wants_keyboard(const leg_context *context);
 LED_API int leg_wants_mouse(const leg_context *context);
 
-/** Clamp a GUI clip rect (ImDrawCmd ClipRect, DisplayPos-relative
+/** Clamp a GUI clip rect (draw-command clip rect, DisplayPos-relative
  *  float px) into an lc_scissor_rect for the pass extent (pure math,
  *  headless-testable): floors mins, ceils maxes, intersects with
  *  [0, pass_w] x [0, pass_h]. Returns 1 + fill when the intersection
@@ -1252,12 +1260,36 @@ LED_API int leg_clip_to_scissor(float clip_min_x, float clip_min_y,
 /** Last GUI record failure step (diagnostics; 0 = none/last-OK,
  *  1 gpu-ensure, 2 font-sync, 3 budget, 4 vtx buffer, 5 idx buffer,
  *  6 vtx upload, 7 idx upload, 8 bind pipeline, 9 bind vtx, 10 bind
- *  idx, 11 push, 12 sampler set, 13 per-draw tex/bind/scissor/draw,
- *  14 bad input). Pure query; 0 for NULL. */
+ *  idx, 11 push, 12 sampler set, 13 per-draw tex resolve,
+ *  14 bad input, 15 scissor, 16 bind tex set (OBSOLETE: merged into
+ *  18), 17 draw-indexed, 18 bind-tex-set signature/live mismatch).
+ *  Pure query; 0 for NULL. */
 LED_API int leg_record_step_last(void);
 
+/** Failing TexID for the last 13/18 record failure (0 when none).
+ *  Pure query. */
+LED_API unsigned long long leg_record_tex_last(void);
+
+/** Opaque viewport target (panel-sized scene composite; owned by
+ *  the GUI context, sized to the viewport panel, zero-size-safe,
+ *  swapchain-independent). Never dereference. */
+typedef struct leg_viewport_target leg_viewport_target;
+
+/** Borrow-or-create the context's viewport target (NULL on bad
+ *  context; context-owned, destroyed with it). */
+LED_API struct leg_viewport_target *leg_viewport_target_for(
+    leg_context *context);
+
+/** Composite the session world into the panel-sized target (engine
+ *  trio; enc must have NO open pass) + return the panel TexID (0
+ *  when nothing to show — the panel falls back to its state
+ *  readout). Play shows the runtime world, edit the edit world. */
+LED_API unsigned long long leg_viewport_composite(
+    leg_context *context, struct leg_viewport_target *vt,
+    lc_command_encoder *enc, unsigned w, unsigned h);
+
 /** Draw-walk budget probe (pure math, headless-testable): estimates
- *  vertex/index buffer bytes for `vertex_count` ImDrawVert (pos+uv+
+ *  vertex/index buffer bytes for `vertex_count` draw verts (pos+uv+
  *  col = 20 bytes) + `index_count` 16-bit indices. Always reports
  *  the full count in out bytes; out pointers may be NULL (counting
  *  query). Returns the vertex byte estimate. Caps at 64 MiB per

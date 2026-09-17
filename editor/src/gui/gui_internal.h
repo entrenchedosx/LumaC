@@ -76,12 +76,12 @@ struct leg_ui {
     float gizmo_plane_d;
 };
 
-/* Viewport offscreen target (gui_viewport_tex.cpp; sized to the
- * viewport panel, zero-size-safe, swapchain-independent). COMPLETE
- * type here (not a forward): gui_draw.cpp validates viewport TexIDs
- * against the live set pointer and gui_panels.cpp samples the live
- * set for Image(), so both TUs need the field layout. Lifetime is
- * still owned by gui_viewport_tex.cpp (create/destroy here only). */
+/* Viewport offscreen target: COMPLETE type here, opaque forward in
+ * the public luma_editor.h (both declare struct leg_viewport_target
+ * and merge in C++). gui_draw.cpp validates viewport TexIDs against
+ * the live set pointer and gui_panels.cpp samples the live set for
+ * Image(), so both TUs need the field layout. Lifetime is still
+ * owned by gui_viewport_tex.cpp (create/destroy there only). */
 struct leg_viewport_target {
     uint32_t width;
     uint32_t height;
@@ -173,6 +173,7 @@ void leg_viewport_camera_update(leg_context *ctx, leg_ui *ui,
  * idx, 11 push, 12 sampler set, 13 per-draw, 14 bad input). Test +
  * app diagnostics (never silent on GPU failure). */
 int leg_record_step_last(void);
+unsigned long long leg_record_tex_last(void);
 
 /* Viewport bridge (gui_viewport_tex.cpp): render the session world
  * into the panel-sized target + return the ImGui TexID for the panel

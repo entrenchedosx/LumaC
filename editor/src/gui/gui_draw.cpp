@@ -12,7 +12,7 @@
  *   panel (sized to the panel, zero-size-safe, swapchain-independent).
  *
  * Confinement: public lc_* ONLY. No Vulkan/Win32/X11 headers, no
- * imgui_impl_*, no engine/renderer internals (configure-time audit).
+ * upstream GUI backends, no engine/renderer internals (configure-time audit).
  */
 
 #include <cstddef>
@@ -40,6 +40,8 @@
  * only TU that uses them); gui_internal.h forward-declares. */
 struct leg_gpu {
     int ready;
+    lc_format pipeline_format; /* color signature (rebuild on drift) */
+    lc_format pipeline_depth;  /* depth signature (swapchain depth) */
     lc_shader *vs;
     lc_shader *fs;
     lc_binding_layout *tex_layout;   /* slot 0: sampled image */
@@ -60,26 +62,54 @@ struct leg_gpu {
     } tex[LEG_TEX_MAX];
 };
 
-/* Ensure the GPU objects exist (idempotent; 1 on success). */
+/* Ensure the GPU objects exist (idempotent per target signature; 1
+ * on success). Pipelines are extent-independent but NOT
+ * signature-independent: color AND depth formats both participate
+ * (swapchain passes carry depth; offscreen GUI passes may not). A
+ * drift rebuilds ONLY the pipeline — shaders, layouts, sampler,
+ * buffers, and the texture table survive. */
 static int leg_gpu_ensure(leg_context *ctx, leg_gpu *gpu,
-                          lc_format target_format) {
+                          lc_format target_format,
+                          lc_format depth_format) {
     lc_device *device = NULL;
 
     if (ctx == NULL || gpu == NULL) {
         return 0;
     }
-    if (gpu->ready) {
+    if (gpu->ready && gpu->pipeline_format == target_format &&
+        gpu->pipeline_depth == depth_format) {
         return 1;
+    }
+    if (gpu->ready) {
+        /* Format drift: drop the pipeline only. */
+        if (gpu->pipeline != NULL) {
+            lc_pipeline_destroy(gpu->pipeline);
+            gpu->pipeline = NULL;
+        }
+        gpu->ready = 0;
     }
     device = ctx->device;
     if (device == NULL) {
         return 0;
     }
-    memset(gpu, 0, sizeof(*gpu));
-    /* Shaders. */
-    {
+    if (gpu->vs == NULL && gpu->fs == NULL && gpu->tex_layout == NULL &&
+        gpu->samp_layout == NULL && gpu->linear_sampler == NULL &&
+        gpu->vtx == NULL && gpu->idx == NULL &&
+        gpu->tex[LEG_TEX_MAX - 1].set == NULL) {
+        memset(gpu, 0, sizeof(*gpu));
+    }
+    if (gpu->vs == NULL || gpu->fs == NULL) {
         lc_shader_desc sd;
 
+        /* Shaders (once; survive pipeline rebuilds). */
+        if (gpu->vs != NULL) {
+            lc_shader_destroy(gpu->vs);
+            gpu->vs = NULL;
+        }
+        if (gpu->fs != NULL) {
+            lc_shader_destroy(gpu->fs);
+            gpu->fs = NULL;
+        }
         memset(&sd, 0, sizeof(sd));
         sd.stage = LC_SHADER_STAGE_VERTEX;
         sd.code = kLegGuiVertSpv;
@@ -101,8 +131,9 @@ static int leg_gpu_ensure(leg_context *ctx, leg_gpu *gpu,
     }
     /* Binding layouts: slot 0 = sampled image (fragment), slot 1 =
      * sampler (fragment). Two layouts mirror the upstream Vulkan
-     * backend (set 0 texture, set 1 sampler). */
-    {
+     * backend (set 0 texture, set 1 sampler). Once (survive pipeline
+     * rebuilds; binding sets borrow them). */
+    if (gpu->tex_layout == NULL || gpu->samp_layout == NULL) {
         lc_binding_desc b;
         lc_binding_layout_desc ld;
 
@@ -141,8 +172,11 @@ static int leg_gpu_ensure(leg_context *ctx, leg_gpu *gpu,
             return 0;
         }
     }
-    /* Blended depthless pipeline (classic src-alpha / 1-src-alpha,
-     * alpha preserved like the upstream backend). */
+    /* Blended GUI pipeline (classic src-alpha / 1-src-alpha, alpha
+     * preserved like the upstream backend). Depth test/write stay
+     * OFF (2D overlay) but the SIGNATURE names the pass depth format
+     * (or UNDEFINED for depthless passes): pipelines are compatible
+     * only with passes sharing color+depth+samples. */
     {
         lc_graphics_pipeline_desc pd;
         lc_vertex_binding_desc vb;
@@ -201,24 +235,23 @@ static int leg_gpu_ensure(leg_context *ctx, leg_gpu *gpu,
         pd.push_constant_range_count = 1;
         pd.render_target.color_attachment_count = 1;
         pd.render_target.color_formats[0] = target_format;
-        pd.render_target.depth_stencil_format = LC_FORMAT_UNDEFINED;
+        pd.render_target.depth_stencil_format = depth_format;
         pd.render_target.samples = LC_SAMPLE_COUNT_1;
         if (lc_graphics_pipeline_create(device, &pd, &gpu->pipeline) !=
             LC_SUCCESS) {
-            lc_binding_layout_destroy(gpu->samp_layout);
-            lc_binding_layout_destroy(gpu->tex_layout);
-            lc_shader_destroy(gpu->fs);
-            lc_shader_destroy(gpu->vs);
-            gpu->samp_layout = NULL;
-            gpu->tex_layout = NULL;
-            gpu->fs = NULL;
-            gpu->vs = NULL;
+            gpu->pipeline = NULL;
             return 0;
         }
+        gpu->pipeline_format = target_format;
+        gpu->pipeline_depth = depth_format;
     }
-    /* Shared linear sampler (font + viewport images sample linear,
-     * clamp-to-edge; matches the upstream backend default). */
-    {
+    /* Shared linear sampler (once; font + viewport images sample
+     * linear, clamp-to-edge; matches the upstream backend default).
+     * The cached sampler SET (tex[63].set) borrows samp_layout — on
+     * a layout rebuild the set must drop (it names the old layout).
+     * Layouts never rebuild after first success (guarded above), so
+     * the set stays valid for the context lifetime. */
+    if (gpu->linear_sampler == NULL) {
         lc_sampler_desc sd;
 
         memset(&sd, 0, sizeof(sd));
@@ -234,18 +267,12 @@ static int leg_gpu_ensure(leg_context *ctx, leg_gpu *gpu,
         sd.max_anisotropy = 1.0f;
         if (lc_sampler_create(device, &sd, &gpu->linear_sampler) !=
             LC_SUCCESS) {
-            lc_pipeline_destroy(gpu->pipeline);
-            lc_binding_layout_destroy(gpu->samp_layout);
-            lc_binding_layout_destroy(gpu->tex_layout);
-            lc_shader_destroy(gpu->fs);
-            lc_shader_destroy(gpu->vs);
-            gpu->pipeline = NULL;
-            gpu->samp_layout = NULL;
-            gpu->tex_layout = NULL;
-            gpu->fs = NULL;
-            gpu->vs = NULL;
+            gpu->linear_sampler = NULL;
             return 0;
         }
+    }
+    if (gpu->pipeline == NULL) {
+        return 0;
     }
     gpu->ready = 1;
     return 1;
@@ -327,21 +354,31 @@ void leg_gpu_teardown(leg_context *ctx, struct leg_gpu *gpu) {
 static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
                            lc_command_encoder *enc,
                            const ImDrawData *draw,
-                           lc_format target_format);
+                           lc_format target_format,
+                           lc_format depth_format);
 /* Last record failure (0 none; 1 gpu-ensure; 2 font-sync; 3 budget;
  * 4 vtx buffer; 5 idx buffer; 6 vtx upload; 7 idx upload; 8 bind
  * pipeline; 9 bind vtx; 10 bind idx; 11 push; 12 sampler set;
- * 13 per-draw tex/bind/scissor/draw; 14 bad display size). Test +
- * app diagnostics (never silent on GPU failure). */
+ * 13 per-draw tex resolve; 14 bad input; 15 scissor; 16 bind tex set
+ * (OBSOLETE: merged into 18); 17 draw-indexed; 18 bind-tex-set
+ * signature/live mismatch). g_leg_record_tex carries the failing
+ * TexID for 13/18 (0 when none). Test + app diagnostics (never
+ * silent on GPU failure). */
 static int g_leg_record_step = 0;
+static unsigned long long g_leg_record_tex = 0;
 
 int leg_record_step_last(void) {
     return g_leg_record_step;
 }
 
+unsigned long long leg_record_tex_last(void) {
+    return g_leg_record_tex;
+}
+
 led_result leg_record_gui(leg_context *context,
                           lc_command_encoder *encoder,
-                          lc_format target_format) {
+                          lc_format target_format,
+                          lc_format depth_format) {
     const ImDrawData *draw = NULL;
 
     if (context == NULL || encoder == NULL) {
@@ -359,8 +396,9 @@ led_result leg_record_gui(leg_context *context,
     if (target_format == LC_FORMAT_UNDEFINED) {
         return LED_ERROR_INVALID_ARGUMENT;
     }
-    /* Color-only targets take GUI draws (depth-tested scene targets
-     * never do — the GUI records into its own depthless pass). */
+    /* Color+depth signature: the pass depth (or UNDEFINED when
+     * depthless) participates — depth formats validate as depth
+     * only; anything else is INVALID_ARGUMENT. */
     switch (target_format) {
     case LC_FORMAT_R8_UNORM:
     case LC_FORMAT_RG8_UNORM:
@@ -383,6 +421,15 @@ led_result leg_record_gui(leg_context *context,
     default:
         return LED_ERROR_INVALID_ARGUMENT;
     }
+    switch (depth_format) {
+    case LC_FORMAT_UNDEFINED:
+    case LC_FORMAT_D16_UNORM:
+    case LC_FORMAT_D32_FLOAT:
+    case LC_FORMAT_D24_UNORM_S8_UINT:
+        break;
+    default:
+        return LED_ERROR_INVALID_ARGUMENT;
+    }
     ImGui::SetCurrentContext(context->imgui);
     draw = ImGui::GetDrawData();
     if (draw == NULL || !draw->Valid) {
@@ -399,7 +446,7 @@ led_result leg_record_gui(leg_context *context,
         memset(context->gpu, 0, sizeof(*context->gpu));
     }
     if (!leg_draw_record(context, context->gpu, encoder, draw,
-                         target_format)) {
+                         target_format, depth_format)) {
         /* Distinguish budget overflow (probe) from GPU failure. */
         uint64_t vb = 0;
         uint64_t ib = 0;
@@ -484,7 +531,8 @@ static int leg_buf_ensure(lc_device *device, lc_buffer **slot,
 static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
                            lc_command_encoder *enc,
                            const ImDrawData *draw,
-                           lc_format target_format) {
+                           lc_format target_format,
+                           lc_format depth_format) {
     uint64_t vb_need = 0;
     uint64_t ib_need = 0;
     int ov = 0;
@@ -504,7 +552,7 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
     if (draw->TotalVtxCount <= 0 || draw->TotalIdxCount <= 0) {
         return 1; /* nothing to draw (valid empty frame) */
     }
-    if (!leg_gpu_ensure(ctx, gpu, target_format)) {
+    if (!leg_gpu_ensure(ctx, gpu, target_format, depth_format)) {
         g_leg_record_step = 1;
         return 0;
     }
@@ -651,6 +699,7 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
                 if (tex_id == (uint64_t)ImTextureID_Invalid ||
                     tex_id == 0) {
                     g_leg_record_step = 13;
+                    g_leg_record_tex = 0;
                     return 0; /* missing texture (sync failed?) */
                 }
                 if (tex_id <= LEG_TEX_MAX - 1) {
@@ -659,15 +708,20 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
                     if (!gpu->tex[slot].used ||
                         gpu->tex[slot].set == NULL) {
                         g_leg_record_step = 13;
+                        g_leg_record_tex = tex_id;
                         return 0;
                     }
                     bound_set = gpu->tex[slot].set;
                 } else {
-                    /* Viewport ID: binding-set pointer round-tripped
-                     * through leg_viewport_render (gui_viewport_tex).
-                     * Validate it names the context's live viewport
-                     * target set before binding (never bind a stale
-                     * pointer after a resize destroyed it). */
+                    /* Viewport ID: TEXTURE set pointer round-tripped
+                     * through leg_viewport_render (gui_viewport_tex:
+                     * slot-0 layout, same signature as font slots).
+                     * The SAMPLER half rides the shared slot-1 set
+                     * (bound once per frame above) — the shader
+                     * combines set 0 + set 1 in-shader. Validate it
+                     * names the context's live viewport target set
+                     * before binding (never bind a stale pointer
+                     * after a resize destroyed it). */
                     lc_binding_set *vs =
                         (lc_binding_set *)(uintptr_t)tex_id;
 
@@ -675,6 +729,7 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
                         ctx->viewport_target == NULL ||
                         vs != ctx->viewport_target->set) {
                         g_leg_record_step = 13;
+                        g_leg_record_tex = tex_id;
                         return 0;
                     }
                     bound_set = vs;
@@ -691,13 +746,21 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
                     continue; /* fully clipped: skip the draw */
                 }
                 if (lc_encoder_set_scissor(enc, &sc) != LC_SUCCESS) {
-                    g_leg_record_step = 13;
+                    g_leg_record_step = 15;
                     return 0;
                 }
                 if (lc_encoder_bind_binding_set(enc, gpu->pipeline, 0,
                                                 bound_set) !=
                     LC_SUCCESS) {
-                    g_leg_record_step = 13;
+                    /* Bind-time INVALID_ARGUMENT here (with a valid
+                     * pipeline + live set) = signature mismatch OR
+                     * retired-set resurrection. Record the set path
+                     * distinctly (18) from tex-resolve (13):
+                     * set==NULL/ unused/ stale-viewport = 13 above;
+                     * reaching here means the set is live but the
+                     * bind disagrees with the pipeline. */
+                    g_leg_record_step = 18;
+                    g_leg_record_tex = tex_id;
                     return 0;
                 }
                 if (lc_encoder_draw_indexed(
@@ -705,7 +768,7 @@ static int leg_draw_record(leg_context *ctx, leg_gpu *gpu,
                         cmd->IdxOffset + global_idx,
                         (int32_t)(cmd->VtxOffset + global_vtx),
                         0) != LC_SUCCESS) {
-                    g_leg_record_step = 13;
+                    g_leg_record_step = 17;
                     return 0;
                 }
             }

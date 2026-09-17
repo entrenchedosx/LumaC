@@ -8,7 +8,14 @@ application (docking layout + panels + viewport + property widgets).
 - Archive: `v1.92.9b-docking.tar.gz` in this directory
   (Length: 2296581, SHA256:
   `90DED916BD57DB2E0E171B6B098940A47C6F5042725DCDC67FB19940CA8BFDCC`)
-- Extracted: `imgui-1.92.9b-docking/` (unmodified upstream files)
+- Extracted: `imgui-1.92.9b-docking/` (unmodified upstream files —
+  ONLY the compiled core subset is extracted: `imgui.cpp`,
+  `imgui_draw.cpp`, `imgui_tables.cpp`, `imgui_widgets.cpp` plus
+  their headers `imconfig.h`, `imgui.h`, `imgui_internal.h`,
+  `imstb_rectpack.h`, `imstb_textedit.h`, `imstb_truetype.h`, and
+  `LICENSE.txt`. Backends / examples / docs / misc stay in the
+  tarball; re-extract with `tar -xzf v1.92.9b-docking.tar.gz` if
+  ever needed)
 - License: MIT (see `imgui-1.92.9b-docking/LICENSE.txt`)
 - Used by: `editor/src/gui/*` (sole ImGui translation units) and
   the `luma_editor` desktop executable
