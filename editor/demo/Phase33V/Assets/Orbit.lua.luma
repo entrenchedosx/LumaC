@@ -1,0 +1,8 @@
+LUMA_ASSET 1
+id ea1a64fab991f29dfcb50fe65c972795
+type script
+source Assets/Orbit.lua
+fingerprint 97 9bdfcdb4ebde1819
+importer luma.lua 1
+settings b40aeb6371fecd9f
+runtime 9bdfcdb4ebde181980248c471dec08d0

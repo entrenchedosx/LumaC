@@ -1,0 +1,10 @@
+LUMA_ASSET 1
+id b9553f346d3ffff5b3e2e3cbe4944b30
+type model
+source Assets/Crate.glb
+fingerprint 2216 6c7ecb7c45fa46fb
+importer luma.gltf 1
+settings baf9f6c0aa9811c8
+sub mesh0:prim0 3e9f5c651d81e3833e9f5c651d81e383
+sub mat0:mat0 4dd6dfdaf1699c2100f3a9a56ca78fd4
+runtime 3e9f5c651d81e3833e9f5c651d81e383
