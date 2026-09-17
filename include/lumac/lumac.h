@@ -784,6 +784,33 @@ typedef enum lc_front_face {
     LC_FRONT_FACE_COUNTER_CLOCKWISE = 1
 } lc_front_face;
 
+/* Backend-neutral color-blend factors (Phase 33: editor GUI overlays;
+ * Vulkan blend-factor mapping, D3D12 BLEND-mappable). */
+typedef enum lc_blend_factor {
+    LC_BLEND_ZERO = 0,
+    LC_BLEND_ONE = 1,
+    LC_BLEND_SRC_ALPHA = 2,
+    LC_BLEND_ONE_MINUS_SRC_ALPHA = 3
+} lc_blend_factor;
+
+/* Backend-neutral color-blend operations (Phase 33). */
+typedef enum lc_blend_op {
+    LC_BLEND_OP_ADD = 0
+} lc_blend_op;
+
+/* One color-attachment blend recipe (Phase 33: GUI/overlay pipelines
+ * need source-alpha blending; legacy opaque pipelines leave
+ * blend_enable == 0). Unknown factors/ops are rejected at creation. */
+typedef struct lc_blend_attachment {
+    int blend_enable;
+    lc_blend_factor src_color_factor;
+    lc_blend_factor dst_color_factor;
+    lc_blend_op color_op;
+    lc_blend_factor src_alpha_factor;
+    lc_blend_factor dst_alpha_factor;
+    lc_blend_op alpha_op;
+} lc_blend_attachment;
+
 /* One push-constant range: a byte window owned by the pipeline
  * layout, addressed with lc_push_constants(). `visibility` uses
  * lc_shader_visibility bits (graphics pipelines accept VERTEX and/or
@@ -859,7 +886,13 @@ typedef struct lc_vertex_attribute_desc {
  * Raster state defaults to no culling with a clockwise front face
  * (legacy behavior). Depth is off by default; enable test/write for
  * 3D rendering (LESS comparison). Optional push-constant ranges
- * default to none.
+ * default to none. Blend state (Phase 33): `blend` is per-color-
+ * attachment blending; NULL (or all entries blend_enable == 0)
+ * preserves the legacy opaque behavior exactly. Enabled entries need
+ * known factors/ops (validated at creation). Blend participates in
+ * NO compatibility signature: width/height-style, pipelines stay
+ * extent-independent AND blend-independent (a UI overlay pipeline
+ * and an opaque pipeline share targets/passes).
  * Render target (Phase 13): a valid structural compatibility
  * description is MANDATORY (no legacy inference): 1..8 color formats
  * and/or a depth format, color formats with color, depth format with
@@ -867,6 +900,10 @@ typedef struct lc_vertex_attribute_desc {
  * Width/height are ignored for pipeline compatibility (pipelines are
  * extent-independent). Use lc_swapchain_get_render_target_desc() to
  * build a presentation-compatible description deliberately.
+ * Scissor (Phase 33): pipelines carry NO scissor rect — scissor is
+ * dynamic encoder state (lc_encoder_set_scissor) defaulting to the
+ * full target each pass. A future D3D12 backend maps blend recipes
+ * and scissor rects onto OMSetBlendState / RSSetScissorRects.
  * Zero-initialize the whole struct (e.g. `= { 0 }`) and set the
  * fields you use. */
 typedef struct lc_graphics_pipeline_desc {
@@ -882,6 +919,8 @@ typedef struct lc_graphics_pipeline_desc {
     lc_front_face front_face;
     int depth_test_enable;
     int depth_write_enable;
+    const lc_blend_attachment *blend;
+    uint32_t blend_attachment_count;
     const lc_push_constant_range *push_constant_ranges;
     uint32_t push_constant_range_count;
     lc_render_target_desc render_target;
@@ -2148,6 +2187,45 @@ LC_API lc_result lc_encoder_push_constants(
     uint32_t offset,
     uint32_t size,
     const void *data);
+
+/* Backend-neutral 2D scissor rectangle (Phase 33: GUI clipping).
+ * Integer target pixels: offset >= 0, extent > 0, and the rect must
+ * fit inside the open pass extent (offset + extent <= pass extent).
+ * Partially-offscreen GUI rects must be clamped by the CALLER (the
+ * editor GUI bridge clamps ImGui clip rects); out-of-range rects are
+ * rejected, never silently wrapped. */
+typedef struct lc_scissor_rect {
+    int32_t offset_x;
+    int32_t offset_y;
+    uint32_t width;
+    uint32_t height;
+} lc_scissor_rect;
+
+/**
+ * Set the scissor rectangle for subsequent draws in the open
+ * explicit pass (Phase 33: editor GUI clip rects). Requires an open
+ * pass on a live frame; the rect must fit the pass extent (see
+ * lc_scissor_rect). The pass begin resets scissor to the full target
+ * (pass width x height at offset 0,0), so every frame starts
+ * unclipped. Worker-list recording rejects this call (GUI draws run
+ * on the primary encoder only — worker lists inherit the primary's
+ * full-target pass state at execute time).
+ *
+ * @return LC_SUCCESS, LC_ERROR_NOT_INITIALIZED,
+ *         LC_ERROR_INVALID_ARGUMENT (NULL encoder, dead/no-frame
+ *         encoder, no open pass, rect outside the pass extent,
+ *         worker-mode encoder).
+ */
+LC_API lc_result lc_encoder_set_scissor(lc_command_encoder *encoder,
+                                        const lc_scissor_rect *rect);
+
+/**
+ * Query the current scissor rectangle of the open explicit pass
+ * (1 + fill, 0 when unavailable; out may be NULL for a probe).
+ * Reports the full-target rect right after pass begin.
+ */
+LC_API int lc_encoder_get_scissor(const lc_command_encoder *encoder,
+                                  lc_scissor_rect *out_rect);
 
 /**
  * Draw in the open explicit pass. Requires a bound compatible

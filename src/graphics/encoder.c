@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <string.h>
 
 #include "lumac/lumac.h"
 #include "internal/lumac_internal.h"
@@ -474,6 +475,71 @@ lc_result lc_encoder_push_constants(lc_command_encoder *enc,
     }
     return lc_vulkan_encoder_push(enc, pipeline, visibility, offset, size,
                                   data);
+}
+
+/* Phase 33 scissor: public validation (rect inside the open pass
+ * extent), then backend record. Worker-mode encoders rejected (GUI
+ * draws run on the primary encoder only). */
+lc_result lc_encoder_set_scissor(lc_command_encoder *enc,
+                                 const lc_scissor_rect *rect) {
+    lc_state *state = lc_get_internal_state();
+    lc_swapchain *swapchain;
+
+    if (enc == NULL || rect == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (state == NULL || !state->initialized) {
+        return LC_ERROR_NOT_INITIALIZED;
+    }
+    if (lc_vk_worker_live(enc)) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = lc_enc_lookup(enc);
+    if (swapchain == NULL || !swapchain->frame_active) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (!enc->in_pass) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (rect->offset_x < 0 || rect->offset_y < 0 || rect->width == 0 ||
+        rect->height == 0 || rect->width > enc->pass_target.width ||
+        rect->height > enc->pass_target.height ||
+        (uint32_t)rect->offset_x > enc->pass_target.width - rect->width ||
+        (uint32_t)rect->offset_y >
+            enc->pass_target.height - rect->height) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    return lc_vulkan_encoder_scissor(enc, rect);
+}
+
+int lc_encoder_get_scissor(const lc_command_encoder *enc,
+                           lc_scissor_rect *out_rect) {
+    lc_state *state = lc_get_internal_state();
+    lc_swapchain *swapchain;
+
+    if (out_rect != NULL) {
+        memset(out_rect, 0, sizeof(*out_rect));
+    }
+    if (enc == NULL) {
+        return 0;
+    }
+    if (state == NULL || !state->initialized) {
+        return 0;
+    }
+    if (lc_vk_worker_live((lc_command_encoder *)enc)) {
+        return 0;
+    }
+    swapchain = lc_enc_lookup(enc);
+    if (swapchain == NULL || !swapchain->frame_active) {
+        return 0;
+    }
+    if (!enc->in_pass || !enc->scissor_active) {
+        return 0;
+    }
+    if (out_rect != NULL) {
+        *out_rect = enc->scissor;
+    }
+    return 1;
 }
 
 lc_result lc_encoder_draw(lc_command_encoder *enc, uint32_t vertex_count,

@@ -208,6 +208,9 @@ static void lc_vk_pipeline_free_copies(lc_pipeline *pipeline) {
     free(pipeline->push_ranges);
     pipeline->push_ranges = NULL;
     pipeline->push_range_count = 0;
+    free(pipeline->blend_recipes);
+    pipeline->blend_recipes = NULL;
+    pipeline->blend_recipe_count = 0;
 }
 
 lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
@@ -353,6 +356,21 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
     pipeline->slot_signature_counts = NULL;
     pipeline->push_ranges = NULL;
     pipeline->push_range_count = 0;
+    pipeline->blend_recipes = NULL;
+    pipeline->blend_recipe_count = 0;
+    /* Phase 33 blend recipes: public validation already checked
+     * counts + enums; copy canonically here so the backend mapping
+     * below cannot fail on content. */
+    if (desc->blend != NULL && desc->blend_attachment_count > 0) {
+        pipeline->blend_recipes = (lc_blend_attachment *)malloc(
+            sizeof(lc_blend_attachment) * desc->blend_attachment_count);
+        if (pipeline->blend_recipes == NULL) {
+            return LC_ERROR_OUT_OF_MEMORY;
+        }
+        memcpy(pipeline->blend_recipes, desc->blend,
+               sizeof(lc_blend_attachment) * desc->blend_attachment_count);
+        pipeline->blend_recipe_count = desc->blend_attachment_count;
+    }
     if (desc->binding_layout_count > 0) {
         uint32_t i;
 
@@ -541,14 +559,44 @@ lc_result lc_vulkan_pipeline_create(lc_pipeline *pipeline, lc_device *device,
 
     /* One blending-off write mask per color attachment (MRT-ready).
      * Depthless pipelines still need blend state when colors exist;
-     * zero colors (depth-only) leave the count at 0. */
+     * zero colors (depth-only) leave the count at 0. Phase 33: per-
+     * attachment recipes from the canonical copies (legacy opaque
+     * when no recipe was provided). */
     {
         uint32_t i;
 
         memset(blend_attachments, 0, sizeof(blend_attachments));
         for (i = 0; i < target_sig.color_attachment_count; i++) {
-            blend_attachments[i].blendEnable = VK_FALSE;
-            blend_attachments[i].colorWriteMask =
+            const lc_blend_attachment *recipe = NULL;
+            VkPipelineColorBlendAttachmentState *dst =
+                &blend_attachments[i];
+
+            if (i < pipeline->blend_recipe_count &&
+                pipeline->blend_recipes != NULL) {
+                recipe = &pipeline->blend_recipes[i];
+            }
+            if (recipe != NULL && recipe->blend_enable != 0) {
+                static const VkBlendFactor kBlendMap[] = {
+                    VK_BLEND_FACTOR_ZERO,
+                    VK_BLEND_FACTOR_ONE,
+                    VK_BLEND_FACTOR_SRC_ALPHA,
+                    VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+                };
+                dst->blendEnable = VK_TRUE;
+                dst->srcColorBlendFactor =
+                    kBlendMap[recipe->src_color_factor];
+                dst->dstColorBlendFactor =
+                    kBlendMap[recipe->dst_color_factor];
+                dst->colorBlendOp = VK_BLEND_OP_ADD;
+                dst->srcAlphaBlendFactor =
+                    kBlendMap[recipe->src_alpha_factor];
+                dst->dstAlphaBlendFactor =
+                    kBlendMap[recipe->dst_alpha_factor];
+                dst->alphaBlendOp = VK_BLEND_OP_ADD;
+            } else {
+                dst->blendEnable = VK_FALSE;
+            }
+            dst->colorWriteMask =
                 VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                 VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
         }
@@ -743,6 +791,9 @@ void lc_vulkan_pipeline_destroy(lc_pipeline *pipeline) {
     free(pipeline->push_ranges);
     pipeline->push_ranges = NULL;
     pipeline->push_range_count = 0;
+    free(pipeline->blend_recipes);
+    pipeline->blend_recipes = NULL;
+    pipeline->blend_recipe_count = 0;
     if (pipeline->pipeline != VK_NULL_HANDLE) {
         if (device_handle != VK_NULL_HANDLE) {
             vkDestroyPipeline(device_handle, pipeline->pipeline, NULL);

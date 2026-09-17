@@ -155,6 +155,69 @@ lc_result lc_graphics_pipeline_create(
     }
     /* Depth flags are booleans (0 or nonzero accepted, normalized by
      * the backend); no further check needed here. */
+    /* Phase 33 blend state: NULL (or count 0) means legacy opaque;
+     * otherwise count must equal the color attachment count and every
+     * entry must name known factors/ops (deep backend mapping cannot
+     * fail on validated enums). Blend is NOT part of the structural
+     * compatibility signature (opaque and blended pipelines share
+     * targets/passes). */
+    if (desc->blend_attachment_count > 0 && desc->blend == NULL) {
+        *out_pipeline = NULL;
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (desc->blend != NULL &&
+        desc->blend_attachment_count !=
+            desc->render_target.color_attachment_count) {
+        *out_pipeline = NULL;
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (desc->blend != NULL) {
+        uint32_t i;
+
+        for (i = 0; i < desc->blend_attachment_count; i++) {
+            const lc_blend_attachment *b = &desc->blend[i];
+
+            if (b->blend_enable != 0) {
+                if (b->src_color_factor != LC_BLEND_ZERO &&
+                    b->src_color_factor != LC_BLEND_ONE &&
+                    b->src_color_factor != LC_BLEND_SRC_ALPHA &&
+                    b->src_color_factor !=
+                        LC_BLEND_ONE_MINUS_SRC_ALPHA) {
+                    *out_pipeline = NULL;
+                    return LC_ERROR_INVALID_ARGUMENT;
+                }
+                if (b->dst_color_factor != LC_BLEND_ZERO &&
+                    b->dst_color_factor != LC_BLEND_ONE &&
+                    b->dst_color_factor != LC_BLEND_SRC_ALPHA &&
+                    b->dst_color_factor !=
+                        LC_BLEND_ONE_MINUS_SRC_ALPHA) {
+                    *out_pipeline = NULL;
+                    return LC_ERROR_INVALID_ARGUMENT;
+                }
+                if (b->src_alpha_factor != LC_BLEND_ZERO &&
+                    b->src_alpha_factor != LC_BLEND_ONE &&
+                    b->src_alpha_factor != LC_BLEND_SRC_ALPHA &&
+                    b->src_alpha_factor !=
+                        LC_BLEND_ONE_MINUS_SRC_ALPHA) {
+                    *out_pipeline = NULL;
+                    return LC_ERROR_INVALID_ARGUMENT;
+                }
+                if (b->dst_alpha_factor != LC_BLEND_ZERO &&
+                    b->dst_alpha_factor != LC_BLEND_ONE &&
+                    b->dst_alpha_factor != LC_BLEND_SRC_ALPHA &&
+                    b->dst_alpha_factor !=
+                        LC_BLEND_ONE_MINUS_SRC_ALPHA) {
+                    *out_pipeline = NULL;
+                    return LC_ERROR_INVALID_ARGUMENT;
+                }
+                if (b->color_op != LC_BLEND_OP_ADD ||
+                    b->alpha_op != LC_BLEND_OP_ADD) {
+                    *out_pipeline = NULL;
+                    return LC_ERROR_INVALID_ARGUMENT;
+                }
+            }
+        }
+    }
     /* Push-constant ranges: array must accompany a nonzero count;
      * deep content (alignment, overlap, device limit, visibility) is
      * validated by the backend against physical limits. */

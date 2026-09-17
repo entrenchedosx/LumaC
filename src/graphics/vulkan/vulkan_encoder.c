@@ -315,6 +315,12 @@ lc_result lc_vulkan_encoder_begin_offscreen(
     enc->bound_pipeline = NULL;
     enc->bound_index_buffer = NULL;
     enc->index_bound = 0;
+    /* Phase 33: pass begin resets scissor to the full target. */
+    enc->scissor.offset_x = 0;
+    enc->scissor.offset_y = 0;
+    enc->scissor.width = target->width;
+    enc->scissor.height = target->height;
+    enc->scissor_active = 1;
     return LC_SUCCESS;
 }
 
@@ -436,6 +442,12 @@ lc_result lc_vulkan_encoder_begin_swapchain(
     enc->bound_pipeline = NULL;
     enc->bound_index_buffer = NULL;
     enc->index_bound = 0;
+    /* Phase 33: pass begin resets scissor to the full target. */
+    enc->scissor.offset_x = 0;
+    enc->scissor.offset_y = 0;
+    enc->scissor.width = swapchain->extent.width;
+    enc->scissor.height = swapchain->extent.height;
+    enc->scissor_active = 1;
     return LC_SUCCESS;
 }
 
@@ -501,6 +513,43 @@ lc_result lc_vulkan_encoder_end(lc_command_encoder *enc) {
     enc->index_bound = 0;
     enc->end_color_count = 0;
     enc->end_has_depth = 0;
+    enc->scissor_active = 0;
+    return LC_SUCCESS;
+}
+
+/* Phase 33 scissor backend: validate-then-record (validation lives
+ * in encoder.c; re-checked here defensively). */
+lc_result lc_vulkan_encoder_scissor(lc_command_encoder *enc,
+                                    const lc_scissor_rect *rect) {
+    lc_swapchain *swapchain;
+    lc_vk_flight *flight;
+    VkRect2D vk_rect;
+
+    if (enc == NULL || rect == NULL || enc->swapchain == NULL ||
+        !enc->in_pass) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    swapchain = enc->swapchain;
+    if (!lc_enc_frame_ready(swapchain)) {
+        return LC_ERROR_UNKNOWN;
+    }
+    if (rect->offset_x < 0 || rect->offset_y < 0 || rect->width == 0 ||
+        rect->height == 0 || rect->width > enc->pass_target.width ||
+        rect->height > enc->pass_target.height ||
+        (uint32_t)rect->offset_x > enc->pass_target.width - rect->width ||
+        (uint32_t)rect->offset_y >
+            enc->pass_target.height - rect->height) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    flight = lc_enc_flight(swapchain);
+    memset(&vk_rect, 0, sizeof(vk_rect));
+    vk_rect.offset.x = rect->offset_x;
+    vk_rect.offset.y = rect->offset_y;
+    vk_rect.extent.width = rect->width;
+    vk_rect.extent.height = rect->height;
+    vkCmdSetScissor(flight->cmd, 0, 1, &vk_rect);
+    enc->scissor = *rect;
+    enc->scissor_active = 1;
     return LC_SUCCESS;
 }
 

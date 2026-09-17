@@ -3,16 +3,23 @@ cmake_minimum_required(VERSION 3.15)
 
 # Backend-independence guard (same rule as the engine): editor
 # library headers and sources (everything except tests/, which take
-# the same white-box privilege as the engine's own tests) must never
-# name backend symbols, engine/renderer internals, or Lua spellings
-# (the editor talks to scripts via le_script_* C API only). Fails
-# configure loudly if the boundary rots. (This CMakeLists itself is
-# excluded: it spells the forbidden pattern to enforce it.)
+# the same white-box privilege as the engine's own tests, and
+# src/gui/, which is the isolated C++ ImGui layer audited by the
+# GUI-confinement guard below) must never name backend symbols,
+# engine/renderer internals, or Lua spellings (the editor talks to
+# scripts via le_script_* C API only). Fails configure loudly if the
+# boundary rots. (This CMakeLists itself is excluded: it spells the
+# forbidden pattern to enforce it.)
 file(GLOB_RECURSE LED_AUDIT_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h")
 foreach(LED_AUDIT_FILE IN LISTS LED_AUDIT_FILES)
+    # The isolated GUI layer (src/gui/*) is exempt here: it is
+    # audited by the GUI-confinement guard below instead.
+    if(LED_AUDIT_FILE MATCHES "/src/gui/")
+        continue()
+    endif()
     file(READ "${LED_AUDIT_FILE}" LED_AUDIT_TEXT)
     if(LED_AUDIT_TEXT MATCHES "Vk[A-Z]|vulkan/|windows\\.h|X11/|Xlib\\.h|HWND|graphics_internal|lumac_internal|renderer_internal|engine_internal|src/graphics|src/internal|renderer/src|engine/src")
         message(FATAL_ERROR
@@ -27,11 +34,49 @@ foreach(LED_AUDIT_FILE IN LISTS LED_AUDIT_FILES)
             "may appear only in engine/src/script/; the editor uses "
             "the le_script_* C API.")
     endif()
+    # GUI-confinement: imgui spellings never leak outside src/gui/.
+    if(LED_AUDIT_TEXT MATCHES "imgui\\.h|imgui_internal\\.h|ImGui[A-Z]|ImDraw|ImVec2|ImVec4|ImTextureID")
+        message(FATAL_ERROR
+            "GUI-confinement violation in ${LED_AUDIT_FILE}: Dear "
+            "ImGui may appear only in editor/src/gui/; editor core "
+            "stays GUI-framework-free.")
+    endif()
+endforeach()
+
+# GUI-confinement guard for the isolated C++ layer: editor/src/gui/*
+# is the ONLY place that may name ImGui. It must still never name
+# backend symbols (Vk*, windows.h, X11), engine/renderer internals,
+# or Lua spellings: it renders through PUBLIC LumaC (lc_*) only and
+# feeds input from lc_window_event only. Fails configure loudly.
+file(GLOB_RECURSE LED_GUI_AUDIT_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/gui/*")
+foreach(LED_GUI_AUDIT_FILE IN LISTS LED_GUI_AUDIT_FILES)
+    file(READ "${LED_GUI_AUDIT_FILE}" LED_GUI_AUDIT_TEXT)
+    if(LED_GUI_AUDIT_TEXT MATCHES "Vk[A-Z]|vulkan/|windows\\.h|X11/|Xlib\\.h|HWND|graphics_internal|lumac_internal|renderer_internal|engine_internal|src/graphics|src/internal|renderer/src|engine/src")
+        message(FATAL_ERROR
+            "Backend-independence violation in ${LED_GUI_AUDIT_FILE}: "
+            "the GUI layer renders through public LumaC (lc_*) only.")
+    endif()
+    if(LED_GUI_AUDIT_TEXT MATCHES "lua\\.h|lauxlib\\.h|lualib\\.h|lua_State|luaL_[a-z]|LUA_[A-Z]")
+        message(FATAL_ERROR
+            "Lua-confinement violation in ${LED_GUI_AUDIT_FILE}: the "
+            "GUI layer never touches Lua spellings.")
+    endif()
+    if(LED_GUI_AUDIT_TEXT MATCHES "imgui_impl_")
+        message(FATAL_ERROR
+            "GUI-confinement violation in ${LED_GUI_AUDIT_FILE}: no "
+            "upstream ImGui backend (imgui_impl_*) is used; the GUI "
+            "layer owns its LumaC bridge (input + draw walk).")
+    endif()
 endforeach()
 
 # Tests register from here (the top level enables testing after this
 # directory is added, so enable it locally too).
 enable_testing()
+
+# Phase 33: C++ is required for the isolated GUI layer only (Dear
+# ImGui is C++-only). Every other Luma target stays C11.
+include(CheckCXXCompilerFlag)
 
 add_library(luma_editor STATIC
     src/editor_core.c
@@ -56,6 +101,78 @@ add_library(luma_editor STATIC
     src/project/project_files.c
     src/project/prefab_core.c
 )
+
+# Phase 33: isolated GUI layer (C++ over public lc_* + led_* C ABIs).
+# Dear ImGui sources are vendored unmodified under third_party/imgui;
+# only the docking-branch tag is kept (see third_party/imgui/README).
+set(LUMA_IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/imgui/imgui-1.92.9b-docking")
+if(NOT EXISTS "${LUMA_IMGUI_DIR}/imgui.cpp")
+    message(FATAL_ERROR
+        "Missing vendored Dear ImGui at ${LUMA_IMGUI_DIR} "
+        "(expected v1.92.9b-docking; see third_party/imgui/README.md).")
+endif()
+
+add_library(luma_editor_gui STATIC
+    src/gui/gui_context.cpp
+    src/gui/gui_input.cpp
+    src/gui/gui_draw.cpp
+    src/gui/gui_font.cpp
+    src/gui/gui_viewport_tex.cpp
+    src/gui/gui_panels.cpp
+    src/gui/gui_inspector_widgets.cpp
+    src/gui/gui_gizmo_overlay.cpp
+    src/gui/gui_loop.cpp
+    "${LUMA_IMGUI_DIR}/imgui.cpp"
+    "${LUMA_IMGUI_DIR}/imgui_draw.cpp"
+    "${LUMA_IMGUI_DIR}/imgui_tables.cpp"
+    "${LUMA_IMGUI_DIR}/imgui_widgets.cpp"
+    # NOTE: imgui_demo.cpp is intentionally NOT compiled (never ships).
+)
+
+# C++11 is enough for the vendored ImGui core (it uses nullptr but no
+# newer library features); keep the floor low on purpose.
+set_target_properties(luma_editor_gui PROPERTIES
+    CXX_STANDARD 11
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
+target_include_directories(luma_editor_gui PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+# Vendored ImGui headers are PRIVATE: no consumer ever includes
+# imgui.h through us (GUI confinement — enforced at configure).
+target_include_directories(luma_editor_gui PRIVATE
+    "${LUMA_IMGUI_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/gui"
+)
+# Downward layering only: GUI -> editor core -> engine. ImGui never
+# leaks through PUBLIC includes or link interfaces.
+target_link_libraries(luma_editor_gui PUBLIC luma_editor)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(luma_editor_gui PRIVATE m)
+endif()
+
+if(MSVC)
+    # ImGui core warns under /W3 (conversion/4244); keep OUR files at
+    # /W3 but drop vendored sources to /W1 so warnings stay ours.
+    target_compile_options(luma_editor_gui PRIVATE /W3)
+    set_source_files_properties(
+        "${LUMA_IMGUI_DIR}/imgui.cpp"
+        "${LUMA_IMGUI_DIR}/imgui_draw.cpp"
+        "${LUMA_IMGUI_DIR}/imgui_tables.cpp"
+        "${LUMA_IMGUI_DIR}/imgui_widgets.cpp"
+        PROPERTIES COMPILE_OPTIONS "/W1")
+else()
+    target_compile_options(luma_editor_gui PRIVATE -Wall -Wextra)
+    set_source_files_properties(
+        "${LUMA_IMGUI_DIR}/imgui.cpp"
+        "${LUMA_IMGUI_DIR}/imgui_draw.cpp"
+        "${LUMA_IMGUI_DIR}/imgui_tables.cpp"
+        "${LUMA_IMGUI_DIR}/imgui_widgets.cpp"
+        PROPERTIES COMPILE_OPTIONS "-w")
+endif()
 
 target_include_directories(luma_editor PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -200,10 +317,37 @@ if(UNIX AND NOT APPLE)
 endif()
 add_test(NAME test_prefab COMMAND test_prefab)
 
+# Phase 33 GUI confinement (headless, no window/GPU/renderer):
+# imgui.h must not leak outside src/gui/; input mapping + draw-walk
+# budgets + scissor clamp math run without a device.
+add_executable(test_editor_gui tests/test_editor_gui.c)
+target_link_libraries(test_editor_gui PRIVATE luma_editor_gui)
+target_include_directories(test_editor_gui PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_editor_gui PRIVATE m)
+endif()
+add_test(NAME test_editor_gui COMMAND test_editor_gui)
+
+# Phase 33 GUI-over-GPU proofs (Vulkan-gated; SKIP without a device):
+# viewport composite, blended GUI draws, scissor clipping, gizmo
+# overlay, play/undo/redo through the GUI command funnel.
+add_executable(test_editor_gui_gpu tests/test_editor_gui_gpu.c)
+target_link_libraries(test_editor_gui_gpu PRIVATE luma_editor_gui luma_engine luma_renderer lumac Vulkan::Vulkan)
+target_include_directories(test_editor_gui_gpu PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../engine/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../renderer/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_editor_gui_gpu PRIVATE m)
+endif()
+add_test(NAME test_editor_gui_gpu COMMAND test_editor_gui_gpu)
+
 # Shared Windows builds place lumac.dll beside the top-level tests;
 # editor tests live deeper, so extend their DLL search path
 # explicitly (no-op for static builds).
 if(WIN32)
-    set_tests_properties(test_editor_core test_editor_history test_editor_play test_editor_viewport test_editor_reflect test_prefab_smoke test_project test_import test_assetdb test_project_editor test_gltf_identity test_prefab PROPERTIES
+    set_tests_properties(test_editor_core test_editor_history test_editor_play test_editor_viewport test_editor_reflect test_prefab_smoke test_project test_import test_assetdb test_project_editor test_gltf_identity test_prefab test_editor_gui test_editor_gui_gpu PROPERTIES
         ENVIRONMENT "PATH=$<TARGET_FILE_DIR:lumac>\;$ENV{PATH}")
 endif()

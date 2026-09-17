@@ -481,6 +481,12 @@ struct lc_command_encoder {
     uint64_t bound_index_offset;
     lc_index_type bound_index_type;
     int index_bound;
+    /* Phase 33 scissor (dynamic encoder state): current clip rect in
+     * target pixels; reset to the full pass extent at every pass
+     * begin; scissor_active is always 1 while a pass is open (the
+     * full-target rect is explicit state, not an absence). */
+    lc_scissor_rect scissor;
+    int scissor_active;
     /* Phase 21 compute: last encoder-bound compute pipeline (frame
      * encoders clear at frame begin; worker encoders at list
      * begin). Graphics and compute binds coexist. */
@@ -911,6 +917,11 @@ struct lc_pipeline {
     lc_front_face front_face;
     int depth_test_enable;
     int depth_write_enable;
+    /* Phase 33 blend recipes (canonical CPU copies, malloc'd when the
+     * desc carries blend state; NULL for legacy opaque pipelines).
+     * Blend never participates in compatibility signatures. */
+    lc_blend_attachment *blend_recipes;
+    uint32_t blend_recipe_count;
     lc_push_constant_range *push_ranges; /* malloc'd copy (maybe NULL) */
     uint32_t push_range_count;
     lc_pipeline *next;
@@ -1444,6 +1455,9 @@ lc_result lc_vulkan_encoder_push(lc_command_encoder *enc,
                                  const lc_pipeline *pipeline,
                                  uint32_t visibility, uint32_t offset,
                                  uint32_t size, const void *data);
+/* Phase 33 scissor (backend record; validation in encoder.c). */
+lc_result lc_vulkan_encoder_scissor(lc_command_encoder *enc,
+                                    const lc_scissor_rect *rect);
 lc_result lc_vulkan_encoder_draw(lc_command_encoder *enc,
                                  uint32_t vertex_count,
                                  uint32_t first_vertex);

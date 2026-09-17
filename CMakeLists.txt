@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.15)
 project(LumaC
     VERSION 0.1.0
     DESCRIPTION "A lightweight cross-platform graphics API written in C"
-    LANGUAGES C
+    LANGUAGES C CXX
 )
 
 set(CMAKE_C_STANDARD 11)
