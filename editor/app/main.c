@@ -90,37 +90,18 @@ static float app_delta(uint64_t *last) {
 }
 
 /* Inject viewport play input into the engine (called while playing,
- * before led_play_tick; skipped when the GUI wants the keyboard). */
+ * before led_play_tick; skipped when the GUI wants the keyboard).
+ * Phase 34A: real per-key injection through leg_consume_play_input
+ * (ImGui key state -> le_input_inject_* -> led_play_tick folds the
+ * pending list WITHOUT the OS pump — deterministic, same state
+ * machine scripts read). The engine never attaches the OS window;
+ * the GUI queue stays the single drainer. */
 static void app_inject_play_input(leg_context *gui,
                                   le_engine *engine) {
-    /* Held-key snapshot via the engine's OWN raw state? No — the
-     * engine never sees the OS queue (no attached window), so raw
-     * state is empty. Injection needs edge/held data from ImGui io.
-     * But io is C++-private... The GUI exposes ownership queries
-     * (leg_wants_keyboard/mouse), not keys. Play interaction that
-     * needs NO key identity: advance the runtime clock (tick) and
-     * let gameplay scripts read... they read le_input_* (empty).
-     *
-     * Honest Phase 33 contract: Play runs the runtime world (scripts
-     * execute, physics integrates — the GPU proof asserts the tick +
-     * edit-isolation), whileInteractive gameplay keys (WASD/space)
-     * inject through le_input_inject_* from the HOST's OWN event
-     * observation... but the host must NOT drain the lc queue (the
-     * GUI owns it). Resolution: leg_feed_event ALSO feeds the engine?
-     * No — one drainer.
-     *
-     * What the host CAN do without touching the queue: poll ImGui
-     * ownership + viewport hover (both leg_* queries) and inject
-     * NOTHING key-specific; scripts still run (time advances), the
-     * viewport camera still orbits (GUI-side), and Play/Stop
-     * isolation holds. Documented non-goal for Phase 33: per-key
-     * gameplay injection from the OS queue while the GUI owns it.
-     * The injection API (le_input_inject_*) is exercised by engine
-     * tests; the editor wires per-key injection in Phase 34 when the
-     * GUI exposes a key-identity query (or the host owns the pump).
-     */
-    (void)gui;
-    (void)engine;
+    if (gui == NULL || engine == NULL) {
+        return;
+    }
+    leg_consume_play_input(gui, engine);
 }
 
 int main(int argc, char **argv) {
@@ -432,8 +413,15 @@ int main(int argc, char **argv) {
          * never run here) + console script-error mirror happens in
          * the console panel. */
         led_session_tick(session, dt);
-        /* Play ticks the RUNTIME world (explicit dt); edit stays
-         * paused + byte-identical (canonical oracle in tests). */
+        /* Play input + tick ordering (Phase 34A): the panels frame
+         * (below) drains the lc queue into ImGui key state; per-key
+         * gameplay injection runs AFTER panels and BEFORE the tick
+         * so scripts observe this frame's keys. The pre-frame call
+         * only covers keys held across frames (ImGui state from
+         * the PREVIOUS panels frame — still correct: held stays
+         * held); the post-panels call below covers fresh presses.
+         * Both funnel through leg_consume_play_input (text fields
+         * never leak). */
         if (led_is_playing(session)) {
             app_inject_play_input(gui, engine);
             if (!led_play_is_paused(session)) {

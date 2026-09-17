@@ -299,6 +299,19 @@ LC_API lc_result lc_window_drain_events(lc_window *window);
  */
 LC_API uint32_t lc_window_pending_events(const lc_window *window);
 
+/**
+ * Inject one synthetic event into a window's queue (Phase 34A
+ * automation path). The event lands in the SAME ring buffer the
+ * OS backends push through (lc_window_push_event) and is consumed
+ * by the SAME drain (lc_window_read_event inside leg_frame_begin
+ * / le_input_poll_platform) — automation exercises the exact
+ * production event path, never a widget callback directly.
+ * LC_EVENT_NONE is refused (no-op, INVALID_ARGUMENT); the
+ * window field is overwritten with `window`.
+ */
+LC_API lc_result lc_window_inject_event(lc_window *window,
+                                        const lc_window_event *event);
+
 /* -------------------------------------------------------------------------
  * Graphics device API (Phase 3: Vulkan device foundation, no rendering)
  *

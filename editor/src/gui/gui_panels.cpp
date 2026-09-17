@@ -356,6 +356,12 @@ static void leg_toolbar(leg_context *ctx, leg_ui *ui) {
     leg_roles roles;
 
     leg_theme_roles(&roles);
+    /* Probe snapshot resets each frame (stale rects never
+     * survive; valid==0 until the widget draws). */
+    ui->tool_count = 0;
+    ui->asset_count = 0;
+    ui->hier_count = 0;
+    ui->vp_valid = 0;
     /* Authoring group. */
     if (leg_tool_button("##tb-create", LEG_ICON_PLUS,
                         "Create object", 0, tbs)) {
@@ -363,6 +369,7 @@ static void leg_toolbar(leg_context *ctx, leg_ui *ui) {
         ui->show_create_popup = 1;
         ImGui::OpenPopup("Create object");
     }
+    leg_probe_record_tool(ui, "##tb-create");
     ImGui::SameLine();
     if (leg_tool_button("##tb-prefab", LEG_ICON_PREFAB,
                         "Instantiate prefab", 0, tbs)) {
@@ -370,6 +377,7 @@ static void leg_toolbar(leg_context *ctx, leg_ui *ui) {
         ui->show_prefab_popup = 1;
         ImGui::OpenPopup("Instantiate prefab");
     }
+    leg_probe_record_tool(ui, "##tb-prefab");
     ImGui::SameLine();
     ImGui::Separator();
     ImGui::SameLine();
@@ -384,6 +392,7 @@ static void leg_toolbar(leg_context *ctx, leg_ui *ui) {
             leg_status(ctx, "Play failed", 1);
         }
     }
+    leg_probe_record_tool(ui, "##tb-play");
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::BeginDisabled(!playing);
@@ -392,11 +401,13 @@ static void leg_toolbar(leg_context *ctx, leg_ui *ui) {
                         paused ? "Resume" : "Pause", paused, tbs)) {
         led_play_set_paused(ctx->session, !paused);
     }
+    leg_probe_record_tool(ui, "##tb-pause");
     ImGui::SameLine();
     if (leg_tool_button("##tb-step", LEG_ICON_STEP,
                         "Step one tick (F10)", 0, tbs)) {
         led_play_step(ctx->session);
     }
+    leg_probe_record_tool(ui, "##tb-step");
     ImGui::SameLine();
     if (leg_tool_button("##tb-stop", LEG_ICON_STOP,
                         playing ? "Stop (Shift+F5)"
@@ -408,6 +419,7 @@ static void leg_toolbar(leg_context *ctx, leg_ui *ui) {
             leg_status(ctx, "Stop failed", 1);
         }
     }
+    leg_probe_record_tool(ui, "##tb-stop");
     ImGui::EndDisabled();
     if (playing) {
         /* Play pill: unmistakable but quiet (design system). */
@@ -440,18 +452,21 @@ static void leg_toolbar(leg_context *ctx, leg_ui *ui) {
             ui->gizmo_mode == LED_GIZMO_TRANSLATE, tbs)) {
         ui->gizmo_mode = LED_GIZMO_TRANSLATE;
     }
+    leg_probe_record_tool(ui, "##tb-translate");
     ImGui::SameLine();
     if (leg_tool_button("##tb-rotate", LEG_ICON_ROTATE,
                         "Rotate (E)",
                         ui->gizmo_mode == LED_GIZMO_ROTATE, tbs)) {
         ui->gizmo_mode = LED_GIZMO_ROTATE;
     }
+    leg_probe_record_tool(ui, "##tb-rotate");
     ImGui::SameLine();
     if (leg_tool_button("##tb-scale", LEG_ICON_SCALE,
                         "Scale (R)",
                         ui->gizmo_mode == LED_GIZMO_SCALE, tbs)) {
         ui->gizmo_mode = LED_GIZMO_SCALE;
     }
+    leg_probe_record_tool(ui, "##tb-scale");
     /* Snap + space + camera speed (compact; tooltips carry docs). */
     ImGui::SameLine();
     ImGui::Separator();
@@ -690,6 +705,9 @@ static void leg_hierarchy_row(leg_context *ctx, leg_ui *ui,
                           ImGui::GetColorU32(ImGuiCol_Text));
             ImGui::SameLine(0, 4);
             bool open = ImGui::TreeNodeEx(label, flags);
+            /* Probe: hierarchy-row rect for automation (the tree
+             * node is the last item). */
+            leg_probe_record_hier(ui, &node->handle);
             /* Click-to-select (replaces; Ctrl toggles; Shift adds). */
             if (ImGui::IsItemClicked(0)) {
                 const ImGuiIO &io = ImGui::GetIO();
@@ -1365,6 +1383,9 @@ static void leg_panel_assets(leg_context *ctx, leg_ui *ui) {
                     led_browser_clear_selection(ctx->session);
                     led_browser_select(ctx->session, &rec.id);
                 }
+                /* Probe: asset-row rect for automation (the
+                 * Selectable is the last item). */
+                leg_probe_record_asset(ui, rec.source_path);
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("%s", rec.source_path);
                 }
@@ -1819,6 +1840,7 @@ static void leg_panel_viewport(leg_context *ctx, leg_ui *ui) {
             ImGui::TextDisabled("(no viewport bound)");
         }
         ImGui::InvisibleButton("##vp-capture", avail);
+        leg_probe_record_viewport(ui);
         {
             int hovered = ImGui::IsItemHovered() ? 1 : 0;
 

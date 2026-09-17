@@ -97,6 +97,48 @@ struct leg_ui {
      * layout TU + viewport clamp read it). */
     float dock_y;
     float dock_h;
+    /* Probe snapshot (Phase 34A automation observation): refreshed
+     * every panels frame AFTER all panels record. Toolbar tool
+     * rects (by button id), the viewport capture rect, asset-row
+     * rects (by view index), hierarchy-row rects (by object
+     * handle). Plain data; tests read, never write. */
+#define LEG_PROBE_TOOLS 16
+#define LEG_PROBE_ASSETS 512
+#define LEG_PROBE_HIER 256
+    struct {
+        char id[48];
+        float x;
+        float y;
+        float w;
+        float h;
+        int valid;
+    } tools[LEG_PROBE_TOOLS];
+    uint32_t tool_count;
+    float vp_x;
+    float vp_y;
+    float vp_w;
+    float vp_h;
+    int vp_valid;
+    struct {
+        char path[256];
+        float x;
+        float y;
+        float w;
+        float h;
+        int valid;
+    } assets[LEG_PROBE_ASSETS];
+    uint32_t asset_count;
+    struct {
+        uint32_t index;
+        uint32_t generation;
+        uint32_t world_tag;
+        float x;
+        float y;
+        float w;
+        float h;
+        int valid;
+    } hier[LEG_PROBE_HIER];
+    uint32_t hier_count;
 };
 
 /* Viewport offscreen target: COMPLETE type here, opaque forward in
@@ -226,6 +268,13 @@ void leg_layout_request_reset(leg_context *ctx);
  * leg_palette exposes the design roles (see leg_roles below). */
 void leg_theme_apply(void);
 int leg_font_load(void);
+
+/* Probe snapshot writers (gui_probe.cpp owner): called from the
+ * panels frame to record last-frame widget geometry. */
+void leg_probe_record_tool(leg_ui *ui, const char *id);
+void leg_probe_record_viewport(leg_ui *ui);
+void leg_probe_record_asset(leg_ui *ui, const char *path);
+void leg_probe_record_hier(leg_ui *ui, const le_object *obj);
 
 /* Design-system color roles (docs/EDITOR_DESIGN_SYSTEM.md). */
 struct leg_roles {

@@ -226,6 +226,26 @@ lc_result lc_window_drain_events(lc_window *window) {
     return LC_SUCCESS;
 }
 
+lc_result lc_window_inject_event(lc_window *window,
+                                 const lc_window_event *event) {
+    lc_window_event copy;
+
+    if (window == NULL || event == NULL) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    if (event->type == LC_EVENT_NONE) {
+        return LC_ERROR_INVALID_ARGUMENT;
+    }
+    /* Same ring buffer the OS backends push through (window.c's
+     * own push: identical capacity/drop-oldest discipline). The
+     * window field is re-targeted (callers fill geometry only). */
+    memset(&copy, 0, sizeof(copy));
+    copy = *event;
+    copy.window = window;
+    lc_window_push_event(window, &copy);
+    return LC_SUCCESS;
+}
+
 uint32_t lc_window_pending_events(const lc_window *window) {
     if (window == NULL) {
         return 0;

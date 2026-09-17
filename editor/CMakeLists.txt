@@ -125,6 +125,7 @@ add_library(luma_editor_gui STATIC
     src/gui/gui_theme.cpp
     src/gui/gui_layout.cpp
     src/gui/gui_icons.cpp
+    src/gui/gui_probe.cpp
     "${LUMA_IMGUI_DIR}/imgui.cpp"
     "${LUMA_IMGUI_DIR}/imgui_draw.cpp"
     "${LUMA_IMGUI_DIR}/imgui_tables.cpp"

@@ -1243,12 +1243,79 @@ LED_API void leg_draw_get_stats(const leg_context *context,
 LED_API int leg_feed_event(leg_context *context,
                            const lc_window_event *event);
 
+/** Consume gameplay input for the runtime world (Phase 34A play
+ *  wiring — replaces the Phase 33 app-side stub). Call AFTER
+ *  leg_panels_frame while playing, BEFORE led_play_tick: reads the
+ *  CURRENT ImGui key/mouse state (viewport hovered AND the GUI not
+ *  wanting the keyboard — the exact anti-leak policy) and injects
+ *  pressed keys (WASD/arrows/space), mouse deltas, and wheel into
+ *  the engine via le_input_inject (same pending list scripts read).
+ *  Text-field keystrokes never leak (leg_wants_keyboard gate);
+ *  returns the number of injected events (0 when idle/not playing).
+ *  NULL-safe (0 for NULL args). */
+LED_API int leg_consume_play_input(leg_context *context,
+                                   le_engine *engine);
+
 /** Input-ownership query AFTER leg_frame_begin (before rendering):
  *  nonzero when the GUI wants keyboard/mouse (panels/fields
  *  hovered/focused) and the viewport camera should yield. Pure
  *  function of context state; 0 for NULL. */
 LED_API int leg_wants_keyboard(const leg_context *context);
 LED_API int leg_wants_mouse(const leg_context *context);
+
+/* ------------------------------------------------------------------
+ * Test-geometry probes (Phase 34A automation observation).
+ *
+ * These OBSERVE UI geometry so automation can target real widgets
+ * with real input. They NEVER perform the operation under test
+ * (no led calls, no state mutation): the harness reads a rect,
+ * then sends lc_window_inject_event mouse/keyboard input through
+ * the production queue, then asserts led and le state.
+ * ------------------------------------------------------------------ */
+
+/** Plain-data screen rect (client px, origin top-left). */
+typedef struct leg_rect {
+    float x;
+    float y;
+    float w;
+    float h;
+    int valid; /* nonzero when the widget drew this frame */
+} leg_rect;
+
+/** Last-frame rect of a toolbar tool button ("##tb-play",
+ *  "##tb-stop", "##tb-translate", ... — same IDs as the panels).
+ *  1 + fill on success (valid==1 when the button drew), 0 for
+ *  NULL/unknown id (valid==0). */
+LED_API int leg_probe_tool_rect(const leg_context *context,
+                                const char *tool_id,
+                                leg_rect *out_rect);
+
+/** Last-frame viewport capture rect (the "##vp-capture" widget the
+ *  clicks/gizmo/drops land on). 1 + fill, 0 for NULL. */
+LED_API int leg_probe_viewport_rect(const leg_context *context,
+                                    leg_rect *out_rect);
+
+/** Projected gizmo handle position (screen px, same math the
+ *  overlay draws: selection AABB center + axis * handle_len
+ *  through the host viewport). mode/axis mirror led_gizmo_*.
+ *  Returns 1 + fill on success, 0 when no handle exists (no
+ *  selection, bad mode/axis, NULL). */
+LED_API int leg_probe_gizmo_handle(const leg_context *context,
+                                   int mode, int axis,
+                                   float out_px[2]);
+
+/** Last-frame rect of an asset row by source path (the Selectable
+ *  in the Assets panel). 1 + fill (valid==1 when the row drew),
+ *  0 for NULL/absent. Searches the CURRENT browser view order. */
+LED_API int leg_probe_asset_row(const leg_context *context,
+                                const char *source_path,
+                                leg_rect *out_rect);
+
+/** Last-frame rect of a hierarchy row for a live object. 1 + fill
+ *  (valid==1 when the row drew), 0 for NULL/stale. */
+LED_API int leg_probe_hierarchy_row(const leg_context *context,
+                                    const le_object *object,
+                                    leg_rect *out_rect);
 
 /** Clamp a GUI clip rect (draw-command clip rect, DisplayPos-relative
  *  float px) into an lc_scissor_rect for the pass extent (pure math,
