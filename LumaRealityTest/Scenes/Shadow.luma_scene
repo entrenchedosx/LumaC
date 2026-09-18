@@ -44,5 +44,5 @@ position 0 0 0
 rotation -0.4155384 0.266100317 0.128541112 0.860229969
 scale 1 1 1
 light dir 1 1 1 3 0 0 0
-shadow 1 1024 0 0 0 0 0
+shadow 1 1024 -1 -1 0 0 0
 end

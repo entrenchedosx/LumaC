@@ -548,6 +548,23 @@ if(UNIX AND NOT APPLE)
 endif()
 add_test(NAME test_shadow_vulkan COMMAND test_shadow_vulkan)
 
+# R-011 recovery probe: minimal solid-grey shadow lab (temporary;
+# removed once the hotfix lands). Same link pattern as
+# test_shadow_vulkan.
+add_executable(test_r011_probe tests/test_r011_probe.c)
+target_link_libraries(test_r011_probe PRIVATE luma_renderer luma_assets lumac Vulkan::Vulkan)
+target_include_directories(test_r011_probe PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../assets/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(TARGET luma_renderer_shaders)
+    add_dependencies(test_r011_probe luma_renderer_shaders)
+endif()
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_r011_probe PRIVATE m)
+endif()
+
 # IBL tests (Phase 17): headless CPU references + Vulkan
 # environment/HDR/tonemap pixel/endurance.
 add_executable(test_ibl tests/test_ibl.c)

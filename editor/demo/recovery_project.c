@@ -788,9 +788,16 @@ int main(int argc, char **argv) {
            (unsigned)le_world_get_object_count(w));
     } /* end full-build Game assembly block (if + brace) */
 
-    /* --regen-shadow: rebuild ONLY the Shadow scene file against
-     * the committed project (UUIDs + engine IDs stable). The
-     * Game scene + all sidecars stay byte-identical. */
+    /* --regen-shadow: rebuild ONLY the Shadow scene contents
+     * against the committed project. LIMITATION (honest): object
+     * UUIDs are runtime mappings, not file content — opening the
+     * committed scene then rebuilding the world from scratch mints
+     * fresh UUIDs on save (IDs live in the world slots, and
+     * led_scene_new destroys them). So a regen rewrites the scene
+     * file's object IDs; the Game scene + all sidecars stay
+     * byte-identical, and the asset refs (mesh/material persistent
+     * IDs) are unchanged. The bias fix is a scene-CONTENT change
+     * (shadow 1 1024 -1 -1 ...), carried by the new file. */
 
     /* Pass 2: Shadow.luma_scene — unmistakable shadow acceptance
      * (directional light + cube over a ground plane, aimed
@@ -944,6 +951,13 @@ int main(int argc, char **argv) {
             ld.intensity = 3.0f;
             ld.shadow.enabled = 1;
             ld.shadow.resolution = 1024;
+            /* R-011: explicit-zero biases DISABLE both mitigations
+             * (negative = renderer defaults 0.0015/0.02). The old
+             * zeroed desc rendered the whole ground half-shadowed
+             * (self-shadow acne); defaults give a clean cast
+             * shadow with a 2-4px PCF edge. */
+            ld.shadow.depth_bias = -1.0f;
+            ld.shadow.normal_bias = -1.0f;
             CHECK(le_object_add_light(w, &sun2, &ld) ==
                       LE_SUCCESS,
                   "shadow sun light+shadow");

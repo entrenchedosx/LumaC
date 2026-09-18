@@ -143,6 +143,19 @@ static const led_static_prop kLedProps[] = {
              LED_DATA_FLOAT, 2, 0, 1.0e9f, 1, NULL, 0),
     LED_PROP("light.range", "Range", LE_COMPONENT_LIGHT, LED_DATA_FLOAT,
              3, 0, 1.0e6f, 1, NULL, 0),
+    LED_PROP("light.shadow_enabled", "Shadow enabled",
+             LE_COMPONENT_LIGHT, LED_DATA_BOOL, 6, 0, 0, 0, NULL, 0),
+    LED_PROP("light.shadow_resolution", "Shadow resolution",
+             LE_COMPONENT_LIGHT, LED_DATA_UINT, 7, 0, 4096, 1, NULL, 0),
+    LED_PROP("light.shadow_depth_bias", "Shadow depth bias",
+             LE_COMPONENT_LIGHT, LED_DATA_FLOAT, 8, -1.0f, 0.1f, 1,
+             NULL, 0),
+    LED_PROP("light.shadow_normal_bias", "Shadow normal bias",
+             LE_COMPONENT_LIGHT, LED_DATA_FLOAT, 9, -1.0f, 1.0f, 1,
+             NULL, 0),
+    LED_PROP("light.shadow_distance", "Shadow distance",
+             LE_COMPONENT_LIGHT, LED_DATA_FLOAT, 10, 0, 1.0e6f, 1,
+             NULL, 0),
     LED_PROP("light.spot_inner_deg", "Spot inner (deg)",
              LE_COMPONENT_LIGHT, LED_DATA_FLOAT, 4, 0, 89.9f, 1, NULL, 0),
     LED_PROP("light.spot_outer_deg", "Spot outer (deg)",
@@ -623,11 +636,18 @@ int led_read_property(led_session *session, const le_object *object,
     }
     if (strncmp(path, "renderable.", 11) == 0) {
         le_renderable_desc d;
+        le_asset_renderable_desc ad;
         int has_ptr = le_object_get_renderable(w, object, &d);
+        int has_asset = le_object_get_asset_renderable(w, object, &ad);
 
         if (strcmp(path, "renderable.visible") == 0 && has_ptr) {
             out_value->type = LED_DATA_BOOL;
             out_value->boolean = d.visible;
+            return 1;
+        }
+        if (strcmp(path, "renderable.visible") == 0 && has_asset) {
+            out_value->type = LED_DATA_BOOL;
+            out_value->boolean = ad.visible;
             return 1;
         }
         if (strcmp(path, "renderable.casts_shadow") == 0 && has_ptr) {
@@ -635,10 +655,22 @@ int led_read_property(led_session *session, const le_object *object,
             out_value->boolean = d.casts_shadow;
             return 1;
         }
+        if (strcmp(path, "renderable.casts_shadow") == 0 &&
+            has_asset) {
+            out_value->type = LED_DATA_BOOL;
+            out_value->boolean = ad.casts_shadow;
+            return 1;
+        }
         if (strcmp(path, "renderable.receives_shadow") == 0 &&
             has_ptr) {
             out_value->type = LED_DATA_BOOL;
             out_value->boolean = d.receives_shadow;
+            return 1;
+        }
+        if (strcmp(path, "renderable.receives_shadow") == 0 &&
+            has_asset) {
+            out_value->type = LED_DATA_BOOL;
+            out_value->boolean = ad.receives_shadow;
             return 1;
         }
         if (strcmp(path, "renderable.mesh_asset") == 0) {
@@ -734,6 +766,35 @@ int led_read_property(led_session *session, const le_object *object,
             out_value->type = LED_DATA_FLOAT;
             out_value->number =
                 (double)d.spot_outer * 180.0 / LED_PI;
+            return 1;
+        }
+        /* R-011: shadow bias/distance were uninspectable (hence
+         * uneditable) — the pass-2 Shadow scene shipped explicit
+         * zeros (biases DISABLED) with no UI ever showing it.
+         * Negative bias = renderer default; resolution 0 = 1024. */
+        if (strcmp(path, "light.shadow_enabled") == 0) {
+            out_value->type = LED_DATA_BOOL;
+            out_value->boolean = d.shadow.enabled ? 1 : 0;
+            return 1;
+        }
+        if (strcmp(path, "light.shadow_resolution") == 0) {
+            out_value->type = LED_DATA_UINT;
+            out_value->uinteger = (uint64_t)d.shadow.resolution;
+            return 1;
+        }
+        if (strcmp(path, "light.shadow_depth_bias") == 0) {
+            out_value->type = LED_DATA_FLOAT;
+            out_value->number = (double)d.shadow.depth_bias;
+            return 1;
+        }
+        if (strcmp(path, "light.shadow_normal_bias") == 0) {
+            out_value->type = LED_DATA_FLOAT;
+            out_value->number = (double)d.shadow.normal_bias;
+            return 1;
+        }
+        if (strcmp(path, "light.shadow_distance") == 0) {
+            out_value->type = LED_DATA_FLOAT;
+            out_value->number = (double)d.shadow.shadow_distance;
             return 1;
         }
         return 0;
@@ -1243,6 +1304,52 @@ led_result led_write_property(led_session *session,
                 return LED_ERROR_INVALID_ARGUMENT;
             }
             d.spot_outer = (float)(value->number * LED_PI / 180.0);
+        } else if (strcmp(path, "light.shadow_enabled") == 0) {
+            if (value->type != LED_DATA_BOOL) {
+                return LED_ERROR_INVALID_ARGUMENT;
+            }
+            d.shadow.enabled = value->boolean ? 1 : 0;
+        } else if (strcmp(path, "light.shadow_resolution") == 0) {
+            /* 0 = renderer default 1024; else pow2 128..4096
+             * (renderer validation is the authority — the range
+             * gate only rejects the absurd). */
+            uint64_t r = 0;
+
+            if (value->type == LED_DATA_UINT) {
+                r = value->uinteger;
+            } else if (value->type == LED_DATA_INT) {
+                if (value->integer < 0) {
+                    return LED_ERROR_INVALID_ARGUMENT;
+                }
+                r = (uint64_t)value->integer;
+            } else {
+                return LED_ERROR_INVALID_ARGUMENT;
+            }
+            if (r > 4096) {
+                return LED_ERROR_INVALID_ARGUMENT;
+            }
+            d.shadow.resolution = (uint32_t)r;
+        } else if (strcmp(path, "light.shadow_depth_bias") == 0) {
+            /* Negative = renderer default (0.0015); zero disables. */
+            if (value->type != LED_DATA_FLOAT ||
+                !led_range_ok(sp, value->number)) {
+                return LED_ERROR_INVALID_ARGUMENT;
+            }
+            d.shadow.depth_bias = (float)value->number;
+        } else if (strcmp(path, "light.shadow_normal_bias") == 0) {
+            /* Negative = renderer default (0.02); zero disables. */
+            if (value->type != LED_DATA_FLOAT ||
+                !led_range_ok(sp, value->number)) {
+                return LED_ERROR_INVALID_ARGUMENT;
+            }
+            d.shadow.normal_bias = (float)value->number;
+        } else if (strcmp(path, "light.shadow_distance") == 0) {
+            /* <= 0 = 25 m frustum fit for directionals. */
+            if (value->type != LED_DATA_FLOAT ||
+                !led_range_ok(sp, value->number)) {
+                return LED_ERROR_INVALID_ARGUMENT;
+            }
+            d.shadow.shadow_distance = (float)value->number;
         } else {
             return LED_ERROR_INVALID_ARGUMENT;
         }
@@ -1255,29 +1362,49 @@ led_result led_write_property(led_session *session,
     }
     if (strncmp(path, "renderable.", 11) == 0) {
         le_renderable_desc d;
+        le_asset_renderable_desc ad;
+        int has_ptr = le_object_get_renderable(w, object, &d);
+        int has_asset =
+            le_object_get_asset_renderable(w, object, &ad);
 
-        if (!le_object_get_renderable(w, object, &d)) {
+        if (!has_ptr && !has_asset) {
             return LED_ERROR_INVALID_ARGUMENT;
         }
         if (strcmp(path, "renderable.visible") == 0) {
             if (value->type != LED_DATA_BOOL) {
                 return LED_ERROR_INVALID_ARGUMENT;
             }
-            d.visible = value->boolean;
+            if (has_ptr) {
+                d.visible = value->boolean;
+            } else {
+                ad.visible = value->boolean;
+            }
         } else if (strcmp(path, "renderable.casts_shadow") == 0) {
             if (value->type != LED_DATA_BOOL) {
                 return LED_ERROR_INVALID_ARGUMENT;
             }
-            d.casts_shadow = value->boolean;
+            if (has_ptr) {
+                d.casts_shadow = value->boolean;
+            } else {
+                ad.casts_shadow = value->boolean;
+            }
         } else if (strcmp(path, "renderable.receives_shadow") == 0) {
             if (value->type != LED_DATA_BOOL) {
                 return LED_ERROR_INVALID_ARGUMENT;
             }
-            d.receives_shadow = value->boolean;
+            if (has_ptr) {
+                d.receives_shadow = value->boolean;
+            } else {
+                ad.receives_shadow = value->boolean;
+            }
         } else {
             return LED_ERROR_INVALID_ARGUMENT;
         }
-        rc = le_object_add_renderable(w, object, &d);
+        if (has_ptr) {
+            rc = le_object_add_renderable(w, object, &d);
+        } else {
+            rc = le_object_add_asset_renderable(w, object, &ad);
+        }
         if (rc != LE_SUCCESS) {
             session->last_engine_error = (int)rc;
             return LED_ERROR_ENGINE;

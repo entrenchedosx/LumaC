@@ -709,14 +709,22 @@ int main(int argc, char **argv) {
             memset(&rep, 0, sizeof(rep));
             le_world_get_last_render_report(rw, &rep);
             printf("report submitted=%u dis=%u inv=%u dead=%u "
-                   "draws=%u tris=%u objects=%u\n",
+                   "draws=%u tris=%u objects=%u shadow_lights=%u "
+                   "shadow_passes=%u shadow_draws=%u shadow_tris=%u "
+                   "shadow_maps=%u shadow_culled=%u\n",
                    (unsigned)rep.submitted,
                    (unsigned)rep.skipped_disabled,
                    (unsigned)rep.skipped_invisible,
                    (unsigned)rep.skipped_dead,
                    (unsigned)rep.renderer_stats.draw_calls,
                    (unsigned)rep.renderer_stats.triangles,
-                   (unsigned)le_world_get_object_count(rw));
+                   (unsigned)le_world_get_object_count(rw),
+                   (unsigned)rep.renderer_stats.shadow_casting_lights,
+                   (unsigned)rep.renderer_stats.shadow_passes,
+                   (unsigned)rep.renderer_stats.shadow_draw_calls,
+                   (unsigned)rep.renderer_stats.shadow_triangles,
+                   (unsigned)rep.renderer_stats.shadow_maps_rendered,
+                   (unsigned)rep.renderer_stats.shadow_casters_culled);
         }
     }
 cleanup:

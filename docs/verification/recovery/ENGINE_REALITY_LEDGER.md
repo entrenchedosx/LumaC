@@ -33,7 +33,7 @@ draws=4 tris=38`.
 | Model drop into scene | `led_drop_model_into_scene` via real payload (Static/Dynamic/Mover/Npc drops in builder) | H-drop headed 114-suite | drops in reopened scene | LIVE PASS |
 | Directional light toggle | Game vs Game.nosun: viewbox diff 779/3268 px, mean R −34 (sun removal darkens) | covered in scene suites | `17-game-aimed.png` vs `19-game-nosun.png` | LIVE PASS |
 | Point light | intensity-10x close light visibly warms crates (598/4141 px diff, red 255,8,38 cluster grows); small lateral moves at range 12 are sub-threshold in this dark scene (0 px) — honest sensitivity note, not a failure | — | `pass2/point-close.png` vs `pass2/point-left.png` | LIVE PASS (with noted sensitivity floor) |
-| Shadows | Shadow scene ON vs OFF: 16957/21931 px differ, OFF brighter +39 (cast shadow); caster-move + light-move differentials; reopen byte-identical | test_shadow + test_shadow_vulkan PASS (crescent + moving + bias legs) | `pass2/shadow-on.png` vs `pass2/shadow-off.png` | LIVE PASS |
+| Shadows | Shadow scene ON vs OFF: footprint-only delta (viewport diffrac 0.0095, OFF +0.39); zero-bias mutation darkens whole ground (0.2266, +8.13); caster/light moves reshape; lab edge 1px at 512/1024/2048; ON repeat 0.0308 | test_shadow + test_shadow_vulkan + test_r011_probe PASS | `pass2/r011/editor-shadow-on.png` vs `-off.png`/`-zero.png`, `after/r011-on.ppm`, full log `pass2/r011/R-011-LOG.md` | LIVE PASS |
 | Shadow mutation | — | MUT_COMPOSITE arm kills H-comp leg (verified in matrix); shadow-caster disarm proven live by R-009 ON/OFF-identical pair | R-009 pair | LIVE PASS (by live disarm + arm) |
 | PBR/materials | readbacks 20/20 + grid shot banked (`pass2/pbr-grid.png`); endurance camera orbits away by frame 500 so the banked frame is mostly clear — readback legs are the proof, grid framing is a known-weak capture | test_pbr + test_pbr_vulkan PASS | `pass2/pbr-grid.png` (weak framing, noted) | LIVE PASS (readbacks) / PARTIAL (framed grid capture) |
 | IBL/environment | IBL-off A/B: attached mean (172,147,131) → detached pure black (0,0,0, 1 color), stats `ibl=1→0 sky=1→0` | test_ibl + test_ibl_vulkan PASS | `pass2/tonemap-aces-ev0.png` vs `pass2/ibl-off.png` | LIVE PASS |
@@ -109,7 +109,46 @@ draws=4 tris=38`.
 - Live re-verification: ON/OFF + caster-move + light-move +
   reopen proofs, all green.
 
-### R-010 (withdrawn — CRLF checkout artifact, NOT an engine defect)
+### R-011: shadow rendering visibly incorrect — linear-filtered depth + zeroed scene biases (P0 hotfix, FIXED — READY FOR HUMAN SHADOW REVIEW)
+- Subsystem: renderer shadow sampling (`renderer/src/renderer.c`) + Shadow
+  acceptance scene content (`LumaRealityTest/Scenes/Shadow.luma_scene`) +
+  uninspectable shadow config (no reflect rows, no report columns).
+- How discovered: R-011 hotfix order — prior ON/OFF differential proved
+  only that shadow code changes pixels, NOT correctness; the complaint
+  (large blurred/diffuse rectangular darkening, no convincing cast shadow)
+  reproduced in tenue.
+- User-visible symptom: whole ground half-shadowed with dimmed checker
+  whites instead of a hard cast shadow under the cube.
+- Root causes (two): (1) depth maps sampled through the shared LINEAR
+  sampler — bilinear blending of comparison data at every PCF tap widened
+  the penumbra (fixed: dedicated NEAREST `shadow_sampler` at shadow-set
+  binding 5; lab edge moves 1px, kept as correctness hygiene). (2) The
+  committed scene shipped explicit-zero biases (`shadow 1 1024 0 0 ...`),
+  which DISABLE both mitigations (negative = compiled defaults 0.0015/0.02)
+  — whole-ground acne (lab zero run `diff frac 0.7090`; editor zero
+  mutation `difffrac 0.2266`, whites 229->178). Fixed with the one-line
+  scene change `-1 -1` (byte patch preserving UUIDs; builder fixed to match).
+- Audit kept as-is: PCF is per-tap compare-then-average (correct),
+  `compareEnable` always FALSE (manual PCF only), UV 0..1 / depth 0..1 /
+  outside-frustum-lit conventions correct, 3x3 kernel over 1-texel steps,
+  25 m default frustum, depth-map stats real content (min 0.202774, max 1.0).
+- Regression: lab probe `test_r011_probe` (screen edge 1px at 512/1024/2048,
+  footprint ratio 0.0, depth 0..1) + full Debug suite 94/94 PASS (75.19 s).
+- Mutation sensitivity: zero-bias (0.2266), caster-move (0.0251, cube visibly
+  displaces), light-move (0.2038) — every mutation moves pixels in the
+  expected direction.
+- Reopen anomaly closed: mid-work 10.5% reopen-vs-on delta was the stale
+  committed `0 0` bias line re-read by the "reopen" run (reopen matched the
+  zero mutation pixel-for-pixel, checker phase identical) — NOT an
+  exposure/ambient/texture race. Post-fix ON vs repeat `0.0308`.
+- Evidence + full per-section log: `docs/verification/recovery/pass2/r011/`
+  (`R-011-LOG.md`, lab `after/` + `sweep-*/`, six editor PNGs).
+- Human review asked: open `-on.png` vs `-zero.png` (hard shadow + clean
+  whites vs half-shadowed ground); `-off.png` differs from ON only inside
+  the cast footprint; lab `after/r011-on.ppm` shows the 1px edge on
+  untextured grey. Remaining shape/placement questions are artistic
+  direction (light angle, intensity 3, 1024 res), not pipeline correctness.
+- R-010 (withdrawn — CRLF checkout artifact, NOT an engine defect)
 - Symptom seen: `Game.luma_scene.luma` fingerprint flipped
   `2778 b323…` → `2891 1cd9…` on every open; looked like the
   R-007 loop persisting.

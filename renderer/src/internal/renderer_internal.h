@@ -309,6 +309,11 @@ struct lr_renderer {
                                         * emission works) */
     lc_image_view *fallback_emissive_view;
     lc_sampler *default_sampler;
+    /* R-011: depth maps are comparison data, never filterable
+     * color — the frame shadow set samples them through this
+     * dedicated NEAREST sampler (materials keep the linear
+     * default above). */
+    lc_sampler *shadow_sampler;
 
     /* Owned shaders (modules freed after pipelines exist). */
     lc_shader *vertex_shader;

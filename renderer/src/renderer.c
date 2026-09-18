@@ -669,6 +669,28 @@ lr_result lr_renderer_create(const lr_renderer_desc *desc,
         res = LR_ERROR_RENDER;
         goto fail;
     }
+    /* R-011: depth maps hold COMPARISON data (one depth per texel),
+     * never filterable color. The default (linear) sampler
+     * bilinearly interpolates neighboring depths at EVERY tap, so
+     * each of the 9 PCF taps compares against a blended depth and
+     * the penumbra widens into the large diffuse darkening seen in
+     * the pass-2 screenshots. Depth sampling takes a dedicated
+     * NEAREST sampler (per-tap compare stays exact; PCF averaging
+     * over exact taps is the only softening). Materials keep the
+     * shared linear default. */
+    memset(&smdesc, 0, sizeof(smdesc));
+    smdesc.min_filter = LC_FILTER_NEAREST;
+    smdesc.mag_filter = LC_FILTER_NEAREST;
+    smdesc.mipmap_mode = LC_MIPMAP_MODE_NEAREST;
+    smdesc.address_u = LC_ADDRESS_CLAMP_TO_EDGE;
+    smdesc.address_v = LC_ADDRESS_CLAMP_TO_EDGE;
+    smdesc.address_w = LC_ADDRESS_CLAMP_TO_EDGE;
+    smdesc.max_anisotropy = 1.0f;
+    if (lc_sampler_create(renderer->device, &smdesc,
+                           &renderer->shadow_sampler) != LC_SUCCESS) {
+        res = LR_ERROR_RENDER;
+        goto fail;
+    }
 
     /* Environment resources: layouts, mapped params, empty set
      * (cheap; shaders/pipelines stay lazy until first use). */
@@ -819,7 +841,7 @@ lr_result lr_renderer_create(const lr_renderer_desc *desc,
         sh_writes[5].binding = 5;
         sh_writes[5].array_element = 0;
         sh_writes[5].type = LC_BINDING_SAMPLER;
-        sh_writes[5].u.sampler.sampler = renderer->default_sampler;
+        sh_writes[5].u.sampler.sampler = renderer->shadow_sampler;
         if (lc_binding_set_update(renderer->shadow_set, sh_writes, 6) !=
             LC_SUCCESS) {
             res = LR_ERROR_RENDER;
@@ -980,6 +1002,8 @@ void lr_renderer_destroy(lr_renderer *renderer) {
     renderer->light_mapped = NULL;
     lc_buffer_destroy(renderer->camera_buffer);
     renderer->camera_mapped = NULL;
+    lc_sampler_destroy(renderer->shadow_sampler);
+    renderer->shadow_sampler = NULL;
     lc_sampler_destroy(renderer->default_sampler);
     lc_image_view_destroy(renderer->fallback_emissive_view);
     lc_image_destroy(renderer->fallback_emissive_image);
