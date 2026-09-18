@@ -34,6 +34,14 @@
 #define LEG_PI 3.14159265358979323846f
 #endif
 
+/* Phase 34A mutation arm: M-gizmo refuses every drag apply (the
+ * H6/H6b/H6c drag-moved legs fail while armed). */
+#if defined(LUMA34A_MUT_GIZMO)
+#define LEG_MUT_GIZMO 1
+#else
+#define LEG_MUT_GIZMO 0
+#endif
+
 static void leg_v3_sub(const float a[3], const float b[3],
                        float out[3]) {
     out[0] = a[0] - b[0];
@@ -470,6 +478,12 @@ int leg_gizmo_overlay(leg_context *ctx, leg_ui *ui,
                sizeof(drag.start_world));
         memcpy(drag.current_world, hit, sizeof(hit));
         drag.snap = ui->gizmo_snap_on ? ui->gizmo_snap_step : 0.0f;
+        if (LEG_MUT_GIZMO) {
+            /* Swallow the apply (object never moves). */
+            leg_gizmo_draw(ctx, vp, origin, size, mode,
+                           ui->gizmo_axis, center, handle_len);
+            return 1;
+        }
         if (led_gizmo_apply(ctx->session, &drag) != LED_SUCCESS) {
             leg_status(ctx, "Gizmo apply failed", 1);
             ui->gizmo_active = 0;

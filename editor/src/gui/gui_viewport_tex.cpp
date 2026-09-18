@@ -347,6 +347,11 @@ ImTextureID leg_viewport_render(leg_context *ctx,
     if (w == 0 || h == 0 || vt->target == NULL) {
         return ImTextureID_Invalid;
     }
+#if defined(LUMA34A_MUT_COMPOSITE)
+    /* M-composite (clear-only): skip the engine trio (the census
+     * must read ~0 non-clear pixels while armed). */
+    (void)world;
+#else
     /* Play shows the RUNTIME world; edit shows the edit world. */
     world = led_is_playing(ctx->session)
                 ? led_play_get_world(ctx->session)
@@ -358,6 +363,7 @@ ImTextureID leg_viewport_render(leg_context *ctx,
         le_world_render_end(world);
         return ImTextureID_Invalid;
     }
+#endif
     memset(&catt, 0, sizeof(catt));
     catt.view = vt->color_view;
     catt.load_op = LC_LOAD_OP_CLEAR;
@@ -381,9 +387,19 @@ ImTextureID leg_viewport_render(leg_context *ctx,
     pass.width = w;
     pass.height = h;
     if (lc_encoder_begin_render_pass(enc, &pass) != LC_SUCCESS) {
+#if defined(LUMA34A_MUT_COMPOSITE)
+        return ImTextureID_Invalid;
+#else
         le_world_render_end(world);
         return ImTextureID_Invalid;
+#endif
     }
+#if defined(LUMA34A_MUT_COMPOSITE)
+    /* Clear-only: no scene output (target keeps clear color). */
+    if (lc_encoder_end_render_pass(enc) != LC_SUCCESS) {
+        return ImTextureID_Invalid;
+    }
+#else
     if (le_world_render_output(world, enc, vt->target) !=
         LE_SUCCESS) {
         lc_encoder_end_render_pass(enc);
@@ -395,6 +411,7 @@ ImTextureID leg_viewport_render(leg_context *ctx,
         return ImTextureID_Invalid;
     }
     le_world_render_end(world);
+#endif
     /* TexID = binding-set identity for the draw walk. The GUI font
      * table owns TexIDs 1..63 (slot+1); viewport targets ride ABOVE
      * as pointer-sized IDs. The walk must accept them — see
@@ -454,4 +471,81 @@ unsigned long long leg_viewport_composite(
     id = leg_viewport_render(ctx, vt, enc, (uint32_t)w,
                              (uint32_t)h);
     return (unsigned long long)(uint64_t)id;
+}
+
+/* Composite census (observe-only readback for the headed proof):
+ * counts pixels in the panel-sized target differing from the
+ * composite clear color (0.04/0.05/0.09 -> 10,13,23 @8bit) by
+ * more than 3 LSBs on any channel. Requires TRANSFER_SRC (set at
+ * target creation). The caller owns frame discipline: call AFTER
+ * leg_viewport_composite recorded into `enc` and the frame
+ * submitted (readback observes finished GPU work — same rule as
+ * the h_shot path: end the frame first). */
+int leg_viewport_composite_census(leg_context *ctx,
+                                  struct leg_viewport_target *vt,
+                                  uint64_t out[4]) {
+    lc_image_readback_desc rbdesc;
+    lc_image_readback_info rbinfo;
+    unsigned char *rgba = NULL;
+    uint64_t non_clear = 0;
+    uint32_t x = 0;
+    uint32_t y = 0;
+
+    if (out != NULL) {
+        out[0] = out[1] = out[2] = out[3] = 0ull;
+    }
+    if (ctx == NULL || vt == NULL || out == NULL) {
+        return 0;
+    }
+    if (vt->color == NULL || vt->width == 0 ||
+        vt->height == 0) {
+        return 0;
+    }
+    memset(&rbdesc, 0, sizeof(rbdesc));
+    memset(&rbinfo, 0, sizeof(rbinfo));
+    if (lc_image_query_readback(vt->color, &rbdesc, &rbinfo) !=
+        LC_SUCCESS) {
+        return 0;
+    }
+    rgba = new (std::nothrow) unsigned char[rbinfo.size];
+    if (rgba == NULL) {
+        return 0;
+    }
+    if (lc_image_readback(vt->color, &rbdesc, rgba,
+                          rbinfo.size, NULL) != LC_SUCCESS) {
+        delete[] rgba;
+        return 0;
+    }
+    for (y = 0; y < vt->height; y++) {
+        for (x = 0; x < vt->width; x++) {
+            size_t i =
+                ((size_t)y * vt->width + x) * 4u;
+            int dr =
+                (int)rgba[i + 0] - 10;
+            int dg =
+                (int)rgba[i + 1] - 13;
+            int db =
+                (int)rgba[i + 2] - 23;
+
+            if (dr < 0) {
+                dr = -dr;
+            }
+            if (dg < 0) {
+                dg = -dg;
+            }
+            if (db < 0) {
+                db = -db;
+            }
+            if (dr > 3 || dg > 3 || db > 3) {
+                non_clear++;
+            }
+        }
+    }
+    delete[] rgba;
+    out[0] = non_clear;
+    out[1] = vt->width;
+    out[2] = vt->height;
+    out[3] = 1ull;
+    (void)ctx;
+    return 1;
 }

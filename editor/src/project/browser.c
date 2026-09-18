@@ -848,6 +848,14 @@ int led_drop_script_onto_object(led_session *session,
                                 const le_object *target) {
     led_db_record *r = NULL;
     le_asset script;
+#if defined(LUMA34A_MUT_DROP)
+    /* M-drop: refuse every script drop while armed (the headed
+     * H-drop proof "attached" MUST fail under this arm). */
+    (void)session;
+    (void)payload;
+    (void)target;
+    return 0;
+#endif
 
     if (session == NULL || payload == NULL || target == NULL) {
         return 0;

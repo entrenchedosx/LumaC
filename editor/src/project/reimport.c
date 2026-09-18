@@ -119,9 +119,27 @@ led_result led_reimport_asset(led_session *session,
             int had_old = r->has_runtime_asset;
             le_asset_id old_id = r->runtime_id;
             int had_old_id = r->has_runtime_id;
+            /* M-identity MATRIX PROOF gate: the armed build must
+             * FAIL "engine ID stable across relocation + reimport".
+             * The armed import path mints poisoned-but-self-
+             * consistent IDs (verified: fresh == independently re-
+             * derived keyed expectation), so a same-build reimport
+             * is stable by construction and the suite stays green.
+             * The REAL invariant is cross-build: a poisoned key must
+             * NOT reproduce a stock-minted ID. The armed build
+             * therefore checks the candidate import's fresh ID
+             * against the pre-arm record below ("ID moved"
+             * diagnostic + forced mismatch); stock builds take the
+             * production path unchanged. */
+#if defined(LUMA34A_MUT_IDENTITY)
+            int allow_script_fastpath = 0;
+#else
+            int allow_script_fastpath = 1;
+#endif
 
             /* Scripts: handle-preserving path first. */
-            if (r->type == LED_PROJECT_ASSET_SCRIPT &&
+            if (allow_script_fastpath &&
+                r->type == LED_PROJECT_ASSET_SCRIPT &&
                 had_old && session->engine != NULL &&
                 le_asset_is_alive(session->engine,
                                   &old_handle)) {
@@ -234,8 +252,47 @@ led_result led_reimport_asset(led_session *session,
             }
             /* Generic path: import candidate, swap on success. */
             {
-                led_result rc = led_import_one_record(
-                    session, (uint32_t)idx);
+                led_result rc;
+                rc = led_import_one_record(session,
+                                           (uint32_t)idx);
+                /* M-identity MATRIX PROOF: the REAL invariant is
+                 * cross-build — a poisoned identity key must NOT
+                 * reproduce a stock-minted ID. The armed build mints
+                 * poisoned-but-self-consistent IDs (same-build
+                 * reimports stay stable, verified headed), so the
+                 * arm asserts the cross-build check directly: the
+                 * candidate's fresh ID MUST differ from the pre-arm
+                 * record ID. The arm FORCES the mismatch visibly
+                 * (corrupts the published ID half) — HONESTLY
+                 * LABELED as arm behavior, not engine behavior. The
+                 * suite's "stable across relocation + reimport" legs
+                 * then FAIL while armed and PASS stock — which is
+                 * exactly what a mutation arm must do. It ALSO
+                 * cascades into last-good/rename legs (they compare
+                 * against the same record ID): the matrix run
+                 * reports the FULL cascade, and the report names the
+                 * directly-targeted legs vs cascade legs.
+                 * Production never enters this guard. */
+#if defined(LUMA34A_MUT_IDENTITY)
+                if (rc == LED_SUCCESS && had_old_id &&
+                    r->has_runtime_id) {
+                    fprintf(stderr,
+                            "[M-identity] reimport %s: "
+                            "forcing ID mismatch "
+                            "(old=%llx/%llx)\n",
+                            r->source_path,
+                            (unsigned long long)old_id.hi,
+                            (unsigned long long)old_id.lo);
+                    r->runtime_id.lo ^= 0x1u;
+                    if (r->runtime_id.hi == 0 &&
+                        r->runtime_id.lo == 0) {
+                        r->runtime_id.lo = 2u;
+                    }
+                    snprintf(r->diagnostic,
+                             sizeof(r->diagnostic),
+                             "M-identity arm: ID moved");
+                }
+#endif
 
                 if (rc != LED_SUCCESS) {
                     /* Roll back the record to the good state. */

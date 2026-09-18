@@ -379,6 +379,198 @@ if(UNIX AND NOT APPLE)
 endif()
 add_test(NAME test_editor_negative COMMAND test_editor_negative)
 
+# Phase 34A headed interaction proofs (Vulkan-gated; SKIP without
+# a device): real lc_window_inject_event input through the
+# production queue + leg_probe_* observation + led/le asserts.
+add_executable(test_editor_headed tests/test_editor_headed.c)
+target_link_libraries(test_editor_headed PRIVATE luma_editor_gui luma_engine luma_renderer lumac Vulkan::Vulkan)
+target_include_directories(test_editor_headed PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../engine/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../renderer/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_editor_headed PRIVATE m)
+endif()
+add_test(NAME test_editor_headed COMMAND test_editor_headed --shotdir "${CMAKE_CURRENT_BINARY_DIR}/shots34a")
+
+# Phase 34A mutation matrix (each arm breaks ONE headed proof while
+# armed; the report rebuilds each arm and asserts the matching proof
+# FAILS, then restores. Arms live in the SOURCES as LUMA34A_MUT_*
+# (gui_panels/gizmo_overlay/gui_probe/viewport_tex/import_impl) —
+# these OBJECT LIBRARIES recompile the same sources per arm so the
+# production tree is never touched).
+#
+# Shared arm-name list (10 required mutations):
+#   PLAY STOP UNDO SAVE PICK GIZMO COMPOSITE INPUT DROP IDENTITY
+# Per-arm GUI object libraries (same sources, one extra define
+# each; the headed main links the arm instead of the stock GUI
+# lib). luma_editor (core) is shared — all arms except IDENTITY
+# live in GUI TUs.
+foreach(MUT IN ITEMS PLAY STOP UNDO SAVE PICK GIZMO COMPOSITE INPUT DROP)
+    string(TOLOWER "${MUT}" MUT_LOWER)
+    if(NOT TARGET luma_editor_gui_mut_${MUT_LOWER})
+        add_library(luma_editor_gui_mut_${MUT_LOWER} STATIC
+            src/gui/gui_context.cpp
+            src/gui/gui_input.cpp
+            src/gui/gui_draw.cpp
+            src/gui/gui_font.cpp
+            src/gui/gui_viewport_tex.cpp
+            src/gui/gui_panels.cpp
+            src/gui/gui_inspector_widgets.cpp
+            src/gui/gui_gizmo_overlay.cpp
+            src/gui/gui_loop.cpp
+            src/gui/gui_theme.cpp
+            src/gui/gui_layout.cpp
+            src/gui/gui_icons.cpp
+            src/gui/gui_probe.cpp
+            "${LUMA_IMGUI_DIR}/imgui.cpp"
+            "${LUMA_IMGUI_DIR}/imgui_draw.cpp"
+            "${LUMA_IMGUI_DIR}/imgui_tables.cpp"
+            "${LUMA_IMGUI_DIR}/imgui_widgets.cpp")
+        set_target_properties(luma_editor_gui_mut_${MUT_LOWER} PROPERTIES
+            CXX_STANDARD 11
+            CXX_STANDARD_REQUIRED ON
+            CXX_EXTENSIONS OFF)
+        target_include_directories(luma_editor_gui_mut_${MUT_LOWER} PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>)
+        target_include_directories(luma_editor_gui_mut_${MUT_LOWER} PRIVATE
+            "${LUMA_IMGUI_DIR}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/gui")
+        target_link_libraries(luma_editor_gui_mut_${MUT_LOWER} PUBLIC luma_editor)
+        if(UNIX AND NOT APPLE)
+            target_link_libraries(luma_editor_gui_mut_${MUT_LOWER} PRIVATE m)
+        endif()
+        if(MSVC)
+            target_compile_options(luma_editor_gui_mut_${MUT_LOWER} PRIVATE /W3)
+        else()
+            target_compile_options(luma_editor_gui_mut_${MUT_LOWER} PRIVATE -Wall -Wextra)
+        endif()
+        target_compile_definitions(luma_editor_gui_mut_${MUT_LOWER} PRIVATE LUMA34A_MUT_${MUT}=1)
+        set_source_files_properties(
+            "${LUMA_IMGUI_DIR}/imgui.cpp"
+            "${LUMA_IMGUI_DIR}/imgui_draw.cpp"
+            "${LUMA_IMGUI_DIR}/imgui_tables.cpp"
+            "${LUMA_IMGUI_DIR}/imgui_widgets.cpp"
+            TARGET_DIRECTORY luma_editor_gui_mut_${MUT_LOWER}
+            PROPERTIES COMPILE_OPTIONS "-w")
+    endif()
+    if(NOT TARGET test_editor_headed_mut_${MUT_LOWER})
+        add_executable(test_editor_headed_mut_${MUT_LOWER} tests/test_editor_headed.c)
+        target_link_libraries(test_editor_headed_mut_${MUT_LOWER} PRIVATE luma_editor_gui_mut_${MUT_LOWER} luma_engine luma_renderer lumac Vulkan::Vulkan)
+        target_include_directories(test_editor_headed_mut_${MUT_LOWER} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/../engine/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/../renderer/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+        if(UNIX AND NOT APPLE)
+            target_link_libraries(test_editor_headed_mut_${MUT_LOWER} PRIVATE m)
+        endif()
+    endif()
+endforeach()
+# M-identity lives in the CORE import TU (not the GUI): separate
+# core+GUI arm pair for it.
+if(NOT TARGET luma_editor_mut_identity)
+    add_library(luma_editor_mut_identity STATIC
+        src/editor_core.c
+        src/editor_selection.c
+        src/editor_reflect.c
+        src/editor_hierarchy.c
+        src/editor_inspector.c
+        src/editor_commands.c
+        src/editor_scene.c
+        src/editor_play.c
+        src/editor_viewport.c
+        src/editor_gizmo.c
+        src/editor_console.c
+        src/editor_shortcuts.c
+        src/editor_serialize.c
+        src/project/project_core.c
+        src/project/asset_db.c
+        src/project/project_scan.c
+        src/project/import_impl.c
+        src/project/reimport.c
+        src/project/browser.c
+        src/project/project_files.c
+        src/project/prefab_core.c)
+    target_include_directories(luma_editor_mut_identity PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>)
+    target_include_directories(luma_editor_mut_identity PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(luma_editor_mut_identity PUBLIC luma_engine)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(luma_editor_mut_identity PRIVATE m)
+    endif()
+    if(MSVC)
+        target_compile_options(luma_editor_mut_identity PRIVATE /W3)
+    else()
+        target_compile_options(luma_editor_mut_identity PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    target_compile_definitions(luma_editor_mut_identity PRIVATE LUMA34A_MUT_IDENTITY=1)
+endif()
+if(NOT TARGET luma_editor_gui_mut_identity)
+    add_library(luma_editor_gui_mut_identity STATIC
+        src/gui/gui_context.cpp
+        src/gui/gui_input.cpp
+        src/gui/gui_draw.cpp
+        src/gui/gui_font.cpp
+        src/gui/gui_viewport_tex.cpp
+        src/gui/gui_panels.cpp
+        src/gui/gui_inspector_widgets.cpp
+        src/gui/gui_gizmo_overlay.cpp
+        src/gui/gui_loop.cpp
+        src/gui/gui_theme.cpp
+        src/gui/gui_layout.cpp
+        src/gui/gui_icons.cpp
+        src/gui/gui_probe.cpp
+        "${LUMA_IMGUI_DIR}/imgui.cpp"
+        "${LUMA_IMGUI_DIR}/imgui_draw.cpp"
+        "${LUMA_IMGUI_DIR}/imgui_tables.cpp"
+        "${LUMA_IMGUI_DIR}/imgui_widgets.cpp")
+    set_target_properties(luma_editor_gui_mut_identity PROPERTIES
+        CXX_STANDARD 11
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(luma_editor_gui_mut_identity PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>)
+    target_include_directories(luma_editor_gui_mut_identity PRIVATE
+        "${LUMA_IMGUI_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/gui")
+    target_link_libraries(luma_editor_gui_mut_identity PUBLIC luma_editor_mut_identity)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(luma_editor_gui_mut_identity PRIVATE m)
+    endif()
+    if(MSVC)
+        target_compile_options(luma_editor_gui_mut_identity PRIVATE /W3)
+    else()
+        target_compile_options(luma_editor_gui_mut_identity PRIVATE -Wall -Wextra)
+    endif()
+    set_source_files_properties(
+        "${LUMA_IMGUI_DIR}/imgui.cpp"
+        "${LUMA_IMGUI_DIR}/imgui_draw.cpp"
+        "${LUMA_IMGUI_DIR}/imgui_tables.cpp"
+        "${LUMA_IMGUI_DIR}/imgui_widgets.cpp"
+        TARGET_DIRECTORY luma_editor_gui_mut_identity
+        PROPERTIES COMPILE_OPTIONS "-w")
+endif()
+if(NOT TARGET test_editor_headed_mut_identity)
+    add_executable(test_editor_headed_mut_identity tests/test_editor_headed.c)
+    target_link_libraries(test_editor_headed_mut_identity PRIVATE luma_editor_gui_mut_identity luma_engine luma_renderer lumac Vulkan::Vulkan)
+    target_include_directories(test_editor_headed_mut_identity PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../engine/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/../renderer/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(test_editor_headed_mut_identity PRIVATE m)
+    endif()
+endif()
+
 # Phase 34A portable identity (headless script section + Vulkan-gated
 # model section): relocation/reimport/rename/key-strings.
 add_executable(test_portable_identity tests/test_portable_identity.c)
@@ -395,6 +587,25 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(test_portable_identity PRIVATE m)
 endif()
 add_test(NAME test_portable_identity COMMAND test_portable_identity)
+# M-identity MATRIX PROOF (model section, not the headed script
+# leg — scripts preserve the key half by design, so the arm cannot
+# bite them): rebuild the SAME suite against the poisoned-key core
+# lib; the forced model reimport ("engine ID stable across
+# relocation + reimport") MUST move IDs while armed. CTest runs it
+# as a will-fail check via the report script (not a passing test).
+add_executable(test_portable_identity_mut_identity tests/test_portable_identity.c)
+target_link_libraries(test_portable_identity_mut_identity PRIVATE luma_editor_mut_identity luma_assets luma_renderer lumac Vulkan::Vulkan)
+target_include_directories(test_portable_identity_mut_identity PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../engine/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../renderer/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../assets/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_definitions(test_portable_identity_mut_identity PRIVATE
+    LE_BOX_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../assets/BoxTextured.glb")
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_portable_identity_mut_identity PRIVATE m)
+endif()
 
 # Phase 33 demo project builder (headless, no window/GPU): builds
 # editor/demo/Phase33Demo/ (manifest + Assets/Orbit.lua +
@@ -418,7 +629,7 @@ set_tests_properties(editor_demo_phase33 PROPERTIES
 # explicitly (no-op for static builds; set AFTER add_test so the
 # demo target exists in every tree, incl. shared).
 if(WIN32)
-    set_tests_properties(test_editor_core test_editor_history test_editor_play test_editor_viewport test_editor_reflect test_prefab_smoke test_project test_import test_assetdb test_project_editor test_gltf_identity test_prefab test_editor_gui test_editor_gui_gpu test_editor_negative test_portable_identity editor_demo_phase33 PROPERTIES
+    set_tests_properties(test_editor_core test_editor_history test_editor_play test_editor_viewport test_editor_reflect test_prefab_smoke test_project test_import test_assetdb test_project_editor test_gltf_identity test_prefab test_editor_gui test_editor_gui_gpu test_editor_negative test_editor_headed test_portable_identity editor_demo_phase33 PROPERTIES
         ENVIRONMENT "PATH=$<TARGET_FILE_DIR:lumac>\;$ENV{PATH}")
 endif()
 

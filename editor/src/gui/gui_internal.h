@@ -105,6 +105,8 @@ struct leg_ui {
 #define LEG_PROBE_TOOLS 16
 #define LEG_PROBE_ASSETS 512
 #define LEG_PROBE_HIER 256
+#define LEG_PROBE_MENUS 8
+#define LEG_PROBE_MENU_ITEMS 16
     struct {
         char id[48];
         float x;
@@ -139,6 +141,30 @@ struct leg_ui {
         int valid;
     } hier[LEG_PROBE_HIER];
     uint32_t hier_count;
+    /* Main-menu labels (File/Edit/...) + open-menu item rows
+     * (Undo/Redo/...): recorded while the bar/menu draws. The
+     * headed harness opens menus with real clicks at these rects
+     * (Edit menu items share the exact led_* call with shortcuts
+     * — proving the widget path, not the core). */
+    struct {
+        char label[32];
+        float x;
+        float y;
+        float w;
+        float h;
+        int valid;
+    } menus[LEG_PROBE_MENUS];
+    uint32_t menu_count;
+    struct {
+        char menu[32];
+        char item[48];
+        float x;
+        float y;
+        float w;
+        float h;
+        int valid;
+    } menu_items[LEG_PROBE_MENU_ITEMS];
+    uint32_t menu_item_count;
 };
 
 /* Viewport offscreen target: COMPLETE type here, opaque forward in
@@ -275,6 +301,9 @@ void leg_probe_record_tool(leg_ui *ui, const char *id);
 void leg_probe_record_viewport(leg_ui *ui);
 void leg_probe_record_asset(leg_ui *ui, const char *path);
 void leg_probe_record_hier(leg_ui *ui, const le_object *obj);
+void leg_probe_record_menu(leg_ui *ui, const char *label);
+void leg_probe_record_menu_item(leg_ui *ui, const char *menu,
+                                const char *item);
 
 /* Design-system color roles (docs/EDITOR_DESIGN_SYSTEM.md). */
 struct leg_roles {

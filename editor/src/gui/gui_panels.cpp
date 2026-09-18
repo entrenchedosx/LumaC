@@ -117,8 +117,81 @@ static int leg_run(leg_context *ctx, const led_command *cmd,
 /* Menu bar (File/Edit/View/Project).                                 */
 /* ------------------------------------------------------------------ */
 
+/* Probe a main-menu bar label WITHOUT opening it: an invisible
+ * button with the same label id sits on the bar at zero size? NO —
+ * zero-size items have no hover/click. Real solution: record the bar
+ * label rect via a same-line dummy probe — the menu bar supports
+ * arbitrary widgets between menus (MenuItem-in-bar mimics BeginMenu
+ * spacing, see imgui_widgets.cpp:9685). We record geometry with a
+ * disabled, zero-padding MenuItem carrying a UNIQUE probe id, and
+ * the harness clicks the REAL BeginMenu label... whose rect we do
+ * NOT know. Circular again.
+ *
+ * WORKING solution (used below): wrap each menu in a probe that
+ * captures the label rect from the PARENT bar's DC: after
+ * BeginMenu returns (open or not), the bar's last-item data is
+ * restored (see BeginMenuEx:9615-9617 — g.LastItemData =
+ * last_item_in_parent when open; when closed the Selectable IS the
+ * last item). So GetItemRectMin/Max immediately after the
+ * BeginMenu/EndMenu pair (or after a false return) yields the BAR
+ * LABEL rect in both cases. Recorder takes it there. */
+/* Phase 34A mutation arms (each breaks ONE headed proof while
+ * armed; the mutation matrix rebuilds with -DLUMA34A_MUT_<name>=1
+ * and asserts the matching proof FAILS, then restores). Arms are
+ * surgical no-ops when unset (zero production impact). */
+#if defined(LUMA34A_MUT_PLAY)
+#define LEG_MUT_PLAY 1
+#else
+#define LEG_MUT_PLAY 0
+#endif
+#if defined(LUMA34A_MUT_STOP)
+#define LEG_MUT_STOP 1
+#else
+#define LEG_MUT_STOP 0
+#endif
+#if defined(LUMA34A_MUT_UNDO)
+#define LEG_MUT_UNDO 1
+#else
+#define LEG_MUT_UNDO 0
+#endif
+#if defined(LUMA34A_MUT_SAVE)
+#define LEG_MUT_SAVE 1
+#else
+#define LEG_MUT_SAVE 0
+#endif
+#if defined(LUMA34A_MUT_PICK)
+#define LEG_MUT_PICK 1
+#else
+#define LEG_MUT_PICK 0
+#endif
+#if defined(LUMA34A_MUT_GIZMO)
+#define LEG_MUT_GIZMO 1
+#else
+#define LEG_MUT_GIZMO 0
+#endif
+#if defined(LUMA34A_MUT_INPUT)
+#define LEG_MUT_INPUT 1
+#else
+#define LEG_MUT_INPUT 0
+#endif
+#if defined(LUMA34A_MUT_DROP)
+#define LEG_MUT_DROP 1
+#else
+#define LEG_MUT_DROP 0
+#endif
+
 static void leg_menu_file(leg_context *ctx, leg_ui *ui) {
-    if (ImGui::BeginMenu("File")) {
+    extern void leg_probe_record_menu(leg_ui *u,
+                                      const char *label);
+    extern void leg_probe_record_menu_item(
+        leg_ui *u, const char *menu, const char *item);
+
+    int opened = ImGui::BeginMenu("File") ? 1 : 0;
+
+    /* Bar-label rect (valid open AND closed per BeginMenuEx's
+     * LastItemData restore). */
+    leg_probe_record_menu(ui, "File");
+    if (opened) {
         if (ImGui::MenuItem("New scene")) {
             if (led_scene_new(ctx->session) == LED_SUCCESS) {
                 leg_status(ctx, "New scene", 0);
@@ -126,15 +199,24 @@ static void leg_menu_file(leg_context *ctx, leg_ui *ui) {
                 leg_status(ctx, "New scene failed (playing?)", 1);
             }
         }
+        leg_probe_record_menu_item(ui, "File", "New scene");
         if (ImGui::MenuItem("Open scene...")) {
             ui->scene_path_stage[0] = '\0';
             ui->show_open_scene_popup = 1;
             ImGui::OpenPopup("Open scene");
         }
+        leg_probe_record_menu_item(ui, "File", "Open scene...");
         ImGui::Separator();
         if (ImGui::MenuItem("Save scene", "Ctrl+S",
                             false, !led_is_playing(ctx->session))) {
-            led_result rc = led_scene_save(ctx->session);
+            led_result rc;
+
+            if (LEG_MUT_SAVE) {
+                /* M-save: swallow the save (dirty never clears). */
+                rc = LED_ERROR_IO;
+            } else {
+                rc = led_scene_save(ctx->session);
+            }
 
             if (rc == LED_SUCCESS) {
                 leg_status(ctx, "Scene saved", 0);
@@ -143,6 +225,7 @@ static void leg_menu_file(leg_context *ctx, leg_ui *ui) {
                            1);
             }
         }
+        leg_probe_record_menu_item(ui, "File", "Save scene");
         if (ImGui::MenuItem("Save scene as...")) {
             const char *cur = led_scene_get_path(ctx->session);
 
@@ -157,6 +240,7 @@ static void leg_menu_file(leg_context *ctx, leg_ui *ui) {
             ui->show_save_as_popup = 1;
             ImGui::OpenPopup("Save scene as");
         }
+        leg_probe_record_menu_item(ui, "File", "Save scene as...");
         if (ImGui::MenuItem("Revert scene", NULL, false,
                             !led_is_playing(ctx->session))) {
             if (led_scene_revert(ctx->session) == LED_SUCCESS) {
@@ -165,6 +249,7 @@ static void leg_menu_file(leg_context *ctx, leg_ui *ui) {
                 leg_status(ctx, "Revert failed (no path?)", 1);
             }
         }
+        leg_probe_record_menu_item(ui, "File", "Revert scene");
         ImGui::EndMenu();
     }
     /* Scene-path popups (modal text fields; the session remembers
@@ -218,22 +303,98 @@ static void leg_menu_file(leg_context *ctx, leg_ui *ui) {
 }
 
 static void leg_menu_edit(leg_context *ctx, leg_ui *ui) {
-    (void)ui;
-    if (ImGui::BeginMenu("Edit")) {
-        if (ImGui::MenuItem("Undo", "Ctrl+Z")) {
-            led_undo(ctx->session);
+    extern void leg_probe_record_menu(leg_ui *u,
+                                      const char *label);
+    extern void leg_probe_record_menu_item(
+        leg_ui *u, const char *menu, const char *item);
+
+    int opened = 0;
+
+    /* Headless-focus assist RETIRED-HOLD (verified headed):
+     * the popup DID open on the press frame (items_now=1 on the
+     * press frame's own BeginMenu) — opening works. What fails is
+     * HOLDING it open: the opener's UP edge lands while the popup
+     * draws; a release outside any popup item closes it before
+     * the next settled frame samples the item probe. The menu
+     * needs the press HELD across frames — fix in the HARNESS
+     * (keep the opener held through the item probe + item
+     * release), not here. Assist kept as-is (opens on press). */
+    {
+        extern void leg_dbg_edit_assist_tap(int tapped,
+                                            int popup_was_open,
+                                            int down, int dur0,
+                                            int in_rect);
+
+        ImGuiIO &assist_io = ImGui::GetIO();
+        int was_open =
+            ImGui::IsPopupOpen("Edit", ImGuiPopupFlags_None) ? 1
+                                                             : 0;
+        int down = assist_io.MouseDown[0] ? 1 : 0;
+        int dur0 =
+            (assist_io.MouseDownDuration[0] == 0.0f) ? 1 : 0;
+        int in_rect = 0;
+        int tapped = 0;
+
+        if (!was_open && down && dur0) {
+            ImVec2 mp = ImGui::GetMousePos();
+            uint32_t k = 0;
+
+            for (k = 0; k < ui->menu_count; k++) {
+                if (strcmp(ui->menus[k].label, "Edit") == 0 &&
+                    ui->menus[k].valid) {
+                    if (mp.x >= ui->menus[k].x &&
+                        mp.x <
+                            ui->menus[k].x + ui->menus[k].w &&
+                        mp.y >= ui->menus[k].y &&
+                        mp.y <
+                            ui->menus[k].y + ui->menus[k].h) {
+                        in_rect = 1;
+                        /* String-form open at bar level (same ID
+                         * stack BeginMenuEx uses — no PushID
+                         * active here). */
+                        ImGui::OpenPopup("Edit");
+                        tapped = 1;
+                    }
+                    break;
+                }
+            }
         }
+        leg_dbg_edit_assist_tap(tapped, was_open, down, dur0,
+                                in_rect);
+    }
+    opened = ImGui::BeginMenu("Edit") ? 1 : 0;
+
+    /* Bar-label rect (LastItemData restore covers the open case;
+     * the closed case leaves the Selectable as last item — the
+     * label either way). Record unconditionally. */
+    leg_probe_record_menu(ui, "Edit");
+    {
+        extern void leg_dbg_edit_assist_items(const char *menu,
+                                              int opened_now);
+
+        leg_dbg_edit_assist_items("Edit", opened);
+    }
+    if (opened) {
+        if (ImGui::MenuItem("Undo", "Ctrl+Z")) {
+            if (!LEG_MUT_UNDO) {
+                led_undo(ctx->session);
+            }
+        }
+        leg_probe_record_menu_item(ui, "Edit", "Undo");
         if (ImGui::MenuItem("Redo", "Ctrl+Y")) {
             led_redo(ctx->session);
         }
+        leg_probe_record_menu_item(ui, "Edit", "Redo");
         if (ImGui::MenuItem("Duplicate", "Ctrl+D")) {
             led_dispatch_action(ctx->session, LED_ACTION_DUPLICATE,
                                 NULL);
         }
+        leg_probe_record_menu_item(ui, "Edit", "Duplicate");
         if (ImGui::MenuItem("Delete", "Del")) {
             led_dispatch_action(ctx->session, LED_ACTION_DELETE,
                                 NULL);
         }
+        leg_probe_record_menu_item(ui, "Edit", "Delete");
         ImGui::EndMenu();
     }
 }
@@ -357,7 +518,11 @@ static void leg_toolbar(leg_context *ctx, leg_ui *ui) {
 
     leg_theme_roles(&roles);
     /* Probe snapshot resets each frame (stale rects never
-     * survive; valid==0 until the widget draws). */
+     * survive; valid==0 until the widget draws). Menu-label rects
+     * persist across frames (menus draw every frame on the bar);
+     * item rects are per-open (see panels-frame reset before the
+     * menu bar — NOT here: this toolbar runs after the menus, and
+     * resetting here wiped the items the menu just recorded). */
     ui->tool_count = 0;
     ui->asset_count = 0;
     ui->hier_count = 0;
@@ -386,7 +551,10 @@ static void leg_toolbar(leg_context *ctx, leg_ui *ui) {
     if (leg_tool_button("##tb-play", LEG_ICON_PLAY,
                         playing ? "Playing" : "Play (F5)", 0,
                         tbs)) {
-        if (led_play_enter(ctx->session) == LED_SUCCESS) {
+        if (LEG_MUT_PLAY) {
+            /* M-play: swallow Play (never enters). */
+            leg_status(ctx, "Play failed", 1);
+        } else if (led_play_enter(ctx->session) == LED_SUCCESS) {
             leg_status(ctx, "Playing (edit locked)", 0);
         } else {
             leg_status(ctx, "Play failed", 1);
@@ -413,7 +581,10 @@ static void leg_toolbar(leg_context *ctx, leg_ui *ui) {
                         playing ? "Stop (Shift+F5)"
                                 : "Stop (not playing)",
                         0, tbs)) {
-        if (led_play_exit(ctx->session) == LED_SUCCESS) {
+        if (LEG_MUT_STOP) {
+            /* M-stop: swallow Stop (never exits). */
+            leg_status(ctx, "Stop failed", 1);
+        } else if (led_play_exit(ctx->session) == LED_SUCCESS) {
             leg_status(ctx, "Stopped (edit unchanged)", 0);
         } else {
             leg_status(ctx, "Stop failed", 1);
@@ -1804,9 +1975,44 @@ static void leg_panel_viewport(leg_context *ctx, leg_ui *ui) {
         if (avail.y < 150) {
             avail.y = 150;
         }
-        /* Resize policy: viewport struct follows the panel (the
-         * scene target rebuilds in gui_viewport_tex.cpp; zero-size
-         * never creates a target). */
+        /* Visible-surface clamp: the docked window's content region
+         * can extend past the window's visible rect (sibling tab
+         * stacks / fixed chrome occlude the overflow). The capture
+         * button, the scene Image, the viewport-struct dims, and
+         * every panel-local computation share the CLAMPED rect, so
+         * probe geometry, ray math, and hover agree 1:1 (headed
+         * proof: clicks outside the visible rect hovered a sibling
+         * — any=1, view=0 — and never reached the pick branch). */
+        {
+            ImVec2 win_pos = ImGui::GetWindowPos();
+            ImVec2 win_size = ImGui::GetWindowSize();
+            float max_x = win_pos.x + win_size.x;
+            float max_y = win_pos.y + win_size.y;
+
+            if (origin.x < win_pos.x) {
+                avail.x -= win_pos.x - origin.x;
+                origin.x = win_pos.x;
+            }
+            if (origin.y < win_pos.y) {
+                avail.y -= win_pos.y - origin.y;
+                origin.y = win_pos.y;
+            }
+            if (origin.x + avail.x > max_x) {
+                avail.x = max_x - origin.x;
+            }
+            if (origin.y + avail.y > max_y) {
+                avail.y = max_y - origin.y;
+            }
+            if (avail.x < 0) {
+                avail.x = 0;
+            }
+            if (avail.y < 0) {
+                avail.y = 0;
+            }
+        }
+        /* Resize policy: viewport struct follows the VISIBLE panel
+         * (the scene target rebuilds in gui_viewport_tex.cpp;
+         * zero-size never creates a target). */
         if (g_vp_host.viewport != NULL) {
             g_vp_host.viewport->width = (uint32_t)avail.x;
             g_vp_host.viewport->height = (uint32_t)avail.y;
@@ -1829,6 +2035,12 @@ static void leg_panel_viewport(leg_context *ctx, leg_ui *ui) {
                     ctx->viewport_target->set;
 
             ImGui::Image(scene_tex, avail);
+            /* Overlay the capture surface ON the image (rewind the
+             * cursor): one rect shows the scene AND takes clicks.
+             * (Stacking Image+Button doubled the content height and
+             * pushed the button under sibling panels — clicks on the
+             * visible image never hovered the button.) */
+            ImGui::SetCursorScreenPos(origin);
         } else if (g_vp_host.viewport != NULL) {
             led_viewport *vp = g_vp_host.viewport;
 
@@ -1836,11 +2048,38 @@ static void leg_panel_viewport(leg_context *ctx, leg_ui *ui) {
                 "camera yaw %.2f pitch %.2f dist %.2f (%ux%u)",
                 vp->yaw_rad, vp->pitch_rad, vp->distance,
                 vp->width, vp->height);
+            /* Same overlay discipline pre-composite (the readout
+             * line is short; the button still starts at the panel
+             * origin so geometry is stable across first-composite).
+             * NOTE: the text line advances the cursor by one line;
+             * rewind to the panel origin for identical geometry. */
+            ImGui::SetCursorScreenPos(origin);
         } else {
             ImGui::TextDisabled("(no viewport bound)");
         }
+        /* Probe the IMAGE rect (what the user SEES) when it drew,
+         * else the capture button below. The Image() is the last
+         * item when composited; the InvisibleButton always draws
+         * after it (capture surface). Record the capture rect —
+         * clicks land on it — but ALSO stash the image origin:
+         * the image and the button share origin+size by
+         * construction (Image(avail) then Button(avail)), so one
+         * rect serves both. */
         ImGui::InvisibleButton("##vp-capture", avail);
         leg_probe_record_viewport(ui);
+        /* Panel-local math uses the button rect the probe just
+         * recorded (the overlay/gizmo/pick space): the button
+         * overlays the scene image 1:1 (cursor rewound before
+         * submit), so probe geometry, ray math, and hover agree. */
+        {
+            ImVec2 cap_min = ImGui::GetItemRectMin();
+            ImVec2 cap_max = ImGui::GetItemRectMax();
+
+            origin.x = cap_min.x;
+            origin.y = cap_min.y;
+            avail.x = cap_max.x - cap_min.x;
+            avail.y = cap_max.y - cap_min.y;
+        }
         {
             int hovered = ImGui::IsItemHovered() ? 1 : 0;
 
@@ -1882,7 +2121,51 @@ static void leg_panel_viewport(leg_context *ctx, leg_ui *ui) {
                     leg_gizmo_overlay(ctx, ui, &origin, &avail);
 
                 /* Click-to-select (left click without drag, not on
-                 * a gizmo handle): physics-raycast pick via core. */
+                 * a gizmo handle): physics-raycast pick via core.
+                 * Phase 34A headed diagnostics (observe-only): stash
+                 * the branch inputs so the harness can tell an edge
+                 * that never arrived from a branch that saw it and
+                 * declined/picked-empty. */
+                {
+                    int clicked_now =
+                        ImGui::IsMouseClicked(0) ? 1 : 0;
+                    ImVec2 dm = ImGui::GetMousePos();
+                    extern void leg_dbg_pick_tap(
+                        int hovered, int clicked, int captured,
+                        int wants_kb, float mx, float my,
+                        float px, float py, int picked,
+                        int sel_count);
+                    extern void leg_dbg_pick_origin(float ox,
+                                                    float oy,
+                                                    float ww,
+                                                    float hh);
+
+                    leg_dbg_pick_origin(origin.x, origin.y,
+                                        avail.x, avail.y);
+                    {
+                        /* In-frame hover census (legal: frame open,
+                         * Viewport window current): record whether
+                         * THIS window owns the mouse. */
+                        extern void leg_dbg_hover_mark(int view,
+                                                       int any);
+
+                        leg_dbg_hover_mark(
+                            ImGui::IsWindowHovered(
+                                ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)
+                                ? 1
+                                : 0,
+                            ImGui::IsWindowHovered(
+                                ImGuiHoveredFlags_AnyWindow)
+                                ? 1
+                                : 0);
+                    }
+                    leg_dbg_pick_tap(
+                        hovered,
+                        clicked_now, captured,
+                        leg_wants_keyboard(ctx) ? 1 : 0,
+                        dm.x, dm.y, dm.x - origin.x,
+                        dm.y - origin.y, 0, -1);
+                }
                 if (!captured && hovered &&
                     ImGui::IsMouseClicked(0) &&
                     !leg_wants_keyboard(ctx)) {
@@ -1890,19 +2173,53 @@ static void leg_panel_viewport(leg_context *ctx, leg_ui *ui) {
                     float px = m.x - origin.x;
                     float py = m.y - origin.y;
 
-                    if (g_vp_host.viewport != NULL) {
-                        led_viewport_pick_select(
+                    if (LEG_MUT_PICK) {
+                        /* M-pick: swallow the pick (selection
+                         * never changes). */
+                    } else if (g_vp_host.viewport != NULL) {
+                        int picked = led_viewport_pick_select(
                             ctx->session, g_vp_host.viewport, px,
                             py);
+                        extern void leg_dbg_pick_tap(
+                            int hovered, int clicked,
+                            int captured, int wants_kb, float mx,
+                            float my, float px, float py,
+                            int picked, int sel_count);
+
+                        leg_dbg_pick_tap(
+                            hovered, 1, captured,
+                            leg_wants_keyboard(ctx) ? 1 : 0, m.x,
+                            m.y, px, py, picked,
+                            (int)led_selection_get(ctx->session,
+                                                   NULL, 0));
                     }
                 }
             }
             /* Drops: asset payloads + hierarchy reparent payloads. */
+            {
+                extern void leg_dbg_drop_mark(int open);
+
+                leg_dbg_drop_mark(0);
+            }
             if (ImGui::BeginDragDropTarget()) {
+                /* Drop census (observe-only): the target opened
+                 * this frame (pointer over the capture rect with
+                 * a drag in flight). The headed H-drop leg
+                 * samples delivery while held. */
+                {
+                    extern void leg_dbg_drop_mark(int open);
+
+                    leg_dbg_drop_mark(1);
+                }
                 const ImGuiPayload *pl =
                     ImGui::AcceptDragDropPayload("LUMA_ASSET");
 
-                if (pl != NULL &&
+                if (LEG_MUT_DROP) {
+                    /* M-drop: swallow every asset drop (the H-drop
+                     * headed leg below + the led_drop headless
+                     * contract both fail while armed). */
+                    (void)pl;
+                } else if (pl != NULL &&
                     pl->DataSize == sizeof(led_drag_payload)) {
                     const led_drag_payload *dp =
                         (const led_drag_payload *)pl->Data;
@@ -1916,6 +2233,45 @@ static void leg_panel_viewport(leg_context *ctx, leg_ui *ui) {
                             leg_status(ctx, "Model dropped", 0);
                         } else {
                             leg_status(ctx, "Model drop failed", 1);
+                        }
+                    } else if (dp->type ==
+                               LED_PROJECT_ASSET_SCRIPT) {
+                        /* Script drops land ON objects: pick the
+                         * drop point and attach.
+                         * DELIVERY TAP (observe-only): record the
+                         * payload type + pick result so the
+                         * headed H-drop leg can tell "payload
+                         * refused" from "pick missed" from
+                         * "core refused". */
+                        extern void leg_dbg_drop_tap(
+                            int got_payload, int picked,
+                            int attached);
+
+                        ImVec2 m = ImGui::GetMousePos();
+                        float px = m.x - origin.x;
+                        float py = m.y - origin.y;
+                        le_ray_hit hit;
+
+                        memset(&hit, 0, sizeof(hit));
+                        if (g_vp_host.viewport != NULL &&
+                            led_viewport_pick(
+                                ctx->session,
+                                g_vp_host.viewport, px, py, 0,
+                                0xFFFFFFFFu, &hit)) {
+                            if (led_drop_script_onto_object(
+                                    ctx->session, dp,
+                                    &hit.object)) {
+                                leg_status(ctx, "Assigned", 0);
+                                leg_dbg_drop_tap(1, 1, 1);
+                            } else {
+                                leg_status(ctx,
+                                           "Assign failed", 1);
+                                leg_dbg_drop_tap(1, 1, 0);
+                            }
+                        } else {
+                            leg_status(ctx, "Drop hit nothing",
+                                       1);
+                            leg_dbg_drop_tap(1, 0, 0);
                         }
                     } else if (dp->type ==
                                LED_PROJECT_ASSET_PREFAB) {
@@ -1932,10 +2288,8 @@ static void leg_panel_viewport(leg_context *ctx, leg_ui *ui) {
                             leg_status(ctx, "Scene open failed", 1);
                         }
                     } else if (dp->type ==
-                                   LED_PROJECT_ASSET_MATERIAL ||
-                               dp->type ==
-                                   LED_PROJECT_ASSET_SCRIPT) {
-                        /* Material/script drops land ON objects:
+                                   LED_PROJECT_ASSET_MATERIAL) {
+                        /* Material drops land ON objects:
                          * pick the drop point and assign. */
                         ImVec2 m = ImGui::GetMousePos();
                         float px = m.x - origin.x;
@@ -1948,22 +2302,17 @@ static void leg_panel_viewport(leg_context *ctx, leg_ui *ui) {
                                 ctx->session,
                                 g_vp_host.viewport, px, py, 0,
                                 0xFFFFFFFFu, &hit)) {
-                            int ok = 0;
-
-                            if (dp->type ==
-                                LED_PROJECT_ASSET_MATERIAL) {
-                                ok = led_drop_material_onto_object(
-                                    ctx->session, dp, &hit.object);
+                            if (led_drop_material_onto_object(
+                                    ctx->session, dp,
+                                    &hit.object)) {
+                                leg_status(ctx, "Assigned", 0);
                             } else {
-                                ok = led_drop_script_onto_object(
-                                    ctx->session, dp, &hit.object);
+                                leg_status(ctx,
+                                           "Assign failed", 1);
                             }
-                            leg_status(
-                                ctx,
-                                ok ? "Assigned" : "Assign failed",
-                                ok ? 0 : 1);
                         } else {
-                            leg_status(ctx, "Drop hit nothing", 1);
+                            leg_status(ctx, "Drop hit nothing",
+                                       1);
                         }
                     } else {
                         leg_status(ctx,
@@ -2056,6 +2405,16 @@ void leg_panels_frame(leg_context *ctx, led_viewport *vp, float dt) {
 
             if (ctrl_ok && shift_ok &&
                 ImGui::IsKeyPressed(binds[b].key, false)) {
+                /* M-undo/M-save (shortcut half): swallow the
+                 * dispatch so the Ctrl+Z / Ctrl+S legs fail. */
+                if (LEG_MUT_UNDO &&
+                    binds[b].action == LED_ACTION_UNDO) {
+                    continue;
+                }
+                if (LEG_MUT_SAVE &&
+                    binds[b].action == LED_ACTION_SAVE) {
+                    continue;
+                }
                 led_dispatch_action(ctx->session, binds[b].action,
                                     g_vp_host.viewport);
             }
@@ -2085,6 +2444,24 @@ void leg_panels_frame(leg_context *ctx, led_viewport *vp, float dt) {
          * (it alone knows this frame's hover state); the overlay's
          * fly block skips the switch frame via gizmo_switched_key. */
     }
+    /* Probe snapshot resets each frame (stale rects never
+     * survive; valid==0 until the widget draws). Menu-label rects
+     * persist across frames (menus draw every frame on the bar);
+     * item rects are per-open (BeginMenu false => items never
+     * submit => keep last-open geometry? NO — stale item rects
+     * would aim clicks at a closed menu. Reset items each frame;
+     * keep labels (the bar always draws).
+     * ORDER BUG (found headed): this reset ran in leg_toolbar —
+     * AFTER the menu bar submitted. The menu-item recorders fired
+     * during leg_menu_edit, then leg_toolbar zeroed
+     * menu_item_count — every post-frame item read saw 0 though
+     * items_now=1. Reset here (BEFORE the bar), not in the
+     * toolbar. */
+    ui->tool_count = 0;
+    ui->asset_count = 0;
+    ui->hier_count = 0;
+    ui->menu_item_count = 0;
+    ui->vp_valid = 0;
     if (ImGui::BeginMainMenuBar()) {
         leg_menu_file(ctx, ui);
         leg_menu_edit(ctx, ui);

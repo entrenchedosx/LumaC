@@ -254,6 +254,15 @@ static void led_identity_key_for(const led_db_record *r,
         hi = r->id.hi;
         lo = r->id.lo;
     }
+#if defined(LUMA34A_MUT_IDENTITY)
+    /* M-identity: poison the UUID half. Production derivation is
+     * le_identity_for_key((hi,lo) || sub-key); the poison yields
+     * wrong-but-deterministic IDs, so "engine ID stable across
+     * relocation + reimport" FAILS while armed (the matrix
+     * proof). */
+    hi ^= 0x9E3779B97F4A7C15ull;
+    lo ^= 0xBF58476D1CE4E5B9ull;
+#endif
     for (k = 0; k < 8; k++) {
         out[k] = (unsigned char)((hi >> (56u - 8u * k)) & 0xFFu);
         out[8 + k] =
@@ -525,6 +534,7 @@ static led_result led_import_script(led_session *s, led_db_record *r,
         unsigned char idkey[16];
 
         memset(&desc, 0, sizeof(desc));
+        memset(idkey, 0, sizeof(idkey));
         led_identity_key_for(r, idkey);
         desc.source = (const char *)bytes;
         desc.size = size;

@@ -85,6 +85,17 @@ led_result leg_frame_begin(leg_context *context, lc_window *window,
              * fixed in Phase 33V). */
             if (ev.type == LC_EVENT_FOCUS_LOST) {
                 io.ClearInputKeys();
+                /* Phase 34A: also release the play-bridge's
+                 * edge-latch (gui_probe.cpp static `sent[]`):
+                 * ClearInputKeys drops ImGui held state, but the
+                 * bridge only emits key-UP on a down->up EDGE it
+                 * observes — with ImGui state wiped it would never
+                 * see the release and the engine would hold the
+                 * key forever. Signal the wipe explicitly. */
+                extern void leg_consume_play_input_reset(
+                    void);
+
+                leg_consume_play_input_reset();
             }
             leg_map_one_for_frame(io, &ev);
         }

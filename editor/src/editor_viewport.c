@@ -126,6 +126,10 @@ static void led_viewport_eye(const led_viewport *v, float eye[3]) {
     float cy = cosf(v->yaw_rad);
     float sy = sinf(v->yaw_rad);
 
+    /* Orbit convention (matches the gizmo overlay's drag-plane
+     * basis and the Phase 33V verified headed framing): yaw 0
+     * parks the eye on +Z looking at the target; positive pitch
+     * raises the eye above the target plane. */
     eye[0] = v->target[0] + v->distance * cp * sy;
     eye[1] = v->target[1] + v->distance * sp;
     eye[2] = v->target[2] + v->distance * cp * cy;
@@ -252,6 +256,11 @@ int led_viewport_ray(const led_viewport *viewport, float pixel_x,
         return 0;
     }
     if (pixel_x != pixel_x || pixel_y != pixel_y) {
+        return 0;
+    }
+    if (pixel_x < 0.0f || pixel_y < 0.0f ||
+        pixel_x > (float)viewport->width ||
+        pixel_y > (float)viewport->height) {
         return 0;
     }
     if (!led_viewport_camera(viewport, &cam)) {

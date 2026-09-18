@@ -1297,9 +1297,11 @@ LED_API int leg_probe_viewport_rect(const leg_context *context,
 
 /** Projected gizmo handle position (screen px, same math the
  *  overlay draws: selection AABB center + axis * handle_len
- *  through the host viewport). mode/axis mirror led_gizmo_*.
- *  Returns 1 + fill on success, 0 when no handle exists (no
- *  selection, bad mode/axis, NULL). */
+ *  through the host viewport). mode/axis mirror led_gizmo_*;
+ *  axis 3 = center/free cube (all modes share the anchor).
+ *  Rotate rings project differently (axis 0..2 rejected, center
+ *  only). Returns 1 + fill on success, 0 when no handle exists
+ *  (no selection, bad mode/axis, NULL). */
 LED_API int leg_probe_gizmo_handle(const leg_context *context,
                                    int mode, int axis,
                                    float out_px[2]);
@@ -1316,6 +1318,94 @@ LED_API int leg_probe_asset_row(const leg_context *context,
 LED_API int leg_probe_hierarchy_row(const leg_context *context,
                                     const le_object *object,
                                     leg_rect *out_rect);
+
+/** Last-frame rect of a main-menu label ("File", "Edit", ... on
+ *  the menu bar). 1 + fill (valid==1 when the bar drew), 0 for
+ *  NULL/unknown. */
+LED_API int leg_probe_menu_rect(const leg_context *context,
+                                const char *menu_label,
+                                leg_rect *out_rect);
+
+/** Last-frame rect of an item row inside an OPEN menu ("Undo" in
+ *  "Edit", ...). 1 + fill (valid==1 when the menu drew open with
+ *  the item visible), 0 for NULL/absent/closed. */
+LED_API int leg_probe_menu_item_rect(const leg_context *context,
+                                     const char *menu_label,
+                                     const char *item_label,
+                                     leg_rect *out_rect);
+
+/** Menu-open diagnostic (observe-only): 1 when the named menu
+ *  submitted items on the last panels frame (BeginMenu saw the
+ *  open popup), 0 otherwise. Tells "click never opened" apart
+ *  from "probe missed". */
+LED_API int leg_dbg_menu_open(const leg_context *context,
+                              const char *menu_label);
+
+/** Edit-assist tap (observe-only): out_flags[6] = {tapped,
+ *  popup_was_open, down, dur0, in_rect, items_now} from the last
+ *  assist evaluation + post-submit survival mark. 1 when
+ *  recorded, 0 otherwise. */
+LED_API int leg_dbg_edit_assist(const leg_context *context,
+                                int *out_flags);
+
+/** Menu item snapshot count (observe-only): raw
+ *  ui->menu_item_count at call time. Tells "no items submitted"
+ *  apart from "probe missed". -1 for NULL. */
+LED_API int leg_dbg_edit_item_count(const leg_context *context);
+
+/** Drag-drop census (observe-only): 1 while an ImGui drag-drop
+ *  operation is active, 0 otherwise. */
+LED_API int leg_dbg_drag_active(const leg_context *context);
+
+/** Drag-drop payload census (observe-only): 1 when the
+ *  in-flight payload is a well-sized LUMA_ASSET payload, 0
+ *  otherwise. */
+LED_API int leg_dbg_drop_payload(const leg_context *context);
+
+/** Viewport drop-target census (observe-only): 1 when the mouse
+ *  is over the viewport capture rect while a drag is in flight.
+ *  out_mxy[2] carries the sampled mouse pos (may be NULL). */
+LED_API int leg_dbg_drop_target(const leg_context *context,
+                                float *out_mxy);
+
+/** Viewport drop-target delivery mark (observe-only): 1 when the
+ *  viewport's BeginDragDropTarget branch RAN on the last panels
+ *  frame (pointer over capture with drag in flight), 0
+ *  otherwise. Sample WHILE held (the mark is per-frame). */
+LED_API int leg_dbg_drop_mark_read(const leg_context *context);
+
+/** Drop-delivery tap (observe-only): out_flags[3] =
+ *  {got_payload, picked, attached} from the last script-drop
+ *  delivery. 1 when recorded, 0 otherwise. */
+LED_API int leg_dbg_drop_tap_read(const leg_context *context,
+                                  int *out_flags);
+
+/** Frame-edge diagnostics (Phase 34A headed harness): raw ImGui
+ *  mouse state for a button index (0 left, 1 right, 2 middle):
+ *  down = held NOW (last panels frame), clicked = down-edge that
+ *  frame. Pure observation (NULL-safe, 0 for NULL/bad index) so the
+ *  harness can prove injected edges ARRIVED before blaming widget
+ *  logic. */
+LED_API int leg_dbg_mouse_down(const leg_context *context, int button);
+LED_API int leg_dbg_mouse_clicked(const leg_context *context,
+                                  int button);
+/** Last click-to-select branch tap (observe-only): fills out_mxy[2]
+ *  (screen mouse), out_pxy[2] (panel-local pick point), out_flags[6]
+ *  = {hovered, clicked, captured, wants_kb, picked, sel_count}.
+ *  1 when a tap was recorded since process start, 0 otherwise. */
+LED_API int leg_dbg_pick_state(const leg_context *context,
+                               float *out_mxy, float *out_pxy,
+                               int *out_flags);
+/** Capture origin+size used by the last pick tap (observe-only):
+ *  out_owh[4] = {ox, oy, ww, hh}. 1 when recorded, 0 otherwise. */
+LED_API int leg_dbg_pick_origin(const leg_context *context,
+                                float *out_owh);
+/** Hovered-window name at the last panels frame (observe-only):
+ *  which ImGui window owns the mouse (finds occluders). 1 + name
+ *  on success, 0 when none/NULL. */
+LED_API int leg_dbg_hover_window(const leg_context *context,
+                                 char *out_name,
+                                 unsigned out_cap);
 
 /** Clamp a GUI clip rect (draw-command clip rect, DisplayPos-relative
  *  float px) into an lc_scissor_rect for the pass extent (pure math,
@@ -1360,6 +1450,20 @@ LED_API struct leg_viewport_target *leg_viewport_target_for(
 LED_API unsigned long long leg_viewport_composite(
     leg_context *context, struct leg_viewport_target *vt,
     lc_command_encoder *enc, unsigned w, unsigned h);
+
+/** Viewport composite census (observe-only, for the headed
+ *  composite proof): samples the panel-sized target image AFTER a
+ *  leg_viewport_composite on the same frame (the target is lazily
+ *  created by the composite — call composite first). Fills
+ *  out[4] = {non_clear_pixels, width, height, target_valid} where
+ *  non_clear counts RGBA8 pixels differing from the composite
+ *  clear color (10,13,23,255) by more than 3 LSBs on any channel.
+ *  Returns 1 + fill on success, 0 for NULL/bad context/target or
+ *  readback failure. CPU readback (test/verification only — never
+ *  in the frame loop). */
+LED_API int leg_viewport_composite_census(
+    leg_context *context, struct leg_viewport_target *vt,
+    uint64_t out[4]);
 
 /** Draw-walk budget probe (pure math, headless-testable): estimates
  *  vertex/index buffer bytes for `vertex_count` draw verts (pos+uv+

@@ -141,36 +141,73 @@ static int leg_map_one(ImGuiIO &io, const lc_window_event *event) {
         ImGuiKey mapped = leg_map_key(event->key);
         int down = (event->type == LC_EVENT_KEY_DOWN) ? 1 : 0;
 
-        /* Modifier keys ALSO update the mod snapshot ImGui reads for
-         * shortcuts (Ctrl+Z etc.): mirror lc_key_mod -> io mods.
-         * Phase 33 forced the RIGHT side false on every modifier
-         * event, so right-side modifiers could never register
-         * (fixed in 33V: the event's own side follows mods, the
-         * other side is left untouched — physical truth for the
-         * pressed key, no guessing about the other). */
+        /* Modifier keys ALSO submit their ImGuiMod_XXX alias:
+         * io.KeyCtrl/io.KeyMods derive ONLY from the alias slot
+         * (GetMergedModsFromKeys reads GetKeyData(ImGuiMod_Ctrl)
+         * etc.), NOT from Left/RightCtrl state. The 1.87 changelog
+         * mandates AddKeyEvent(ImGuiMod_XXX) for modifiers — real
+         * key state alone leaves io.KeyCtrl false, which breaks
+         * real-product Ctrl+Z/Y/S shortcuts (found by the 34A
+         * headed harness: Z-edge arrived, ctrl_ok never true).
+         * Emit the side-key state for animation/ownership AND the
+         * alias from the event's own mods snapshot (the OS path
+         * fills mods on every event; synthetic/injected events
+         * carry the harness's own mods bits). */
         if (event->key == LC_KEY_LEFT_SHIFT) {
             io.AddKeyEvent(ImGuiKey_LeftShift,
+                           (event->mods & LC_MOD_SHIFT) != 0);
+            io.AddKeyEvent(ImGuiMod_Shift,
                            (event->mods & LC_MOD_SHIFT) != 0);
         } else if (event->key == LC_KEY_RIGHT_SHIFT) {
             io.AddKeyEvent(ImGuiKey_RightShift,
                            (event->mods & LC_MOD_SHIFT) != 0);
+            io.AddKeyEvent(ImGuiMod_Shift,
+                           (event->mods & LC_MOD_SHIFT) != 0);
         } else if (event->key == LC_KEY_LEFT_CONTROL) {
             io.AddKeyEvent(ImGuiKey_LeftCtrl,
+                           (event->mods & LC_MOD_CONTROL) != 0);
+            io.AddKeyEvent(ImGuiMod_Ctrl,
                            (event->mods & LC_MOD_CONTROL) != 0);
         } else if (event->key == LC_KEY_RIGHT_CONTROL) {
             io.AddKeyEvent(ImGuiKey_RightCtrl,
                            (event->mods & LC_MOD_CONTROL) != 0);
+            io.AddKeyEvent(ImGuiMod_Ctrl,
+                           (event->mods & LC_MOD_CONTROL) != 0);
         } else if (event->key == LC_KEY_LEFT_ALT) {
             io.AddKeyEvent(ImGuiKey_LeftAlt,
+                           (event->mods & LC_MOD_ALT) != 0);
+            io.AddKeyEvent(ImGuiMod_Alt,
                            (event->mods & LC_MOD_ALT) != 0);
         } else if (event->key == LC_KEY_RIGHT_ALT) {
             io.AddKeyEvent(ImGuiKey_RightAlt,
                            (event->mods & LC_MOD_ALT) != 0);
+            io.AddKeyEvent(ImGuiMod_Alt,
+                           (event->mods & LC_MOD_ALT) != 0);
         } else if (event->key == LC_KEY_LEFT_SUPER) {
             io.AddKeyEvent(ImGuiKey_LeftSuper,
                            (event->mods & LC_MOD_SUPER) != 0);
+            io.AddKeyEvent(ImGuiMod_Super,
+                           (event->mods & LC_MOD_SUPER) != 0);
         } else if (event->key == LC_KEY_RIGHT_SUPER) {
             io.AddKeyEvent(ImGuiKey_RightSuper,
+                           (event->mods & LC_MOD_SUPER) != 0);
+            io.AddKeyEvent(ImGuiMod_Super,
+                           (event->mods & LC_MOD_SUPER) != 0);
+        } else {
+            /* Non-modifier key: mirror the carried snapshot into
+             * the alias slots so a chord split across events
+             * (Ctrl down [frame N] ... Z down with Ctrl bit [frame
+             * N+1]) keeps KeyCtrl true even when the ONLY witness
+             * is the Z event's mods — the Win32/X11 OS path fills
+             * mods on EVERY key event, so this is production
+             * truth, not harness-only. */
+            io.AddKeyEvent(ImGuiMod_Shift,
+                           (event->mods & LC_MOD_SHIFT) != 0);
+            io.AddKeyEvent(ImGuiMod_Ctrl,
+                           (event->mods & LC_MOD_CONTROL) != 0);
+            io.AddKeyEvent(ImGuiMod_Alt,
+                           (event->mods & LC_MOD_ALT) != 0);
+            io.AddKeyEvent(ImGuiMod_Super,
                            (event->mods & LC_MOD_SUPER) != 0);
         }
         if (mapped == ImGuiKey_None) {
