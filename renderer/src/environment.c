@@ -38,6 +38,12 @@ extern const unsigned char lr_sky_vert_spv[];
 extern const unsigned long lr_sky_vert_spv_size;
 extern const unsigned char lr_sky_frag_spv[];
 extern const unsigned long lr_sky_frag_spv_size;
+extern const unsigned char lr_editor_sky_vert_spv[];
+extern const unsigned long lr_editor_sky_vert_spv_size;
+extern const unsigned char lr_editor_sky_frag_spv[];
+extern const unsigned long lr_editor_sky_frag_spv_size;
+extern const unsigned char lr_editor_grid_frag_spv[];
+extern const unsigned long lr_editor_grid_frag_spv_size;
 extern const unsigned char lr_tonemap_frag_spv[];
 extern const unsigned long lr_tonemap_frag_spv_size;
 
@@ -1178,8 +1184,251 @@ lr_result lr_renderer_record_sky(lr_renderer *renderer,
     return LR_SUCCESS;
 }
 
-/* Tonemap mini-cache lookup (per output signature; bounded). */
-static lr_result lr_env_tonemap_pipeline_for(
+/* ------------------------------------------------------------------
+ * Editor viewport environment (R-012): procedural sky + infinite
+ * grid. Backend-neutral (public LumaC only), lazy singletons, no
+ * textures, no lights, no IBL contribution. Both record into the
+ * caller's OPEN HDR scene pass; both no-op unless the editor bridge
+ * enabled them AND no authored environment is active (authored sky
+ * takes precedence — the editor never covers game content).
+ * ------------------------------------------------------------------ */
+
+/* Shared ray uniforms (invVP + camPos) for both editor passes. */
+static void lr_editor_ray_uniforms(lr_renderer *renderer, float inv[16],
+                                   float cam[4]) {
+    float vp[16];
+
+    lr_mat4_multiply(vp, renderer->camera.projection,
+                     renderer->camera.view);
+    if (!lr_mat4_inverse(vp, inv)) {
+        memset(inv, 0, 16 * sizeof(float));
+        inv[0] = inv[5] = inv[10] = inv[15] = 1.0f;
+    }
+    cam[0] = renderer->camera.position[0];
+    cam[1] = renderer->camera.position[1];
+    cam[2] = renderer->camera.position[2];
+    cam[3] = 1.0f;
+}
+
+/* Ensure one editor pipeline (sky: opaque, depth off; grid: blended,
+ * depth test on + writes off). Signature is the live HDR pass
+ * (R16F + D32); no binding layouts (push-only fullscreen triangle). */
+static lr_result lr_editor_pipeline_for(lr_renderer *renderer,
+                                        int is_grid,
+                                        lc_pipeline **out) {
+    lc_push_constant_range push;
+    lc_graphics_pipeline_desc pd;
+    lc_render_target_desc sig;
+    lc_blend_attachment blend;
+
+    if (!is_grid && renderer->editor_sky_pipeline != NULL) {
+        *out = renderer->editor_sky_pipeline;
+        return LR_SUCCESS;
+    }
+    if (is_grid && renderer->editor_grid_pipeline != NULL) {
+        *out = renderer->editor_grid_pipeline;
+        return LR_SUCCESS;
+    }
+    if (!is_grid &&
+        renderer->editor_sky_vertex_shader == NULL &&
+        lr_env_make_shader(renderer, 1, lr_editor_sky_vert_spv,
+                           lr_editor_sky_vert_spv_size,
+                           &renderer->editor_sky_vertex_shader) !=
+            LR_SUCCESS) {
+        return LR_ERROR_RENDER;
+    }
+    if (!is_grid &&
+        renderer->editor_sky_fragment_shader == NULL &&
+        lr_env_make_shader(renderer, 0, lr_editor_sky_frag_spv,
+                           lr_editor_sky_frag_spv_size,
+                           &renderer->editor_sky_fragment_shader) !=
+            LR_SUCCESS) {
+        return LR_ERROR_RENDER;
+    }
+    if (is_grid &&
+        renderer->editor_grid_fragment_shader == NULL &&
+        lr_env_make_shader(renderer, 0, lr_editor_grid_frag_spv,
+                           lr_editor_grid_frag_spv_size,
+                           &renderer->editor_grid_fragment_shader) !=
+            LR_SUCCESS) {
+        return LR_ERROR_RENDER;
+    }
+    /* The grid shares the sky vertex shader (identical ray math +
+     * push prefix); make sure it exists for the grid path too. */
+    if (is_grid &&
+        renderer->editor_sky_vertex_shader == NULL &&
+        lr_env_make_shader(renderer, 1, lr_editor_sky_vert_spv,
+                           lr_editor_sky_vert_spv_size,
+                           &renderer->editor_sky_vertex_shader) !=
+            LR_SUCCESS) {
+        return LR_ERROR_RENDER;
+    }
+    memset(&pd, 0, sizeof(pd));
+    pd.vertex_shader = renderer->editor_sky_vertex_shader;
+    pd.fragment_shader = is_grid
+                             ? renderer->editor_grid_fragment_shader
+                             : renderer->editor_sky_fragment_shader;
+    pd.vertex_bindings = NULL;
+    pd.vertex_binding_count = 0;
+    pd.vertex_attributes = NULL;
+    pd.vertex_attribute_count = 0;
+    pd.binding_layouts = NULL;
+    pd.binding_layout_count = 0;
+    pd.cull_mode = LC_CULL_NONE;
+    pd.front_face = LC_FRONT_FACE_COUNTER_CLOCKWISE;
+    if (is_grid) {
+        /* Depth-tested (LESS default) so authored geometry obscures
+         * the grid; writes off so the grid never corrupts depth;
+         * source-alpha blend for the distance fade. */
+        pd.depth_test_enable = 1;
+        pd.depth_write_enable = 0;
+        memset(&blend, 0, sizeof(blend));
+        blend.blend_enable = 1;
+        blend.src_color_factor = LC_BLEND_SRC_ALPHA;
+        blend.dst_color_factor = LC_BLEND_ONE_MINUS_SRC_ALPHA;
+        blend.color_op = LC_BLEND_OP_ADD;
+        blend.src_alpha_factor = LC_BLEND_ONE;
+        blend.dst_alpha_factor = LC_BLEND_ONE_MINUS_SRC_ALPHA;
+        blend.alpha_op = LC_BLEND_OP_ADD;
+        pd.blend = &blend;
+        pd.blend_attachment_count = 1;
+    } else {
+        pd.depth_test_enable = 0;
+        pd.depth_write_enable = 0;
+    }
+    push.visibility = (uint32_t)LC_SHADER_VISIBILITY_ALL_GRAPHICS;
+    push.offset = 0;
+    push.size = is_grid ? sizeof(lr_editor_grid_push)
+                        : sizeof(lr_editor_sky_push);
+    pd.push_constant_ranges = &push;
+    pd.push_constant_range_count = 1;
+    memset(&sig, 0, sizeof(sig));
+    sig.width = 4;
+    sig.height = 4;
+    sig.color_attachment_count = 1;
+    sig.color_formats[0] = LC_FORMAT_RGBA16_FLOAT;
+    sig.depth_stencil_format = LC_FORMAT_D32_FLOAT;
+    sig.samples = LC_SAMPLE_COUNT_1;
+    pd.render_target = sig;
+    if (lc_graphics_pipeline_create(
+            renderer->device, &pd,
+            is_grid ? &renderer->editor_grid_pipeline
+                    : &renderer->editor_sky_pipeline) != LC_SUCCESS) {
+        if (is_grid) {
+            renderer->editor_grid_pipeline = NULL;
+        } else {
+            renderer->editor_sky_pipeline = NULL;
+        }
+        return LR_ERROR_RENDER;
+    }
+    *out = is_grid ? renderer->editor_grid_pipeline
+                   : renderer->editor_sky_pipeline;
+    return LR_SUCCESS;
+}
+
+/* Draw the procedural editor sky first in the HDR pass (replaces the
+ * black clear where no authored environment is active). */
+lr_result lr_renderer_record_editor_sky(lr_renderer *renderer,
+                                        lc_command_encoder *enc) {
+    lc_pipeline *pipeline = NULL;
+    lr_editor_sky_push push;
+    lc_result cr;
+
+    if (renderer == NULL || enc == NULL) {
+        return LR_ERROR_INVALID_ARGUMENT;
+    }
+    if (!renderer->editor_env.enabled) {
+        return LR_SUCCESS;
+    }
+    if (renderer->active_env != NULL && renderer->active_env->ready) {
+        return LR_SUCCESS; /* authored sky takes precedence */
+    }
+    if (lr_editor_pipeline_for(renderer, 0, &pipeline) != LR_SUCCESS) {
+        return LR_ERROR_RENDER;
+    }
+    lr_editor_ray_uniforms(renderer, push.inv_view_proj, push.cam_pos);
+    push.zone_a[0] = LR_EDITOR_SKY_ZENITH_R;
+    push.zone_a[1] = LR_EDITOR_SKY_ZENITH_G;
+    push.zone_a[2] = LR_EDITOR_SKY_ZENITH_B;
+    push.zone_a[3] = 0.0f;
+    push.zone_b[0] = LR_EDITOR_SKY_HORIZON_R;
+    push.zone_b[1] = LR_EDITOR_SKY_HORIZON_G;
+    push.zone_b[2] = LR_EDITOR_SKY_HORIZON_B;
+    push.zone_b[3] = 0.0f;
+    push.zone_c[0] = LR_EDITOR_SKY_NADIR_R;
+    push.zone_c[1] = LR_EDITOR_SKY_NADIR_G;
+    push.zone_c[2] = LR_EDITOR_SKY_NADIR_B;
+    push.zone_c[3] = LR_EDITOR_SKY_SOFTNESS;
+    cr = lc_encoder_bind_pipeline(enc, pipeline);
+    if (cr == LC_SUCCESS) {
+        cr = lc_encoder_push_constants(
+            enc, pipeline,
+            (uint32_t)LC_SHADER_VISIBILITY_ALL_GRAPHICS, 0,
+            sizeof(push), &push);
+    }
+    if (cr == LC_SUCCESS) {
+        cr = lc_encoder_draw(enc, 3, 0);
+    }
+    if (cr != LC_SUCCESS) {
+        return lr_map_result(cr);
+    }
+    renderer->stats.sky_draw_calls++;
+    return LR_SUCCESS;
+}
+
+/* Draw the procedural infinite grid after scene geometry (depth
+ * test on, writes off, blended): authored floors obscure it. */
+lr_result lr_renderer_record_editor_grid(lr_renderer *renderer,
+                                         lc_command_encoder *enc) {
+    lc_pipeline *pipeline = NULL;
+    lr_editor_grid_push push;
+    lc_result cr;
+
+    if (renderer == NULL || enc == NULL) {
+        return LR_ERROR_INVALID_ARGUMENT;
+    }
+    if (!renderer->editor_env.enabled ||
+        !renderer->editor_env.grid_enabled) {
+        return LR_SUCCESS;
+    }
+    if (renderer->active_env != NULL && renderer->active_env->ready) {
+        return LR_SUCCESS; /* authored environment owns the frame */
+    }
+    if (lr_editor_pipeline_for(renderer, 1, &pipeline) != LR_SUCCESS) {
+        return LR_ERROR_RENDER;
+    }
+    lr_editor_ray_uniforms(renderer, push.inv_view_proj, push.cam_pos);
+    push.grid_a[0] = LR_EDITOR_GRID_MINOR_R;
+    push.grid_a[1] = LR_EDITOR_GRID_MINOR_G;
+    push.grid_a[2] = LR_EDITOR_GRID_MINOR_B;
+    push.grid_a[3] = LR_EDITOR_GRID_MINOR_A;
+    push.grid_b[0] = LR_EDITOR_GRID_MAJOR_R;
+    push.grid_b[1] = LR_EDITOR_GRID_MAJOR_G;
+    push.grid_b[2] = LR_EDITOR_GRID_MAJOR_B;
+    push.grid_b[3] = LR_EDITOR_GRID_MAJOR_A;
+    push.grid_c[0] = push.grid_c[1] = push.grid_c[2] = 0.0f;
+    push.grid_c[3] = LR_EDITOR_GRID_FADE_DIST;
+    push.grid_d[0] = LR_EDITOR_GRID_AXIS_STRENGTH;
+    push.grid_d[1] = LR_EDITOR_GRID_AXIS_FALLOFF;
+    push.grid_d[2] = push.grid_d[3] = 0.0f;
+    cr = lc_encoder_bind_pipeline(enc, pipeline);
+    if (cr == LC_SUCCESS) {
+        cr = lc_encoder_push_constants(
+            enc, pipeline,
+            (uint32_t)LC_SHADER_VISIBILITY_ALL_GRAPHICS, 0,
+            sizeof(push), &push);
+    }
+    if (cr == LC_SUCCESS) {
+        cr = lc_encoder_draw(enc, 3, 0);
+    }
+    if (cr != LC_SUCCESS) {
+        return lr_map_result(cr);
+    }
+    renderer->stats.sky_draw_calls++;
+    return LR_SUCCESS;
+}
+
+/* Tonemap mini-cache lookup (per output signature; bounded). */static lr_result lr_env_tonemap_pipeline_for(
     lr_renderer *renderer, const lc_render_target_desc *signature,
     lc_pipeline **out) {
     uint32_t i;
@@ -1604,6 +1853,10 @@ void lr_renderer_destroy_env_resources(lr_renderer *renderer) {
         renderer->tonemap_pipelines[i].pipeline = NULL;
     }
     renderer->tonemap_pipeline_count = 0;
+    lc_pipeline_destroy(renderer->editor_grid_pipeline);
+    renderer->editor_grid_pipeline = NULL;
+    lc_pipeline_destroy(renderer->editor_sky_pipeline);
+    renderer->editor_sky_pipeline = NULL;
     lc_pipeline_destroy(renderer->sky_pipeline);
     renderer->sky_pipeline = NULL;
     lc_pipeline_destroy(renderer->brdf_pipeline);
@@ -1616,6 +1869,12 @@ void lr_renderer_destroy_env_resources(lr_renderer *renderer) {
     renderer->eq2cube_pipeline = NULL;
     lc_shader_destroy(renderer->tonemap_fragment_shader);
     renderer->tonemap_fragment_shader = NULL;
+    lc_shader_destroy(renderer->editor_grid_fragment_shader);
+    renderer->editor_grid_fragment_shader = NULL;
+    lc_shader_destroy(renderer->editor_sky_fragment_shader);
+    renderer->editor_sky_fragment_shader = NULL;
+    lc_shader_destroy(renderer->editor_sky_vertex_shader);
+    renderer->editor_sky_vertex_shader = NULL;
     lc_shader_destroy(renderer->sky_fragment_shader);
     renderer->sky_fragment_shader = NULL;
     lc_shader_destroy(renderer->sky_vertex_shader);

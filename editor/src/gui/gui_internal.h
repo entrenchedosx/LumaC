@@ -47,6 +47,11 @@ struct leg_ui {
     int show_viewport;
     int show_toolbar;
     int show_status;
+    /* R-012 editor viewport environment prefs (tooling only; never
+     * scene data, never serialized with scenes; ImGui bool-bridge
+     * via locals at the View menu call site). Defaults ON/ON. */
+    int viewport_env;
+    int viewport_grid;
     int show_create_popup;
     int show_prefab_popup;
     char asset_search[256];
@@ -257,6 +262,11 @@ int leg_gizmo_overlay(leg_context *ctx, leg_ui *ui,
 void leg_viewport_camera_update(leg_context *ctx, leg_ui *ui,
                                 led_viewport *vp, int hovered,
                                 float dt);
+
+/* R-012 editor viewport environment prefs (gui_panels.cpp owner;
+ * read by the gui_viewport_tex.cpp composite bridge). */
+int leg_viewport_env_wanted(leg_context *ctx);
+int leg_viewport_grid_wanted(leg_context *ctx);
 
 /* Last record failure step (gui_draw.cpp owner; 0 = none/last-OK;
  * 1 gpu-ensure, 2 font-sync, 3 budget, 4 vtx buffer, 5 idx buffer,

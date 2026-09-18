@@ -46,6 +46,9 @@ file(COPY
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/brdf.frag.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky.vert.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky.frag.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/editor_sky.vert.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/editor_sky.frag.spv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/editor_grid.frag.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tonemap.frag.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/post_tint.frag.spv"
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr_instanced.vert.spv"
@@ -76,6 +79,9 @@ if(LR_GLSLC)
             "${LR_SPV_DIR}/brdf.frag.spv"
             "${LR_SPV_DIR}/sky.vert.spv"
             "${LR_SPV_DIR}/sky.frag.spv"
+            "${LR_SPV_DIR}/editor_sky.vert.spv"
+            "${LR_SPV_DIR}/editor_sky.frag.spv"
+            "${LR_SPV_DIR}/editor_grid.frag.spv"
             "${LR_SPV_DIR}/tonemap.frag.spv"
             "${LR_SPV_DIR}/post_tint.frag.spv"
             "${LR_SPV_DIR}/pbr_instanced.vert.spv"
@@ -130,6 +136,15 @@ if(LR_GLSLC)
         COMMAND "${LR_GLSLC}" -fshader-stage=frag -O
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky.frag"
             -o "${LR_SPV_DIR}/sky.frag.spv"
+        COMMAND "${LR_GLSLC}" -fshader-stage=vert -O
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/editor_sky.vert"
+            -o "${LR_SPV_DIR}/editor_sky.vert.spv"
+        COMMAND "${LR_GLSLC}" -fshader-stage=frag -O
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/editor_sky.frag"
+            -o "${LR_SPV_DIR}/editor_sky.frag.spv"
+        COMMAND "${LR_GLSLC}" -fshader-stage=frag -O
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/editor_grid.frag"
+            -o "${LR_SPV_DIR}/editor_grid.frag.spv"
         COMMAND "${LR_GLSLC}" -fshader-stage=frag -O
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tonemap.frag"
             -o "${LR_SPV_DIR}/tonemap.frag.spv"
@@ -173,6 +188,9 @@ if(LR_GLSLC)
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/brdf.frag"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky.vert"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky.frag"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/editor_sky.vert"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/editor_sky.frag"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/editor_grid.frag"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tonemap.frag"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/post_tint.frag"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr_instanced.vert"
@@ -200,6 +218,9 @@ if(LR_GLSLC)
         "${LR_SPV_DIR}/brdf.frag.spv"
         "${LR_SPV_DIR}/sky.vert.spv"
         "${LR_SPV_DIR}/sky.frag.spv"
+        "${LR_SPV_DIR}/editor_sky.vert.spv"
+        "${LR_SPV_DIR}/editor_sky.frag.spv"
+        "${LR_SPV_DIR}/editor_grid.frag.spv"
         "${LR_SPV_DIR}/tonemap.frag.spv"
         "${LR_SPV_DIR}/post_tint.frag.spv"
         "${LR_SPV_DIR}/pbr_instanced.vert.spv"
@@ -333,6 +354,30 @@ add_custom_command(
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hex_to_c.cmake"
     DEPENDS "${LR_SPV_DIR}/sky.frag.spv")
 add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/lr_editor_sky_vert_spv.c"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DIN=${LR_SPV_DIR}/editor_sky.vert.spv"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/lr_editor_sky_vert_spv.c"
+        "-DSYM=lr_editor_sky_vert_spv"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hex_to_c.cmake"
+    DEPENDS "${LR_SPV_DIR}/editor_sky.vert.spv")
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/lr_editor_sky_frag_spv.c"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DIN=${LR_SPV_DIR}/editor_sky.frag.spv"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/lr_editor_sky_frag_spv.c"
+        "-DSYM=lr_editor_sky_frag_spv"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hex_to_c.cmake"
+    DEPENDS "${LR_SPV_DIR}/editor_sky.frag.spv")
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/lr_editor_grid_frag_spv.c"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DIN=${LR_SPV_DIR}/editor_grid.frag.spv"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/lr_editor_grid_frag_spv.c"
+        "-DSYM=lr_editor_grid_frag_spv"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hex_to_c.cmake"
+    DEPENDS "${LR_SPV_DIR}/editor_grid.frag.spv")
+add_custom_command(
     OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/lr_tonemap_frag_spv.c"
     COMMAND "${CMAKE_COMMAND}"
         "-DIN=${LR_SPV_DIR}/tonemap.frag.spv"
@@ -434,6 +479,9 @@ add_library(luma_renderer STATIC
     "${CMAKE_CURRENT_BINARY_DIR}/lr_brdf_frag_spv.c"
     "${CMAKE_CURRENT_BINARY_DIR}/lr_sky_vert_spv.c"
     "${CMAKE_CURRENT_BINARY_DIR}/lr_sky_frag_spv.c"
+    "${CMAKE_CURRENT_BINARY_DIR}/lr_editor_sky_vert_spv.c"
+    "${CMAKE_CURRENT_BINARY_DIR}/lr_editor_sky_frag_spv.c"
+    "${CMAKE_CURRENT_BINARY_DIR}/lr_editor_grid_frag_spv.c"
     "${CMAKE_CURRENT_BINARY_DIR}/lr_tonemap_frag_spv.c"
     "${CMAKE_CURRENT_BINARY_DIR}/lr_post_tint_frag_spv.c"
     "${CMAKE_CURRENT_BINARY_DIR}/lr_pbr_instanced_vert_spv.c"

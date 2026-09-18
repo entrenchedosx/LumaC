@@ -352,10 +352,40 @@ ImTextureID leg_viewport_render(leg_context *ctx,
      * must read ~0 non-clear pixels while armed). */
     (void)world;
 #else
-    /* Play shows the RUNTIME world; edit shows the edit world. */
-    world = led_is_playing(ctx->session)
-                ? led_play_get_world(ctx->session)
-                : led_session_get_edit_world(ctx->session);
+    /* Play shows the RUNTIME world; edit shows the edit world.
+     * R-012 editor environment: enabled ONLY around the EDIT-world
+     * composite — never for the play world (game rendering keeps
+     * its own clear/sky), never serialized, never scene content.
+     * Toggles live on the GUI prefs (View menu); the renderer
+     * defaults are off, so headless probes are unaffected. */
+    {
+        int is_play = led_is_playing(ctx->session);
+        lr_renderer *ren = NULL;
+
+        world = is_play ? led_play_get_world(ctx->session)
+                        : led_session_get_edit_world(ctx->session);
+        if (ctx->session != NULL) {
+            le_engine *eng = led_session_get_engine(ctx->session);
+
+            if (eng != NULL) {
+                ren = le_engine_get_renderer(eng);
+            }
+            if (ren != NULL) {
+                if (is_play) {
+                    /* Belt-and-braces: the play world must never
+                     * inherit a stale editor environment (the
+                     * renderer is shared). */
+                    lr_renderer_set_editor_environment(ren, 0, 0);
+                } else {
+                    extern int leg_viewport_env_wanted(leg_context *c);
+                    extern int leg_viewport_grid_wanted(leg_context *c);
+                    lr_renderer_set_editor_environment(
+                        ren, leg_viewport_env_wanted(ctx),
+                        leg_viewport_grid_wanted(ctx));
+                }
+            }
+        }
+    }
     if (world == NULL) {
         return ImTextureID_Invalid;
     }
@@ -516,10 +546,10 @@ int leg_viewport_composite_census(leg_context *ctx,
         delete[] rgba;
         return 0;
     }
-    for (y = 0; y < vt->height; y++) {
-        for (x = 0; x < vt->width; x++) {
+    for (y = 0; y < vt->height && y < rbinfo.height; y++) {
+        for (x = 0; x < vt->width && x < rbinfo.width; x++) {
             size_t i =
-                ((size_t)y * vt->width + x) * 4u;
+                ((size_t)y * rbinfo.width + x) * 4u;
             int dr =
                 (int)rgba[i + 0] - 10;
             int dg =
@@ -546,6 +576,65 @@ int leg_viewport_composite_census(leg_context *ctx,
     out[1] = vt->width;
     out[2] = vt->height;
     out[3] = 1ull;
+    (void)ctx;
+    return 1;
+}
+
+/* R-012 sky-pixel probe (observe-only single-pixel readback for the
+ * headed environment legs; same readback discipline as the census
+ * above — call AFTER the composite + frame submit). Row stride is
+ * the readback's (tight) width, NOT the target width: readbacks of
+ * an image whose extent exceeds its render-target viewport still
+ * return the full-image layout. */
+int leg_viewport_sky_pixel(leg_context *ctx,
+                           struct leg_viewport_target *vt,
+                           unsigned x, unsigned y,
+                           unsigned char out_rgb[3]) {
+    lc_image_readback_desc rbdesc;
+    lc_image_readback_info rbinfo;
+    unsigned char *rgba = NULL;
+
+    if (out_rgb != NULL) {
+        out_rgb[0] = out_rgb[1] = out_rgb[2] = 0;
+    }
+    if (ctx == NULL || vt == NULL || out_rgb == NULL) {
+        return 0;
+    }
+    if (vt->color == NULL || vt->width == 0 ||
+        vt->height == 0) {
+        return 0;
+    }
+    if (x >= vt->width) {
+        x = vt->width - 1;
+    }
+    if (y >= vt->height) {
+        y = vt->height - 1;
+    }
+    memset(&rbdesc, 0, sizeof(rbdesc));
+    memset(&rbinfo, 0, sizeof(rbinfo));
+    if (lc_image_query_readback(vt->color, &rbdesc, &rbinfo) !=
+        LC_SUCCESS) {
+        return 0;
+    }
+    rgba = new (std::nothrow) unsigned char[rbinfo.size];
+    if (rgba == NULL) {
+        return 0;
+    }
+    if (lc_image_readback(vt->color, &rbdesc, rgba,
+                          rbinfo.size, NULL) != LC_SUCCESS) {
+        delete[] rgba;
+        return 0;
+    }
+    {
+        size_t i = ((size_t)y * rbinfo.width + x) * 4u;
+
+        if (i + 2 < rbinfo.size) {
+            out_rgb[0] = rgba[i + 0];
+            out_rgb[1] = rgba[i + 1];
+            out_rgb[2] = rgba[i + 2];
+        }
+    }
+    delete[] rgba;
     (void)ctx;
     return 1;
 }

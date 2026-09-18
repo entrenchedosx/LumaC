@@ -401,6 +401,28 @@ int leg_probe_viewport_rect(const leg_context *context,
     return 1;
 }
 
+/* R-012 headed-test hook: expose the recorded viewport panel rect
+ * as plain floats (the sky-pixel legs map window-px probe space
+ * into target-px sample space through this). */
+int leg_viewport_panel_rect(const leg_context *context,
+                            float out_xywh[4]) {
+    if (out_xywh != NULL) {
+        out_xywh[0] = out_xywh[1] = out_xywh[2] =
+            out_xywh[3] = 0.0f;
+    }
+    if (context == NULL || out_xywh == NULL) {
+        return 0;
+    }
+    if (context->ui == NULL || !context->ui->vp_valid) {
+        return 0;
+    }
+    out_xywh[0] = context->ui->vp_x;
+    out_xywh[1] = context->ui->vp_y;
+    out_xywh[2] = context->ui->vp_w;
+    out_xywh[3] = context->ui->vp_h;
+    return 1;
+}
+
 int leg_probe_asset_row(const leg_context *context,
                         const char *source_path,
                         leg_rect *out_rect) {

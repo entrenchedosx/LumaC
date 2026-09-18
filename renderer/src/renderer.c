@@ -2283,7 +2283,17 @@ lr_result lr_renderer_render_scene(lr_renderer *renderer,
     if (cr != LC_SUCCESS) {
         return lr_map_result(cr);
     }
-    /* Sky first (no depth test/write); scene geometry covers it. */
+    /* Sky first (no depth test/write); scene geometry covers it.
+     * With no authored environment, the EDITOR environment gradient
+     * fills the frame instead (edit-viewport tooling only; the GUI
+     * bridge enables it solely around the edit-world composite, so
+     * play/headless frames keep the black clear). R-012 headed-test
+     * counters (observe-only, for the env on/off/play legs): the
+     * suite asserts the sky/grid actually recorded vs skipped. */
+    renderer->editor_sky_stat_drawn = 0;
+    renderer->editor_sky_stat_skipped = 0;
+    renderer->editor_grid_stat_drawn = 0;
+    renderer->editor_grid_stat_skipped = 0;
     if (renderer->active_env != NULL &&
         renderer->active_env->ready) {
         uint64_t sky0 = lr_perf_now();
@@ -2295,6 +2305,20 @@ lr_result lr_renderer_render_scene(lr_renderer *renderer,
         if (res != LR_SUCCESS) {
             return res;
         }
+    } else if (renderer->editor_env.enabled) {
+        uint64_t sky0 = lr_perf_now();
+
+        res = lr_renderer_record_editor_sky(renderer, encoder);
+        renderer->editor_sky_stat_drawn = (res == LR_SUCCESS);
+        renderer->editor_sky_stat_skipped = (res != LR_SUCCESS);
+        renderer->t_sky = lr_perf_now() - sky0;
+        renderer->profile.cpu_sky_ms =
+            lr_perf_to_ms(renderer->t_sky, renderer->perf_freq);
+        if (res != LR_SUCCESS) {
+            return res;
+        }
+    } else {
+        renderer->editor_sky_stat_skipped = 1;
     }
     renderer->t_main_start = lr_perf_now();
     res = lr_render_items(renderer, encoder, renderer->hdr_target);
@@ -2304,6 +2328,23 @@ lr_result lr_renderer_render_scene(lr_renderer *renderer,
                       renderer->perf_freq);
     if (res != LR_SUCCESS) {
         return res;
+    }
+    /* Editor infinite grid LAST (depth-tested, writes off, blended):
+     * authored geometry arrived first in this same pass, so floors
+     * and models naturally obscure it. Skipped whenever an authored
+     * environment owns the frame. */
+    if (renderer->editor_env.enabled &&
+        renderer->editor_env.grid_enabled &&
+        (renderer->active_env == NULL ||
+         !renderer->active_env->ready)) {
+        res = lr_renderer_record_editor_grid(renderer, encoder);
+        renderer->editor_grid_stat_drawn = (res == LR_SUCCESS);
+        renderer->editor_grid_stat_skipped = (res != LR_SUCCESS);
+        if (res != LR_SUCCESS) {
+            return res;
+        }
+    } else {
+        renderer->editor_grid_stat_skipped = 1;
     }
     cr = lc_encoder_end_render_pass(encoder);
     if (cr != LC_SUCCESS) {
@@ -2387,6 +2428,68 @@ void lr_renderer_get_environment_info(const lr_renderer *renderer,
         out_info->preprocess_state = env->ready ? 1u : 0u;
         out_info->environment_generation = env->source_epoch;
         out_info->last_build_ms = env->last_build_ms;
+    }
+}
+
+void lr_renderer_set_editor_environment(lr_renderer *renderer,
+                                        int enable, int grid_enable) {
+    if (renderer == NULL) {
+        return;
+    }
+    renderer->editor_env.enabled = enable ? 1 : 0;
+    renderer->editor_env.grid_enabled = grid_enable ? 1 : 0;
+}
+
+void lr_renderer_get_editor_environment(const lr_renderer *renderer,
+                                        int *out_enable,
+                                        int *out_grid_enable) {
+    if (out_enable != NULL) {
+        *out_enable = 0;
+    }
+    if (out_grid_enable != NULL) {
+        *out_grid_enable = 0;
+    }
+    if (renderer == NULL) {
+        return;
+    }
+    if (out_enable != NULL) {
+        *out_enable = renderer->editor_env.enabled;
+    }
+    if (out_grid_enable != NULL) {
+        *out_grid_enable = renderer->editor_env.grid_enabled;
+    }
+}
+
+void lr_renderer_get_editor_environment_stats(
+    const lr_renderer *renderer, int *out_sky_drawn,
+    int *out_sky_skipped, int *out_grid_drawn,
+    int *out_grid_skipped) {
+    if (out_sky_drawn != NULL) {
+        *out_sky_drawn = 0;
+    }
+    if (out_sky_skipped != NULL) {
+        *out_sky_skipped = 0;
+    }
+    if (out_grid_drawn != NULL) {
+        *out_grid_drawn = 0;
+    }
+    if (out_grid_skipped != NULL) {
+        *out_grid_skipped = 0;
+    }
+    if (renderer == NULL) {
+        return;
+    }
+    if (out_sky_drawn != NULL) {
+        *out_sky_drawn = renderer->editor_sky_stat_drawn;
+    }
+    if (out_sky_skipped != NULL) {
+        *out_sky_skipped = renderer->editor_sky_stat_skipped;
+    }
+    if (out_grid_drawn != NULL) {
+        *out_grid_drawn = renderer->editor_grid_stat_drawn;
+    }
+    if (out_grid_skipped != NULL) {
+        *out_grid_skipped = renderer->editor_grid_stat_skipped;
     }
 }
 

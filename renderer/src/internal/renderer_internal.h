@@ -163,6 +163,65 @@ typedef struct lr_sky_push {
     float params[4]; /* intensity, rotation, 0, 0 */
 } lr_sky_push;
 
+/* Editor-environment sky push block: invVP + camPos (same layout as
+ * lr_sky_push) + three zone colors + horizon softness. */
+typedef struct lr_editor_sky_push {
+    float inv_view_proj[16];
+    float cam_pos[4];
+    float zone_a[4]; /* zenith xyz, unused w */
+    float zone_b[4]; /* horizon xyz, unused w */
+    float zone_c[4]; /* nadir xyz, horizon-softness w */
+} lr_editor_sky_push;
+
+/* Editor grid push block: same ray uniforms + palette + fade/axis. */
+typedef struct lr_editor_grid_push {
+    float inv_view_proj[16];
+    float cam_pos[4];
+    float grid_a[4]; /* minor rgb, alpha */
+    float grid_b[4]; /* major rgb, alpha */
+    float grid_c[4]; /* unused rgb, fade distance w */
+    float grid_d[4]; /* axis strength x, axis falloff y */
+} lr_editor_grid_push;
+
+/* Editor viewport environment (R-012): EDITOR-ONLY tooling state owned
+ * by the renderer, never serialized, never touching scene data. When
+ * enabled AND no authored environment is active, render_scene draws a
+ * procedural sky gradient first (HDR, no lights emitted) and a
+ * procedural infinite grid after scene geometry (depth-tested, so
+ * authored floors obscure it). Play-mode worlds never enable this:
+ * the GUI viewport bridge enables it only around the EDIT-world
+ * composite. */
+
+/* Luma editor palette (linear HDR values; tonemap clamps to LDR).
+ * Distinct slate identity: desaturated blue-grey sky, neutral slate
+ * nadir, quiet grid, restrained red/blue axes. */
+#define LR_EDITOR_SKY_ZENITH_R 0.045f
+#define LR_EDITOR_SKY_ZENITH_G 0.062f
+#define LR_EDITOR_SKY_ZENITH_B 0.105f
+#define LR_EDITOR_SKY_HORIZON_R 0.155f
+#define LR_EDITOR_SKY_HORIZON_G 0.185f
+#define LR_EDITOR_SKY_HORIZON_B 0.240f
+#define LR_EDITOR_SKY_NADIR_R 0.030f
+#define LR_EDITOR_SKY_NADIR_G 0.032f
+#define LR_EDITOR_SKY_NADIR_B 0.038f
+#define LR_EDITOR_SKY_SOFTNESS 0.18f
+#define LR_EDITOR_GRID_MINOR_R 0.145f
+#define LR_EDITOR_GRID_MINOR_G 0.165f
+#define LR_EDITOR_GRID_MINOR_B 0.200f
+#define LR_EDITOR_GRID_MINOR_A 0.30f
+#define LR_EDITOR_GRID_MAJOR_R 0.210f
+#define LR_EDITOR_GRID_MAJOR_G 0.240f
+#define LR_EDITOR_GRID_MAJOR_B 0.290f
+#define LR_EDITOR_GRID_MAJOR_A 0.45f
+#define LR_EDITOR_GRID_FADE_DIST 60.0f
+#define LR_EDITOR_GRID_AXIS_STRENGTH 0.55f
+#define LR_EDITOR_GRID_AXIS_FALLOFF 9.0f
+
+typedef struct lr_editor_env {
+    int enabled;      /* editor environment pass wanted */
+    int grid_enabled; /* infinite grid wanted (implies sky context) */
+} lr_editor_env;
+
 /* Preprocessing push block: face index + roughness (8B). */
 typedef struct lr_post_push {
     int32_t face; /* 0=+X 1=-X 2=+Y 3=-Y 4=+Z 5=-Z */
@@ -380,12 +439,28 @@ struct lr_renderer {
     lc_shader *sky_vertex_shader;
     lc_shader *sky_fragment_shader;
     lc_shader *tonemap_fragment_shader;
+    lc_shader *editor_sky_vertex_shader;
+    lc_shader *editor_sky_fragment_shader;
+    lc_shader *editor_grid_fragment_shader;
     /* Post pipelines (lazy singletons, never per-frame). */
     lc_pipeline *eq2cube_pipeline;
     lc_pipeline *irradiance_pipeline;
     lc_pipeline *prefilter_pipeline;
     lc_pipeline *brdf_pipeline;
     lc_pipeline *sky_pipeline;
+    lc_pipeline *editor_sky_pipeline;
+    lc_pipeline *editor_grid_pipeline;
+    /* Editor viewport environment (R-012): renderer-owned tooling
+     * state, zero-initialized (off) at create. Enabled only around
+     * the EDIT-world composite by the GUI viewport bridge; the app
+     * play path and headless probes never touch it. The stat flags
+     * below are observe-only (set per render_scene: did the editor
+     * sky/grid record or skip) for the headed R-012 legs. */
+    lr_editor_env editor_env;
+    int editor_sky_stat_drawn;
+    int editor_sky_stat_skipped;
+    int editor_grid_stat_drawn;
+    int editor_grid_stat_skipped;
     /* NOTE: no shared mutable post set — one set updated across
      * passes would invalidate prior binds in the same recording
      * (VUID). Preprocessing sets live per stage on the environment
@@ -788,6 +863,17 @@ lr_result lr_renderer_record_sky(lr_renderer *renderer,
 lr_result lr_renderer_record_tonemap(lr_renderer *renderer,
                                      lc_command_encoder *enc,
                                      lc_render_target *target);
+/* Editor viewport environment (R-012, environment.c): procedural sky
+ * + infinite grid inside the open HDR scene pass. Both no-op unless
+ * the editor bridge enabled them AND no authored environment is
+ * active (authored sky takes precedence). Sky draws with depth off
+ * first; grid draws with depth test on (LESS) + writes off after
+ * scene geometry, blended over. Backend-neutral (public LumaC only),
+ * same lazy-pipeline discipline as the IBL sky. */
+lr_result lr_renderer_record_editor_sky(lr_renderer *renderer,
+                                        lc_command_encoder *enc);
+lr_result lr_renderer_record_editor_grid(lr_renderer *renderer,
+                                         lc_command_encoder *enc);
 /* Refresh the mapped env-params block from the active environment
  * (infallible memcpy; the buffer itself never moves). */
 void lr_environment_write_params(lr_renderer *renderer);

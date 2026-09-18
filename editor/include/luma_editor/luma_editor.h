@@ -1263,6 +1263,16 @@ LED_API int leg_consume_play_input(leg_context *context,
 LED_API int leg_wants_keyboard(const leg_context *context);
 LED_API int leg_wants_mouse(const leg_context *context);
 
+/** R-012 editor-viewport-environment pref overrides (headed-test +
+ *  automation hooks; production default is env ON + grid ON). Both
+ *  are editor tooling only (never scene data, never serialized).
+ *  Pass -1 to leave a pref untouched, 0/1 to force it. NULL-safe
+ *  (NULL context is a no-op). The composite bridge reads the
+ *  effective prefs through the same getters the View menu edits,
+ *  so forced prefs exercise the production path. */
+LED_API void leg_test_set_viewport_env(leg_context *context, int env,
+                                       int grid);
+
 /* ------------------------------------------------------------------
  * Test-geometry probes (Phase 34A automation observation).
  *
@@ -1464,6 +1474,26 @@ LED_API unsigned long long leg_viewport_composite(
 LED_API int leg_viewport_composite_census(
     leg_context *context, struct leg_viewport_target *vt,
     uint64_t out[4]);
+
+/** Viewport panel geometry probe (observe-only): the last panels
+ *  frame's viewport Image/capture rect in window px (the space the
+ *  scene target maps into 1:1). Fills out_xywh[4] = {x,y,w,h}.
+ *  Returns 1 + fill when a viewport rect was recorded this session,
+ *  0 otherwise (zeros). Pure GUI state query (no readback). */
+LED_API int leg_viewport_panel_rect(const leg_context *context,
+                                    float out_xywh[4]);
+
+/** Viewport sky-pixel probe (observe-only, for the R-012 headed
+ *  environment legs): reads ONE RGBA8 pixel from the panel-sized
+ *  target AFTER a leg_viewport_composite on the same frame. Fills
+ *  out_rgb[3] with the 8-bit pixel. x/y are clamped into the
+ *  target. Returns 1 + fill on success, 0 for NULL/bad
+ *  context/target or readback failure. CPU readback
+ *  (test/verification only — never in the frame loop). */
+LED_API int leg_viewport_sky_pixel(leg_context *context,
+                                   struct leg_viewport_target *vt,
+                                   unsigned x, unsigned y,
+                                   unsigned char out_rgb[3]);
 
 /** Draw-walk budget probe (pure math, headless-testable): estimates
  *  vertex/index buffer bytes for `vertex_count` draw verts (pos+uv+

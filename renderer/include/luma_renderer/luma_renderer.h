@@ -1107,6 +1107,40 @@ void lr_renderer_get_environment_info(const lr_renderer *renderer,
                                       lr_environment_info *out_info);
 
 /* ------------------------------------------------------------------
+ * Editor viewport environment (R-012): EDITOR-ONLY tooling, never
+ * scene data. When enabled AND no authored environment is active,
+ * render_scene draws a procedural world-direction sky gradient first
+ * (HDR, emits no light — visual background only) and a procedural
+ * infinite grid after geometry (depth-tested, so authored floors
+ * obscure it; blended distance fade; 1 m minor / 10 m major cells).
+ * NULL renderer is a no-op for setters (getters report 0). The GUI
+ * viewport bridge enables this solely around the EDIT-world
+ * composite; play worlds, headless probes, and game rendering never
+ * enable it. Toggling touches no scene bytes (canonical oracle
+ * holds) and emits no light into Lit mode (R-011 shadow proof
+ * uncontaminated).
+ * ------------------------------------------------------------------ */
+/** Enable/disable the editor sky gradient + grid context (both on
+ *  with nonzero args is the default editor look). Grid alone
+ *  without the sky context is allowed (grid_enable != 0,
+ *  enable == 0 keeps the clear color but still draws the grid). */
+void lr_renderer_set_editor_environment(lr_renderer *renderer,
+                                        int enable, int grid_enable);
+/** Query the editor environment toggles (zeros for NULL). */
+void lr_renderer_get_editor_environment(const lr_renderer *renderer,
+                                        int *out_enable,
+                                        int *out_grid_enable);
+
+/** R-012 headed-test counters (observe-only): did the last
+ * render_scene record the editor sky/grid (drawn=1) or skip them
+ * (skipped=1)? Zeros for NULL. The headed legs assert drawn for
+ * env-ON, skipped for env-OFF and play. */
+void lr_renderer_get_editor_environment_stats(
+    const lr_renderer *renderer, int *out_sky_drawn,
+    int *out_sky_skipped, int *out_grid_drawn,
+    int *out_grid_skipped);
+
+/* ------------------------------------------------------------------
  * Minimal render graph (Phase 23, renderer-owned scheduling).
  *
  * A small explicit dependency layer over public LumaC: passes

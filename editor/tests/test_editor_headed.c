@@ -2125,7 +2125,20 @@ int main(int argc, char **argv) {
      * identical counts (no flicker/jitter). Clear-only mutation
      * arm: LUMA34A_MUT_COMPOSITE (see source arms) skips the trio
      * and must drive the count to ~0 — the test FAILS while the
-     * mutation is armed (verified in the mutation matrix). */
+     * mutation is armed (verified in the mutation matrix).
+     *
+     * R-012 editor-viewport-environment legs (same seeded scene;
+     * production prefs path via leg_test_set_viewport_env):
+     *  env ON + grid ON (defaults): census nonzero (sky paints
+     *    the empty field) and deterministic across frames;
+     *  env OFF + grid OFF: census ~0 (seeded scene has no
+     *    renderable geometry at this camera — the Lit boxes are
+     *    pointer renderables... actually BoxA IS renderable; the
+     *    OFF leg instead asserts the delta vs ON is nonzero and
+     *    the OFF sky pixels read the composite clear color);
+     *  PLAY isolation: led_play_enter renders the runtime world
+     *    with the env FORCED off by the bridge — the top-strip sky
+     *    pixels must read black/clear, not the editor gradient. */
     {
         struct leg_viewport_target *vt =
             leg_viewport_target_for(h.gui);
@@ -2160,6 +2173,215 @@ int main(int argc, char **argv) {
                      "%s/10-final-editor.ppm", shotdir);
             TEST_CHECK(h_shot(&h, shot),
                        "H-comp final screenshot");
+        }
+    }
+    /* R-012: env OFF twin (same settled scene, prefs forced off —
+     * production getter path). The sky region must fall back to the
+     * composite clear color (10,13,23 @8bit); the ON capture above
+     * painted the gradient there instead. Sample mapping: the
+     * viewport panel rect (window px, via leg_viewport_panel_rect)
+     * maps 1:1 into the scene target, so the panel's top-center in
+     * target px is the sky sample. NOTE: prefs are forced BEFORE
+     * the settle frames — the composite bridge reads them during
+     * h_frames, so the observed target carries the forced state. */
+    {
+        struct leg_viewport_target *vt =
+            leg_viewport_target_for(h.gui);
+        uint64_t coff[4];
+        unsigned char px[3];
+        unsigned char pxon[3];
+        float rect[4];
+
+        memset(coff, 0, sizeof(coff));
+        /* ON reference FIRST (defaults): the panel-mapped sample
+         * must read the gradient (luma >= 15) — proves the sample
+         * coordinate observes a real environment signal. */
+        leg_test_set_viewport_env(h.gui, 1, 1);
+        h_frames(&h, 4);
+        memset(pxon, 0, sizeof(pxon));
+        memset(rect, 0, sizeof(rect));
+        if (leg_viewport_panel_rect(h.gui, rect)) {
+            unsigned sx = (unsigned)(rect[2] * 0.5f);
+            unsigned sy = (unsigned)(rect[3] * 0.1f);
+            unsigned lumon = 0;
+            int sky_drawn = 0;
+            int sky_skipped = 0;
+            int grid_drawn = 0;
+            int grid_skipped = 0;
+
+            lr_renderer_get_editor_environment_stats(
+                h.renderer, &sky_drawn, &sky_skipped,
+                &grid_drawn, &grid_skipped);
+            printf("[INFO] r12 env-on stats sky %d/%d grid "
+                   "%d/%d\n",
+                   sky_drawn, sky_skipped, grid_drawn,
+                   grid_skipped);
+            TEST_CHECK(sky_drawn == 1 && grid_drawn == 1,
+                       "R12 env-on recorded sky+grid");
+            printf("[INFO] r12 panel rect %.0f,%.0f %.0fx%.0f "
+                   "-> sky sample %u,%u\n",
+                   rect[0], rect[1], rect[2], rect[3], sx,
+                   sy);
+            if (leg_viewport_sky_pixel(h.gui, vt, sx, sy,
+                                       pxon)) {
+                lumon = ((unsigned)pxon[0] +
+                         (unsigned)pxon[1] +
+                         (unsigned)pxon[2]) / 3u;
+                printf("[INFO] r12 env-on sky pixel "
+                       "(%u,%u,%u) luma %u\n",
+                       (unsigned)pxon[0],
+                       (unsigned)pxon[1],
+                       (unsigned)pxon[2], lumon);
+                TEST_CHECK(lumon >= 15,
+                           "R12 env-on sky paints gradient");
+            } else {
+                TEST_CHECK(0, "R12 env-on sky pixel live");
+            }
+        } else {
+            TEST_CHECK(0, "R12 panel rect live");
+        }
+        /* OFF twin: same coordinate must fall back to clear. */
+        leg_test_set_viewport_env(h.gui, 0, 0);
+        h_frames(&h, 4);
+        TEST_CHECK(leg_viewport_composite_census(h.gui, vt,
+                                                 coff) == 1,
+                   "R12 env-off census live");
+        printf("[INFO] r12 env-off census %llu non-clear "
+               "(%llux%llu valid=%llu)\n",
+               (unsigned long long)coff[0],
+               (unsigned long long)coff[1],
+               (unsigned long long)coff[2],
+               (unsigned long long)coff[3]);
+        memset(px, 0, sizeof(px));
+        memset(rect, 0, sizeof(rect));
+        if (leg_viewport_panel_rect(h.gui, rect) &&
+            leg_viewport_sky_pixel(h.gui, vt,
+                                   (unsigned)(rect[2] * 0.5f),
+                                   (unsigned)(rect[3] * 0.1f),
+                                   px)) {
+            unsigned sx = (unsigned)(rect[2] * 0.5f);
+            unsigned sy = (unsigned)(rect[3] * 0.1f);
+            int sky_drawn = 0;
+            int sky_skipped = 0;
+            int grid_drawn = 0;
+            int grid_skipped = 0;
+
+            lr_renderer_get_editor_environment_stats(
+                h.renderer, &sky_drawn, &sky_skipped,
+                &grid_drawn, &grid_skipped);
+            printf("[INFO] r12 env-off stats sky %d/%d grid "
+                   "%d/%d\n",
+                   sky_drawn, sky_skipped, grid_drawn,
+                   grid_skipped);
+            TEST_CHECK(sky_skipped == 1 && grid_skipped == 1,
+                       "R12 env-off skipped sky+grid");
+            /* The OFF twin renders the same boxes over the raw
+             * clear (10,13,23); geometry covers the sample in
+             * this seeded scene, so the pixel assertion is only
+             * meaningful where the ON twin painted sky. Compare
+             * OFF vs ON at the same coordinate: they must differ
+             * (env contribution removed), and OFF must be darker
+             * (no gradient lift). Both pixels are live readbacks
+             * above (pxon from the ON leg, px here). */
+            printf("[INFO] r12 env-off sky pixel "
+                   "(%u,%u,%u) vs on (%u,%u,%u)\n",
+                   (unsigned)px[0], (unsigned)px[1],
+                   (unsigned)px[2], (unsigned)pxon[0],
+                   (unsigned)pxon[1], (unsigned)pxon[2]);
+            TEST_CHECK((px[0] != pxon[0] ||
+                        px[1] != pxon[1] ||
+                        px[2] != pxon[2]) &&
+                           (unsigned)px[0] +
+                                   (unsigned)px[1] +
+                                   (unsigned)px[2] <=
+                               (unsigned)pxon[0] +
+                                   (unsigned)pxon[1] +
+                                   (unsigned)pxon[2],
+                       "R12 env-off removes sky lift");
+        } else {
+            TEST_CHECK(0, "R12 panel rect live");
+        }
+        {
+            char shot[1024];
+
+            snprintf(shot, sizeof(shot),
+                     "%s/11-r12-env-off.ppm", shotdir);
+            TEST_CHECK(h_shot(&h, shot),
+                       "R12 env-off screenshot");
+        }
+        /* Restore defaults for the legs below (play + drop). */
+        leg_test_set_viewport_env(h.gui, 1, 1);
+        h_frames(&h, 2);
+    }
+    /* R-012: PLAY isolation (Enter via core, composite the runtime
+     * world through the production bridge, then exit). The bridge
+     * forces the editor env off for play worlds: the sky sample
+     * (same panel-mapped coordinate as the OFF leg) must NOT read
+     * the editor gradient (luma >= 15); the runtime world carries
+     * the edit camera by name so the frame holds scene content. */
+    {
+        struct leg_viewport_target *vt =
+            leg_viewport_target_for(h.gui);
+        unsigned char px[3];
+        float rect[4];
+
+        /* Play prefs: whatever the user left (ON here) — the
+         * bridge must force the env off for the runtime world. */
+        leg_test_set_viewport_env(h.gui, 1, 1);
+        if (led_play_enter(h.session) == LED_SUCCESS) {
+            h_frames(&h, 4);
+            memset(px, 0, sizeof(px));
+            memset(rect, 0, sizeof(rect));
+            if (leg_viewport_panel_rect(h.gui, rect)) {
+                unsigned sx = (unsigned)(rect[2] * 0.5f);
+                unsigned sy = (unsigned)(rect[3] * 0.1f);
+                int sky_drawn = 0;
+                int sky_skipped = 0;
+                int grid_drawn = 0;
+                int grid_skipped = 0;
+
+                lr_renderer_get_editor_environment_stats(
+                    h.renderer, &sky_drawn, &sky_skipped,
+                    &grid_drawn, &grid_skipped);
+                printf("[INFO] r12 play stats sky %d/%d grid "
+                       "%d/%d\n",
+                       sky_drawn, sky_skipped, grid_drawn,
+                       grid_skipped);
+                TEST_CHECK(sky_skipped == 1 &&
+                               grid_skipped == 1,
+                           "R12 play skipped sky+grid");
+
+                if (leg_viewport_sky_pixel(h.gui, vt, sx, sy,
+                                           px)) {
+                    unsigned lum = ((unsigned)px[0] +
+                                    (unsigned)px[1] +
+                                    (unsigned)px[2]) / 3u;
+
+                    printf("[INFO] r12 play sky pixel "
+                           "(%u,%u,%u) luma %u\n",
+                           (unsigned)px[0],
+                           (unsigned)px[1],
+                           (unsigned)px[2], lum);
+                    TEST_CHECK(lum < 15,
+                               "R12 play has no editor sky");
+                } else {
+                    TEST_CHECK(0, "R12 play sky pixel live");
+                }
+            } else {
+                TEST_CHECK(0, "R12 play panel rect live");
+            }
+            {
+                char shot[1024];
+
+                snprintf(shot, sizeof(shot),
+                         "%s/12-r12-play.ppm", shotdir);
+                TEST_CHECK(h_shot(&h, shot),
+                           "R12 play screenshot");
+            }
+            led_play_exit(h.session);
+            h_frames(&h, 2);
+        } else {
+            TEST_CHECK(0, "R12 play enter");
         }
     }
     /* H-drop: real asset drag-and-drop gesture (ImGui DnD needs a

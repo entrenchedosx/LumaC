@@ -22,6 +22,14 @@
 
 /* One UI per context (single-context apps in Phase 33; owned by the
  * leg_context, never global). */
+
+/* R-012 headed-test pref overrides, staged before the first panels
+ * frame (leg_test_set_viewport_env is called by tests before any
+ * frame runs, so leg_ui_ensure's defaults must not clobber them).
+ * File-scope (not per-context): single-context apps in Phase 33. */
+static int g_env_pending = -1;
+static int g_grid_pending = -1;
+
 static leg_ui *leg_ui_for(leg_context *ctx) {
     return (ctx != NULL) ? ctx->ui : NULL;
 }
@@ -44,6 +52,17 @@ static leg_ui *leg_ui_ensure(leg_context *ctx) {
         ctx->ui->show_viewport = 1;
         ctx->ui->show_toolbar = 1;
         ctx->ui->show_status = 1;
+        ctx->ui->viewport_env = 1;
+        ctx->ui->viewport_grid = 1;
+        /* R-012 headed-test overrides staged before the first
+         * panels frame (leg_test_set_viewport_env): the defaults
+         * above must not clobber them. */
+        if (g_env_pending == 0 || g_env_pending == 1) {
+            ctx->ui->viewport_env = g_env_pending;
+        }
+        if (g_grid_pending == 0 || g_grid_pending == 1) {
+            ctx->ui->viewport_grid = g_grid_pending;
+        }
         ctx->ui->asset_type_filter = -1;
         ctx->ui->gizmo_mode = LED_GIZMO_TRANSLATE;
         ctx->ui->camera_speed = 100;
@@ -410,6 +429,8 @@ static void leg_menu_view(leg_context *ctx, leg_ui *ui) {
     show[4] = ui->show_viewport != 0;
     show[5] = ui->show_toolbar != 0;
     show[6] = ui->show_status != 0;
+    int env_on = ui->viewport_env != 0;
+    int grid_on = ui->viewport_grid != 0;
     if (ImGui::BeginMenu("View")) {
         ImGui::MenuItem("Hierarchy", NULL, &show[0]);
         ImGui::MenuItem("Inspector", NULL, &show[1]);
@@ -418,6 +439,12 @@ static void leg_menu_view(leg_context *ctx, leg_ui *ui) {
         ImGui::MenuItem("Viewport", NULL, &show[4]);
         ImGui::MenuItem("Toolbar", NULL, &show[5]);
         ImGui::MenuItem("Status bar", NULL, &show[6]);
+        ImGui::Separator();
+        /* R-012 editor viewport environment (tooling prefs, never
+         * scene data): gradient sky + infinite grid, both default
+         * ON. Grid needs the environment context. */
+        ImGui::MenuItem("Editor Environment", NULL, &env_on);
+        ImGui::MenuItem("Grid", NULL, &grid_on);
         ImGui::Separator();
         if (ImGui::MenuItem("Reset layout")) {
             leg_layout_request_reset(ctx);
@@ -432,6 +459,63 @@ static void leg_menu_view(leg_context *ctx, leg_ui *ui) {
     ui->show_viewport = show[4] ? 1 : 0;
     ui->show_toolbar = show[5] ? 1 : 0;
     ui->show_status = show[6] ? 1 : 0;
+    ui->viewport_env = env_on ? 1 : 0;
+    ui->viewport_grid = grid_on ? 1 : 0;
+}
+
+/* R-012 viewport env pref readers (gui_viewport_tex.cpp bridge).
+ * Grid implies the environment context (sky) so grid-alone still
+ * has a horizon to sit in. */
+int leg_viewport_env_wanted(leg_context *ctx) {
+    leg_ui *ui = (ctx != NULL) ? ctx->ui : NULL;
+
+    if (ui == NULL) {
+        return 1;
+    }
+    if (ui->viewport_grid != 0) {
+        return 1;
+    }
+    return (ui->viewport_env != 0) ? 1 : 0;
+}
+
+int leg_viewport_grid_wanted(leg_context *ctx) {
+    leg_ui *ui = (ctx != NULL) ? ctx->ui : NULL;
+
+    if (ui == NULL) {
+        return 1;
+    }
+    return (ui->viewport_grid != 0) ? 1 : 0;
+}
+
+/* R-012 headed-test hook: force the View-menu prefs without clicking
+ * (exercises the same getters the composite bridge reads). -1 leaves
+ * a pref untouched. Defined here (owns leg_ui) + declared on the
+ * public luma_editor.h ABI. NOTE: leg_ui_ensure runs at the next
+ * panels frame, so forcing BEFORE any panels frame would be
+ * overwritten by the defaults — stage through pending overrides
+ * applied at ensure time (g_env_pending/g_grid_pending above). */
+void leg_test_set_viewport_env(leg_context *ctx, int env, int grid) {
+    leg_ui *ui = NULL;
+
+    if (env == 0 || env == 1) {
+        g_env_pending = env;
+    }
+    if (grid == 0 || grid == 1) {
+        g_grid_pending = grid;
+    }
+    if (ctx == NULL) {
+        return;
+    }
+    ui = leg_ui_ensure(ctx);
+    if (ui == NULL) {
+        return;
+    }
+    if (env == 0 || env == 1) {
+        ui->viewport_env = env;
+    }
+    if (grid == 0 || grid == 1) {
+        ui->viewport_grid = grid;
+    }
 }
 
 static void leg_menu_help(leg_context *ctx, leg_ui *ui) {

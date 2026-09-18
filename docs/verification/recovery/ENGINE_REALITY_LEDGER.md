@@ -46,6 +46,7 @@ draws=4 tris=38`.
 | Lua in Game | Mover.orbit + CharDrive W/S + Trig.on_trigger_enter attached via real drop path | — | attach PASS lines in builder log | LIVE PASS (attach) |
 | Input | W flies camera (H10), real inject_event queue | test_input + test_input_vulkan + test_input_script PASS; lua_input example | headed H10 | LIVE PASS |
 | Play/Stop isolation | `--play` enters play, play shot differs 584/2800 px in viewbox (Mover moved), exit clean | H1/H2 headed + test_editor_play | `18-game-play.png` | LIVE PASS |
+| Editor viewport environment | EDIT paints slate sky gradient + infinite grid (top-strip luma 34.4 vs PLAY 0.0); headed env-on records sky+grid (stats 1/0, luma 18), env-off skips (stats 0/1), play forces off with prefs ON (stats 0/1, luma 0); full suite 94/94 | test_editor_headed R-012 legs PASS | `pass2/r012/02-shadow.png` vs `06-play.png`, `01-empty.png`, full log `pass2/r012/R-012-LOG.md` | LIVE PASS |
 | Physics fall/collide | lua_physics live: 5 submitted, 6 bodies, contacts 1→3 over 60 frames, `[drop] first contact` | test_physics + test_physics_vulkan + test_physics_script PASS | stats + script print | LIVE PASS |
 | Colliders (box/sphere/capsule) | Game carries static/dynamic/trigger boxes; trigger flag persists | test_physics + test_cast + test_capsule PASS | scene text | LIVE PASS |
 | Triggers | TrigZone `is_trigger=1` + Trig.lua counter attached; lua_physics zone counts overlaps | test_physics_script PASS | builder log | LIVE PASS |
@@ -148,6 +149,38 @@ draws=4 tris=38`.
   the cast footprint; lab `after/r011-on.ppm` shows the 1px edge on
   untextured grey. Remaining shape/placement questions are artistic
   direction (light angle, intensity 3, 1024 res), not pipeline correctness.
+### R-012: professional editor viewport environment — black-void edit viewport (P1 hotfix, COMPLETE — READY FOR HUMAN REVIEW)
+- Subsystem: renderer scene pass (`renderer/src/renderer.c`,
+  `renderer/src/environment.c`, `renderer/shaders/editor_*`) + GUI
+  viewport bridge (`editor/src/gui/gui_viewport_tex.cpp`) + View menu
+  prefs (`editor/src/gui/gui_panels.cpp`).
+- How discovered: R-012 hotfix order — the edit viewport cleared to
+  black (HDR clear) with no authored environment in the test scenes;
+  an empty scene read as a dead window, not a workspace.
+- User-visible symptom: black void behind/around all edit content;
+  empty starter scene (rig + cam + sun + Ground cue) showed nothing
+  but chrome.
+- Fix: renderer-owned procedural sky (3-zone linear-HDR gradient,
+  fullscreen triangle, depth off, first in pass) + infinite grid
+  (y=0 plane, 1 m / 10 m, fwidth AA, 60 m fade, depth-tested writes-off
+  blended, last in pass). `lr_editor_env` default OFF; the GUI bridge
+  enables it ONLY around the EDIT-world composite and forces (0,0)
+  for every play composite (shared renderer). Authored sky takes
+  precedence. Prefs are GUI-only (View menu, ON/ON), never serialized.
+- Proof: EDIT top-strip luma 34.4 (gradient (14,18,29)→(39,47,61))
+  vs PLAY 0.0 (game black); grid row-oscillation stdev 80–91 over
+  ground vs 0.3 clear; headed stats env-on sky 1/0 grid 1/0, env-off
+  0/1, play-with-prefs-ON 0/1; app reports unchanged (Shadow
+  `submitted=2 draws=2 tris=24 shadow_maps=1` — R-011 proof
+  uncontaminated); full Debug suite 94/94 PASS.
+- Evidence + full per-section log: `docs/verification/recovery/pass2/r012/`
+  (`R-012-LOG.md`, `01-empty/02-shadow/03-game/06-play` app PNGs,
+  `04/05/07` headed PNGs).
+- Human review asked: open `02-shadow.png` vs `06-play.png` (slate
+  gradient + grid under the checkerboard with the hard R-011 shadow
+  vs game black over the same geometry); `01-empty.png` should read
+  as a quiet workspace. View → Editor Environment / Grid toggle the
+  tooling (defaults ON/ON).
 - R-010 (withdrawn — CRLF checkout artifact, NOT an engine defect)
 - Symptom seen: `Game.luma_scene.luma` fingerprint flipped
   `2778 b323…` → `2891 1cd9…` on every open; looked like the
