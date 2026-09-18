@@ -111,6 +111,7 @@ int main(int argc, char **argv) {
     const char *select_name = NULL;
     const char *size_arg = NULL;
     int play_at_start = 0;
+    int want_report = 0;
     unsigned long max_frames = 0;
     int use_validation = 1;
     int use_vsync = 1;
@@ -170,13 +171,19 @@ int main(int argc, char **argv) {
             /* Enter Play after setup (same led_play_enter the Play
              * button calls; Play/Stop isolation verified headed). */
             play_at_start = 1;
+        } else if (strcmp(argv[i], "--report") == 0) {
+            /* Recovery CI: print the last render submission report
+             * (submitted/skipped + renderer draws/tris) on the last
+             * frame. Production le_world_get_last_render_report;
+             * observe-only. */
+            want_report = 1;
         } else {
             fprintf(stderr,
                     "usage: luma_editor [--project DIR] "
                     "[--scene FILE] [--frames N] [--no-validation] "
                     "[--no-vsync] [--screenshot out.png] "
                     "[--import-all] [--select NAME] [--size WxH] "
-                    "[--play]\n");
+                    "[--play] [--report]\n");
             return 1;
         }
     }
@@ -274,10 +281,17 @@ int main(int argc, char **argv) {
             fprintf(stderr, "warning: project open failed (%s)\n",
                     project_dir);
         } else if (import_all) {
-            /* Batch warmup: import every UNIMPORTED record through
-             * the same led_import_asset the GUI Import button calls
-             * (per-record result; a single bad asset never aborts
-             * the batch — mirrors the panel's per-click errors). */
+            /* Batch warmup: import every record that is not READY
+             * through the same led_import_asset the GUI Import
+             * button calls (UNIMPORTED + STALE: a fresh process has
+             * an empty engine registry, so STALE records — new
+             * importer version, changed source — must also upload
+             * before scene open; a single bad asset never aborts
+             * the batch — mirrors the panel's per-click errors).
+             * Recovery fix: the old code swept UNIMPORTED only, so
+             * a project whose sidecars all read STALE (e.g. after
+             * an importer bump) imported NOTHING and every
+             * mesh-bearing scene failed to open. */
             uint32_t n = led_assetdb_count(session);
             uint32_t k = 0;
             uint32_t ok_imports = 0;
@@ -289,7 +303,15 @@ int main(int argc, char **argv) {
                 if (!led_assetdb_get(session, k, &rec)) {
                     continue;
                 }
-                if (rec.status != LED_IMPORT_UNIMPORTED) {
+                /* Recovery: warmup must cover UNIMPORTED too. A
+                 * fresh process has an empty engine registry, so
+                 * sidecar-READY records arrive with dead handles
+                 * and the scan demotes them to UNIMPORTED (identity
+                 * kept) — they still need uploading before scene
+                 * open. STALE (drift) likewise. */
+                if (rec.status != LED_IMPORT_UNIMPORTED &&
+                    rec.status != LED_IMPORT_STALE &&
+                    rec.status != LED_IMPORT_READY) {
                     continue;
                 }
                 if (led_import_asset(session, rec.source_path) ==
@@ -672,6 +694,29 @@ int main(int argc, char **argv) {
             shot_target = NULL;
             shot_view = NULL;
             shot_img = NULL;
+        }
+        /* Recovery CI report: what did the composite actually
+         * submit this frame (edit world, or play world under
+         * --play)? */
+        if (want_report &&
+            ((max_frames > 0 && frame + 1u == max_frames) ||
+             (max_frames == 0 && frame == 0))) {
+            le_world *rw = led_is_playing(session)
+                               ? led_play_get_world(session)
+                               : led_session_get_edit_world(session);
+            le_render_report rep;
+
+            memset(&rep, 0, sizeof(rep));
+            le_world_get_last_render_report(rw, &rep);
+            printf("report submitted=%u dis=%u inv=%u dead=%u "
+                   "draws=%u tris=%u objects=%u\n",
+                   (unsigned)rep.submitted,
+                   (unsigned)rep.skipped_disabled,
+                   (unsigned)rep.skipped_invisible,
+                   (unsigned)rep.skipped_dead,
+                   (unsigned)rep.renderer_stats.draw_calls,
+                   (unsigned)rep.renderer_stats.triangles,
+                   (unsigned)le_world_get_object_count(rw));
         }
     }
 cleanup:

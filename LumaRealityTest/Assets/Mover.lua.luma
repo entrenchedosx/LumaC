@@ -1,0 +1,8 @@
+LUMA_ASSET 1
+id cb9677f927d3ccc4905b9402111a00c3
+type script
+source Assets/Mover.lua
+fingerprint 340 ca3481c4bbb667c4
+importer luma.lua 2
+settings d2fa86d1f8261783
+runtime ca3481c4bbb667c4bb9e536438a85c06

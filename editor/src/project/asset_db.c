@@ -743,6 +743,19 @@ int led_scan_reconcile(led_project *p, const char *rel,
                     r->fp_size = side.fp_size;
                     r->fp_hash = side.fp_hash;
                     r->has_sidecar = 1;
+                    /* Recovery fix (2nd half): do NOT seed READY
+                     * here. A fresh process has an empty engine
+                     * registry, so every sidecar-adopted record
+                     * would seed READY and then demote to
+                     * UNIMPORTED on the dead-handle check below —
+                     * import-all then imports them, but the NEXT
+                     * launch repeats the cycle forever (never
+                     * converges). Leave the ensure-record default
+                     * (UNIMPORTED, identity adopted above); the
+                     * compare below still demotes to STALE on real
+                     * drift. UNIMPORTED + sidecar identity = "import
+                     * on demand", which is the honest state for a
+                     * fresh process. */
                     memset(&side, 0, sizeof(side));
                 } else if (src == -1) {
                     snprintf(r->diagnostic,

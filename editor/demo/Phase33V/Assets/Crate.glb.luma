@@ -5,6 +5,6 @@ source Assets/Crate.glb
 fingerprint 2216 6c7ecb7c45fa46fb
 importer luma.gltf 1
 settings baf9f6c0aa9811c8
-sub mesh0:prim0 3e9f5c651d81e3833e9f5c651d81e383
-sub mat0:mat0 4dd6dfdaf1699c2100f3a9a56ca78fd4
-runtime 3e9f5c651d81e3833e9f5c651d81e383
+sub mesh0:prim0 4c1a98a62b7977c2201555146a88a619
+sub mat0:checkerred e2670d01336a749ff1655b162a9bad1e
+runtime 4c1a98a62b7977c2201555146a88a619

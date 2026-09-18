@@ -1,0 +1,8 @@
+LUMA_ASSET 1
+id adee538e4a5a1ab9ed2cc0261586e7ff
+type script
+source Assets/Trig.lua
+fingerprint 119 79420451921ac701
+importer luma.lua 2
+settings d2fa86d1f8261783
+runtime 79420451921ac7013f44f92aeeba6ac1

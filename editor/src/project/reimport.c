@@ -217,7 +217,15 @@ led_result led_reimport_asset(led_session *session,
                     r->status = LED_IMPORT_READY;
                     r->diagnostic[0] = '\0';
                     /* Refresh fingerprint (sidecar rewrite keeps
-                     * identity; fingerprint adopts new bytes). */
+                     * identity; fingerprint adopts new bytes).
+                     * Recovery fix: the refreshed fingerprint was
+                     * NEVER WRITTEN to the sidecar, so the next
+                     * project open re-read the stale fingerprint
+                     * and marked the record STALE again — every
+                     * launch reimported every edited script and
+                     * (worse) the scene refs resolved against a
+                     * registry the app's import-all then rebuilt
+                     * in a different order. Persist here. */
                     {
                         char abs2[2048];
                         FILE *ff = NULL;
@@ -244,6 +252,7 @@ led_result led_reimport_asset(led_session *session,
                             fclose(ff);
                             r->fp_size = sz;
                             r->fp_hash = hh;
+                            led_sidecar_write_pub(p, r);
                         }
                     }
                     led_browser_refresh(session);

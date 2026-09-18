@@ -607,6 +607,24 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(test_portable_identity_mut_identity PRIVATE m)
 endif()
 
+# Recovery acceptance-project builder (LumaRealityTest): GPU-backed
+# (needs a device for glTF upload), run from the REPO ROOT so the
+# project lands in the source tree. Staged through the public
+# led/le API (same calls the GUI panels make), never hand-written
+# scene bytes. Manual target (NOT in ctest): the auditor runs it
+# explicitly between evidence passes.
+add_executable(editor_recovery_project demo/recovery_project.c)
+target_link_libraries(editor_recovery_project PRIVATE luma_editor luma_engine luma_renderer luma_assets lumac Vulkan::Vulkan)
+target_include_directories(editor_recovery_project PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../engine/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../renderer/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../assets/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(editor_recovery_project PRIVATE m)
+endif()
+
 # Phase 33 demo project builder (headless, no window/GPU): builds
 # editor/demo/Phase33Demo/ (manifest + Assets/Orbit.lua +
 # Assets/Spinner.luprefab + Scenes/Main.luma_scene) through the

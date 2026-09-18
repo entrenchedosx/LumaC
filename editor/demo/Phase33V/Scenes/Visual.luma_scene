@@ -1,7 +1,25 @@
 LUMA_SCENE 1
-asset mesh 3e9f5c651d81e3833e9f5c651d81e383 editor/demo/Phase33V/Assets/Crate.glb
-asset material 4dd6dfdaf1699c2100f3a9a56ca78fd4 editor/demo/Phase33V/Assets/Crate.glb
-object 28c884387874e2e03af02f9aba055245
+asset mesh 4c1a98a62b7977c2201555146a88a619 editor/demo/Phase33V/Assets/Crate.glb
+asset material e2670d01336a749ff1655b162a9bad1e editor/demo/Phase33V/Assets/Crate.glb
+object 1242f742675859a3f9d7e735b9709c68
+name "CrateA"
+enabled 1
+parent nil
+position -1.20000005 0 0
+rotation 0 0 0 1
+scale 1 1 1
+renderable 4c1a98a62b7977c2201555146a88a619 e2670d01336a749ff1655b162a9bad1e 0 0 1
+end
+object 1295ef02d281f812ee89009eb7a6178a
+name "CrateB"
+enabled 1
+parent nil
+position 1.20000005 0.5 -0.5
+rotation 0 0 0 1
+scale 1 1 1
+renderable 4c1a98a62b7977c2201555146a88a619 e2670d01336a749ff1655b162a9bad1e 0 0 1
+end
+object 95fb29a0a3697df281288811ba8072e8
 name "Sun"
 enabled 1
 parent nil
@@ -11,38 +29,20 @@ scale 1 1 1
 light dir 1 1 1 3 0 0 0
 shadow 0
 end
-object 2a196359926ab3a0b9c58e2d8fb1f2c4
-name "CrateA"
-enabled 1
-parent nil
-position -1.20000005 0 0
-rotation 0 0 0 1
-scale 1 1 1
-renderable 3e9f5c651d81e3833e9f5c651d81e383 4dd6dfdaf1699c2100f3a9a56ca78fd4 0 0 1
-end
-object 87d04e0a659c67006be40c655318ccd7
+object bbd18405a8e617832b7735233f23bf58
 name "Camera"
 enabled 1
-parent 9f675cb601b665579653fa65231fa101
+parent d13ddfcce56db229aa5d7c3a7fcd5384
 position 0 0 0
 rotation 0 0 0 1
 scale 1 1 1
 camera persp 1.04719758 1.77777779 0.100000001 1000
 end
-object 9f675cb601b665579653fa65231fa101
+object d13ddfcce56db229aa5d7c3a7fcd5384
 name "CameraRig"
 enabled 1
 parent nil
 position 0 2.4000001 6
 rotation 0 0 0 1
 scale 1 1 1
-end
-object f294479f07ded62ff64e9fd44fbd88a9
-name "CrateB"
-enabled 1
-parent nil
-position 1.20000005 0.5 -0.5
-rotation 0 0 0 1
-scale 1 1 1
-renderable 3e9f5c651d81e3833e9f5c651d81e383 4dd6dfdaf1699c2100f3a9a56ca78fd4 0 0 1
 end

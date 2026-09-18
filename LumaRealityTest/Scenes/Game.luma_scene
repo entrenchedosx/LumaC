@@ -1,0 +1,113 @@
+LUMA_SCENE 1
+asset mesh 7303b8b00b6c0b37e806d3469791616a LumaRealityTest/Assets/skinned.glb
+asset mesh 769ff6a27b01fa2c1a903b103af02bf7 LumaRealityTest/Assets/box.glb
+asset material a67911f0e857fe2b693d57a3cfd628d2 LumaRealityTest/Assets/skinned.glb
+asset material d8e263056312f971cbe035127ae320f0 LumaRealityTest/Assets/box.glb
+object 054a63167e25dad4a3e267e3c4db4f0a
+name "StaticCube"
+enabled 1
+parent nil
+position -2 0.5 0
+rotation 0 0 0 1
+scale 1 1 1
+renderable 769ff6a27b01fa2c1a903b103af02bf7 d8e263056312f971cbe035127ae320f0 0 0 1
+rigid_body static 0 0 0 0 0 0 0 0 0 0
+collider box 0.5 0.5 0.5 0 0 0 0 0 0 1 0 0 0 0 0
+end
+object 3555ef5644df8ab62b68a1be6c8f633f
+name "Npc"
+enabled 1
+parent nil
+position 0 0 -3
+rotation 0 0 0 1
+scale 1 1 1
+renderable 7303b8b00b6c0b37e806d3469791616a a67911f0e857fe2b693d57a3cfd628d2 0 0 1
+end
+object 3d58f67e3b5f39a730c4dc0f291c847a
+name "Player"
+enabled 1
+parent nil
+position 0 1 5
+rotation 0 0 0 1
+scale 1 1 1
+script 765817eb095fc6784245982b423e030f
+character 0.400000006 1.70000005 0 1 0 0.0500000007 44.9771881 0.400000006 20 30 0.300000012 0 0 0
+end
+object 46eac450bb4f8182e16d3257d98ecc02
+name "Ground"
+enabled 1
+parent nil
+position 0 0 0
+rotation 0 0 0 1
+scale 1 1 1
+rigid_body static 0 0 0 0 0 0 0 0 0 0
+collider box 10 0.5 10 0 0 0 0 0 0 1 0 0 0 0.800000012 0
+end
+object 4c14ba6014de82ba5305b5fc48e69e1f
+name "TrigZone"
+enabled 1
+parent nil
+position 0 1 2
+rotation 0 0 0 1
+scale 1 1 1
+script 79420451921ac7013f44f92aeeba6ac1
+collider box 1 1 1 0 0 0 0 0 0 1 1 0 0 0 0
+end
+object 7574dc3a41a6f5dbcb19e6fe9f9aba58
+name "Mover"
+enabled 1
+parent nil
+position 0 1 3
+rotation 0 0 0 1
+scale 1 1 1
+renderable 769ff6a27b01fa2c1a903b103af02bf7 d8e263056312f971cbe035127ae320f0 0 0 1
+script ca3481c4bbb667c4bb9e536438a85c06
+end
+object 76381004719ab35103a6546b63132853
+name "DynamicCube"
+enabled 1
+parent nil
+position 2 3 0
+rotation 0 0 0 1
+scale 1 1 1
+renderable 769ff6a27b01fa2c1a903b103af02bf7 d8e263056312f971cbe035127ae320f0 0 0 1
+rigid_body dynamic 1 0 0 1 0 0 0 0 0 0
+collider box 0.5 0.5 0.5 0 0 0 0 0 0 1 0 0 0 0.5 0.200000003
+end
+object 806fbeb048734aac7abce114f7e29130
+name "Camera"
+enabled 1
+parent a4b9aca3007d07f690f6fb15d7a7fe24
+position 0 0 0
+rotation 0 0 0 1
+scale 1 1 1
+camera persp 1.04719758 1.77777779 0.100000001 1000
+end
+object a4b9aca3007d07f690f6fb15d7a7fe24
+name "CameraRig"
+enabled 1
+parent nil
+position 0 6 14
+rotation -0.174108133 0 0 0.984726548
+scale 1 1 1
+end
+object cd714b411a0f2aa9a810ac31e2220890
+name "PointLight"
+enabled 1
+parent nil
+position 3 3 2
+rotation 0 0 0 1
+scale 1 1 1
+light point 1 0.800000012 0.600000024 20 12 0 0
+shadow 0
+end
+object f3cd7815c6ea85e15bfcdb3a761d0b72
+name "Sun"
+enabled 1
+parent nil
+position 0 0 0
+rotation 0 0 0 1
+scale 1 1 1
+light dir 1 1 1 3 0 0 0
+shadow 1 0 0 0 0 0 0
+end

@@ -1,0 +1,10 @@
+LUMA_ASSET 1
+id 03b579b2eb972e784f83c4c41179e286
+type model
+source Assets/box.glb
+fingerprint 2216 6c7ecb7c45fa46fb
+importer luma.gltf 2
+settings ac14f8fe1050675b
+sub mesh0:prim0 769ff6a27b01fa2c1a903b103af02bf7
+sub mat0:checkerred d8e263056312f971cbe035127ae320f0
+runtime 769ff6a27b01fa2c1a903b103af02bf7

@@ -1,0 +1,8 @@
+LUMA_ASSET 1
+id 2b140eb311174a8c490053b9ef3458d1
+type script
+source Assets/CharDrive.lua
+fingerprint 356 765817eb095fc678
+importer luma.lua 2
+settings d2fa86d1f8261783
+runtime 765817eb095fc6784245982b423e030f

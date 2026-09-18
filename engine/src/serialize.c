@@ -1621,8 +1621,18 @@ le_result le_scene_load_text(le_engine *engine, const le_asset *scene,
                                    strcmp(tok[1], "1") == 0) {
                             /* Canonical 8-token form (writer
                              * always emits this): enabled,
-                             * resolution, depth/normal bias,
-                             * near, far, distance. */
+                             * resolution (0 = renderer default
+                             * 1024, else pow2 128..4096),
+                             * depth/normal bias (negative =
+                             * renderer default), near, far,
+                             * distance. Recovery fix: the old
+                             * reader demanded res >= 128, so a
+                             * default-config shadow (all zeros,
+                             * the common programmatic case)
+                             * wrote `shadow 1 0 ...` that NO
+                             * reader accepted — every scene with
+                             * a default shadow light failed to
+                             * reopen. */
                             char *ep = NULL;
                             unsigned long res =
                                 strtoul(tok[2], &ep, 10);
@@ -1633,8 +1643,9 @@ le_result le_scene_load_text(le_engine *engine, const le_asset *scene,
                             float sd;
 
                             if (ep == tok[2] || *ep != '\0' ||
-                                res < 128u || res > 4096u ||
-                                (res & (res - 1u)) != 0u ||
+                                (res != 0 &&
+                                 (res < 128u || res > 4096u ||
+                                  (res & (res - 1u)) != 0u)) ||
                                 !le_parse_float_checked(
                                     tok[3], &db) ||
                                 !le_parse_float_checked(

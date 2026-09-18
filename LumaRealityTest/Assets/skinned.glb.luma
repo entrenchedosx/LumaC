@@ -1,0 +1,11 @@
+LUMA_ASSET 1
+id 6e3e2230e8db2e6ccd7bef92d6c199ff
+type model
+source Assets/skinned.glb
+fingerprint 4064 92c7b0f352857623
+importer luma.gltf 2
+settings ac14f8fe1050675b
+sub mesh0:prim0:meshnode 7303b8b00b6c0b37e806d3469791616a
+sub mesh0:prim1:meshnode a03252dae9695b08c65fec9d98c14de1
+sub mat0:skinflat a67911f0e857fe2b693d57a3cfd628d2
+runtime 7303b8b00b6c0b37e806d3469791616a

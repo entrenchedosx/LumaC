@@ -366,6 +366,107 @@ load_nodes_only:
             }
             out_import->nodes = nodes;
             out_import->node_count = nn;
+            /* Recovery fix (P1): the dedup path returned mesh/
+             * material handles but NEVER populated mesh_keys /
+             * material_keys — every project reimport through a live
+             * registry fell back to index-only keys ("mat0"),
+             * silently dropping the file-authored name half
+             * ("mat0:checkerred") the first import persisted.
+             * Re-derive the key strings from the metadata model
+             * (authoritative names, same vocabulary as the full
+             * import below). On allocation failure the arrays stay
+             * NULL (project layer falls back loudly, as before). */
+            {
+                uint32_t ki;
+
+                if (nmesh > 0) {
+                    out_import->mesh_keys = (char **)calloc(
+                        nmesh, sizeof(char *));
+                }
+                if (nmat > 0) {
+                    out_import->material_keys = (char **)calloc(
+                        nmat, sizeof(char *));
+                }
+                if ((nmesh == 0 ||
+                     out_import->mesh_keys != NULL) &&
+                    (nmat == 0 ||
+                     out_import->material_keys != NULL)) {
+                    uint32_t kn = 0;
+                    uint32_t nnd =
+                        la_model_get_node_count(m2model);
+
+                    for (ki = 0; ki < nnd && kn < nmesh; ki++) {
+                        const la_model_node *knd =
+                            la_model_get_node(m2model, ki);
+                        uint32_t kmi;
+                        uint32_t kpc;
+                        uint32_t kpi;
+
+                        if (knd == NULL || knd->mesh_index < 0) {
+                            continue;
+                        }
+                        kmi = (uint32_t)knd->mesh_index;
+                        kpc = la_model_get_primitive_count(
+                            m2model, kmi);
+                        for (kpi = 0;
+                             kpi < kpc && kn < nmesh; kpi++) {
+                            char sub[128];
+                            char frag[48];
+                            char *kc = NULL;
+
+                            le_gltf_sanitize(
+                                la_model_get_mesh_name(m2model,
+                                                       kmi),
+                                frag);
+                            if (frag[0] != '\0') {
+                                snprintf(sub, sizeof(sub),
+                                         "mesh%u:prim%u:%s", kmi,
+                                         kpi, frag);
+                            } else {
+                                snprintf(sub, sizeof(sub),
+                                         "mesh%u:prim%u", kmi,
+                                         kpi);
+                            }
+                            kc = (char *)malloc(
+                                strlen(sub) + 1u);
+                            if (kc == NULL) {
+                                break;
+                            }
+                            memcpy(kc, sub,
+                                   strlen(sub) + 1u);
+                            out_import->mesh_keys[kn++] = kc;
+                        }
+                    }
+                    for (ki = 0;
+                         ki <
+                             la_model_get_material_count(
+                                 m2model) &&
+                         ki < nmat;
+                         ki++) {
+                        char sub[128];
+                        char frag[48];
+                        char *kc = NULL;
+
+                        le_gltf_sanitize(
+                            la_model_get_material_name(m2model,
+                                                       ki),
+                            frag);
+                        if (frag[0] != '\0') {
+                            snprintf(sub, sizeof(sub),
+                                     "mat%u:%s", ki, frag);
+                        } else {
+                            snprintf(sub, sizeof(sub), "mat%u",
+                                     ki);
+                        }
+                        kc = (char *)malloc(strlen(sub) + 1u);
+                        if (kc == NULL) {
+                            break;
+                        }
+                        memcpy(kc, sub, strlen(sub) + 1u);
+                        out_import->material_keys[ki] = kc;
+                    }
+                }
+            }
         }
         la_model_destroy(m2model);
         return LE_SUCCESS;

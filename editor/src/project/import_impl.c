@@ -663,6 +663,39 @@ led_result led_import_one_record(led_session *session,
             r->status = LED_IMPORT_READY;
             r->diagnostic[0] = '\0';
             p->imp_completed++;
+            /* Recovery fix: refresh the fingerprint to the bytes
+             * JUST imported before persisting. The record's fp
+             * fields date from the last SCAN, but the import reads
+             * current file bytes — if the file changed between scan
+             * and import (the normal edit→save→reimport flow), the
+             * sidecar kept the stale fingerprint and the NEXT open
+             * marked the record STALE again (import-all every
+             * launch, forever). Fingerprint the import source (abs)
+             * here so sidecar == bytes imported. */
+            {
+                FILE *ff = fopen(abs, "rb");
+
+                if (ff != NULL) {
+                    unsigned char fbuf[4096];
+                    size_t nn = 0;
+                    uint64_t hh = 14695981039346656037ull;
+                    uint64_t sz = 0;
+
+                    while ((nn = fread(fbuf, 1, sizeof(fbuf),
+                                       ff)) > 0) {
+                        size_t zi = 0;
+
+                        for (zi = 0; zi < nn; zi++) {
+                            hh ^= (uint64_t)fbuf[zi];
+                            hh *= 1099511628211ull;
+                        }
+                        sz += (uint64_t)nn;
+                    }
+                    fclose(ff);
+                    r->fp_size = sz;
+                    r->fp_hash = hh;
+                }
+            }
             led_sidecar_write_pub(p, r);
         } else {
             if (!r->has_runtime_asset ||
