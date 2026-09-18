@@ -1,0 +1,48 @@
+LUMA_SCENE 1
+asset mesh 769ff6a27b01fa2c1a903b103af02bf7 LumaRealityTest/Assets/box.glb
+asset material d8e263056312f971cbe035127ae320f0 LumaRealityTest/Assets/box.glb
+object 1353b672b8863aa9ae7a055cdec380cc
+name "ShadowRig"
+enabled 1
+parent nil
+position 0 4 9
+rotation -0.174108133 0 0 0.984726548
+scale 1 1 1
+end
+object 1a8e7c1c85982f089a25ad23523db3f6
+name "ShadowCam"
+enabled 1
+parent 1353b672b8863aa9ae7a055cdec380cc
+position 0 0 0
+rotation 0 0 0 1
+scale 1 1 1
+camera persp 1.04719758 1.77777779 0.100000001 1000
+end
+object 5c16db8f06fbe7c60922dc0d3878b802
+name "ShadowCube"
+enabled 1
+parent nil
+position 0 1.5 0
+rotation 0 0 0 1
+scale 1 1 1
+renderable 769ff6a27b01fa2c1a903b103af02bf7 d8e263056312f971cbe035127ae320f0 1 1 1
+end
+object 837d5e921f7344e024178a7143b2ec65
+name "ShadowGround"
+enabled 1
+parent nil
+position 0 -0.5 0
+rotation 0 0 0 1
+scale 8 0.5 8
+renderable 769ff6a27b01fa2c1a903b103af02bf7 d8e263056312f971cbe035127ae320f0 1 1 1
+end
+object ccaad6d179fa17a6d400ba961a33e7b2
+name "ShadowSun"
+enabled 1
+parent nil
+position 0 0 0
+rotation -0.4155384 0.266100317 0.128541112 0.860229969
+scale 1 1 1
+light dir 1 1 1 3 0 0 0
+shadow 1 1024 0 0 0 0 0
+end

@@ -132,8 +132,9 @@ static const char kCharDriveScript[] =
     "end\n"
     "return M\n";
 
-int main(void) {
+int main(int argc, char **argv) {
     const char *root = "LumaRealityTest";
+    int regen_shadow_only = 0;
     char p[1024];
     lc_device *device = NULL;
     lc_device_desc dd;
@@ -146,7 +147,32 @@ int main(void) {
     le_world_desc wd;
 
     setvbuf(stdout, NULL, _IONBF, 0);
-    printf("Building LumaRealityTest acceptance project...\n");
+    if (argc > 1 && strcmp(argv[1], "--regen-shadow") == 0) {
+        regen_shadow_only = 1;
+        printf("Regenerating Shadow scene onto committed UUIDs...\n");
+    } else {
+        printf("Building LumaRealityTest acceptance project...\n");
+    }
+    /* The acceptance project is COMMITTED (sidecars carry minted
+     * UUIDs). A full rebuild over it would mint FRESH UUIDs and
+     * rewrite every scene ref — a from-scratch regen, not a
+     * refresh. Refuse when the project exists (delete the
+     * directory explicitly for a deliberate regen), EXCEPT
+     * --regen-shadow (reuses every committed UUID + engine ID;
+     * only the Shadow scene file is rewritten). */
+    if (!regen_shadow_only) {
+    {
+        FILE *probe = fopen("LumaRealityTest/luma.project",
+                            "r");
+
+        if (probe != NULL) {
+            fclose(probe);
+            printf("LumaRealityTest exists; refusing to "
+                   "overwrite (delete it for a regen)\n");
+            return 1;
+        }
+    }
+    }
     if (lc_init() != LC_SUCCESS) {
         printf("lc_init FAIL\n");
         return 1;
@@ -177,7 +203,9 @@ int main(void) {
         return 1;
     }
 
-    /* Layout. */
+    /* Layout (full build only; --regen-shadow reuses the
+     * committed project as-is). */
+    if (!regen_shadow_only) {
     make_dir(root);
     snprintf(p, sizeof(p), "%s/Assets", root);
     make_dir(p);
@@ -224,9 +252,39 @@ int main(void) {
     CHECK(led_import_asset(s, "Assets/CharDrive.lua") ==
               LED_SUCCESS,
           "import CharDrive");
+    } else {
+        /* Regen mode: open committed, warm the registry like the
+         * app does (import-all sweep, no staging). */
+        CHECK(led_project_open(s, root) == LED_SUCCESS,
+              "regen project open");
+        {
+            uint32_t n = led_assetdb_count(s);
+            uint32_t k = 0;
 
-    /* Scene assembly (every row undo-tracked via led_execute). */
+            for (k = 0; k < n; k++) {
+                led_asset_record rec;
+
+                memset(&rec, 0, sizeof(rec));
+                if (!led_assetdb_get(s, k, &rec)) {
+                    continue;
+                }
+                if (rec.status == LED_IMPORT_FAILED ||
+                    rec.status == LED_IMPORT_MISSING ||
+                    rec.status == LED_IMPORT_UNSUPPORTED) {
+                    continue;
+                }
+                CHECK(led_import_asset(s, rec.source_path) ==
+                          LED_SUCCESS,
+                      "regen warmup import");
+            }
+        }
+    }
+
+    /* Scene assembly (full build only; --regen-shadow jumps
+     * straight to the Shadow scene block). */
+    if (!regen_shadow_only) {
     {
+        /* (Game assembly block opens here; closed before done.) */
         led_command c;
         le_object rig = LE_OBJECT_INVALID;
         le_object cam = LE_OBJECT_INVALID;
@@ -728,7 +786,278 @@ int main(void) {
     }
     printf("reopen objects: %u\n",
            (unsigned)le_world_get_object_count(w));
+    } /* end full-build Game assembly block (if + brace) */
 
+    /* --regen-shadow: rebuild ONLY the Shadow scene file against
+     * the committed project (UUIDs + engine IDs stable). The
+     * Game scene + all sidecars stay byte-identical. */
+
+    /* Pass 2: Shadow.luma_scene — unmistakable shadow acceptance
+     * (directional light + cube over a ground plane, aimed
+     * camera). The Game scene's crates are small and far; this
+     * scene exists so shadow ON/OFF + caster/light moves read
+     * unambiguously in pixels. Same public-API staging. */
+    {
+        le_object rig2 = LE_OBJECT_INVALID;
+        le_object cam2 = LE_OBJECT_INVALID;
+        le_object sun2 = LE_OBJECT_INVALID;
+        le_object gnd2 = LE_OBJECT_INVALID;
+        le_object cube2 = LE_OBJECT_INVALID;
+        led_command c2;
+
+        /* Fresh world contents: clear edit, rebuild minimal. */
+        CHECK(led_scene_new(s) == LED_SUCCESS,
+              "shadow scene baseline");
+        /* Wipe: destroy all, then stage shadow-only content. */
+        {
+            uint32_t live = le_world_get_object_count(w);
+            le_object *all = NULL;
+
+            if (live > 0) {
+                all = (le_object *)malloc(
+                    (size_t)live * sizeof(le_object));
+            }
+            if (all != NULL) {
+                uint32_t got =
+                    le_world_get_all_objects(w, all, live);
+                uint32_t i = 0;
+
+                for (i = 0; i < got; i++) {
+                    le_object_destroy(w, &all[i]);
+                }
+                free(all);
+            }
+        }
+        memset(&c2, 0, sizeof(c2));
+        c2.kind = LED_CMD_CREATE;
+        snprintf(c2.label, sizeof(c2.label), "ShadowRig");
+        strncpy(c2.name_value, "ShadowRig",
+                sizeof(c2.name_value) - 1);
+        CHECK(led_execute(s, &c2) == LED_SUCCESS,
+              "shadow rig create");
+        CHECK(le_world_find_by_name(w, "ShadowRig", &rig2),
+              "shadow rig find");
+        {
+            led_command mv;
+
+            memset(&mv, 0, sizeof(mv));
+            mv.kind = LED_CMD_SET_POSITION;
+            mv.target = rig2;
+            mv.vec_value[0] = 0.0f;
+            mv.vec_value[1] = 4.0f;
+            mv.vec_value[2] = 9.0f;
+            CHECK(led_execute(s, &mv) == LED_SUCCESS,
+                  "shadow rig position");
+        }
+        memset(&c2, 0, sizeof(c2));
+        c2.kind = LED_CMD_CREATE;
+        snprintf(c2.label, sizeof(c2.label), "ShadowCam");
+        strncpy(c2.name_value, "ShadowCam",
+                sizeof(c2.name_value) - 1);
+        c2.parent = rig2;
+        c2.has_parent = 1;
+        CHECK(led_execute(s, &c2) == LED_SUCCESS,
+              "shadow cam create");
+        CHECK(le_world_find_by_name(w, "ShadowCam", &cam2),
+              "shadow cam find");
+        /* NOTE: led_scene_new does NOT clear selection/history, so
+         * the drop tail-lookup below keys off slot order, not
+         * selection. The camera child (higher slot) sorts AFTER
+         * later root drops — the ground/cube renames below must
+         * therefore find the newborn by exclusion (not the live
+         * tail). We snapshot the known-handle set before each
+         * drop and rename the handle that appears. */
+        CHECK(le_object_set_parent(w, &cam2, &rig2) ==
+                  LE_SUCCESS,
+              "shadow cam parent");
+        {
+            float yaw[4];
+            float pitch[4];
+            float q[4];
+            float x_axis[3] = { 1.0f, 0.0f, 0.0f };
+            float y_axis[3] = { 0.0f, 1.0f, 0.0f };
+
+            le_quat_from_axis_angle(y_axis, 0.0f, yaw);
+            le_quat_from_axis_angle(x_axis, -0.35f, pitch);
+            le_quat_multiply(yaw, pitch, q);
+            {
+                led_command rot;
+
+                memset(&rot, 0, sizeof(rot));
+                rot.kind = LED_CMD_SET_ROTATION;
+                snprintf(rot.label, sizeof(rot.label),
+                         "shadow rig aim");
+                rot.target = rig2;
+                memcpy(rot.vec_value, q, sizeof(q));
+                CHECK(led_execute(s, &rot) == LED_SUCCESS,
+                      "shadow rig aim");
+            }
+        }
+        {
+            le_camera_desc cd;
+
+            le_camera_desc_default(&cd);
+            CHECK(le_object_add_camera(w, &cam2, &cd) ==
+                      LE_SUCCESS,
+                  "shadow cam component");
+            le_world_set_active_camera(w, &cam2);
+        }
+        /* Sun: directional, slanted so the cube throws a long
+         * shadow across the ground. */
+        memset(&c2, 0, sizeof(c2));
+        c2.kind = LED_CMD_CREATE;
+        snprintf(c2.label, sizeof(c2.label), "ShadowSun");
+        strncpy(c2.name_value, "ShadowSun",
+                sizeof(c2.name_value) - 1);
+        CHECK(led_execute(s, &c2) == LED_SUCCESS,
+              "shadow sun create");
+        CHECK(le_world_find_by_name(w, "ShadowSun", &sun2),
+              "shadow sun find");
+        {
+            le_light_desc ld;
+            float yaw[4];
+            float pitch[4];
+            float q[4];
+            float x_axis[3] = { 1.0f, 0.0f, 0.0f };
+            float y_axis[3] = { 0.0f, 1.0f, 0.0f };
+
+            /* Slant ~35 deg off vertical, mostly +X: long
+             * shadow to -X across the ground. */
+            le_quat_from_axis_angle(y_axis, 0.6f, yaw);
+            le_quat_from_axis_angle(x_axis, -0.9f, pitch);
+            le_quat_multiply(yaw, pitch, q);
+            {
+                led_command rot;
+
+                memset(&rot, 0, sizeof(rot));
+                rot.kind = LED_CMD_SET_ROTATION;
+                snprintf(rot.label, sizeof(rot.label),
+                         "shadow sun slant");
+                rot.target = sun2;
+                memcpy(rot.vec_value, q, sizeof(q));
+                CHECK(led_execute(s, &rot) == LED_SUCCESS,
+                      "shadow sun slant");
+            }
+            memset(&ld, 0, sizeof(ld));
+            ld.type = LE_LIGHT_DIRECTIONAL;
+            ld.color[0] = ld.color[1] = ld.color[2] = 1.0f;
+            ld.intensity = 3.0f;
+            ld.shadow.enabled = 1;
+            ld.shadow.resolution = 1024;
+            CHECK(le_object_add_light(w, &sun2, &ld) ==
+                      LE_SUCCESS,
+                  "shadow sun light+shadow");
+        }
+        /* Ground: big static slab (renderable so the shadow has
+         * somewhere to land visibly). Newborn-by-exclusion: the
+         * drop selects the born object, so rename the SELECTION
+         * (slot-order tail is unreliable once parented objects
+         * exist — children sort after later roots). */
+        {
+            led_asset_record rec;
+            led_drag_payload pay;
+            float pos[3] = { 0.0f, -0.5f, 0.0f };
+
+            memset(&rec, 0, sizeof(rec));
+            CHECK(led_assetdb_find_by_path(s, "Assets/box.glb",
+                                           &rec),
+                  "shadow ground rec");
+            CHECK(led_browser_select(s, &rec.id) == LED_SUCCESS,
+                  "shadow ground select");
+            memset(&pay, 0, sizeof(pay));
+            CHECK(led_drag_begin(s, &pay),
+                  "shadow ground drag");
+            CHECK(led_drop_model_into_scene(s, &pay, pos),
+                  "shadow ground drop");
+            led_browser_clear_selection(s);
+        }
+        {
+            le_object sel = LE_OBJECT_INVALID;
+            uint32_t nsel = led_selection_get(s, &sel, 1);
+
+            CHECK(nsel == 1, "shadow ground selected");
+            {
+                led_command nm;
+                led_command sc;
+
+                memset(&nm, 0, sizeof(nm));
+                nm.kind = LED_CMD_SET_NAME;
+                snprintf(nm.label, sizeof(nm.label),
+                         "ShadowGround name");
+                nm.target = sel;
+                strncpy(nm.name_value, "ShadowGround",
+                        sizeof(nm.name_value) - 1);
+                CHECK(led_execute(s, &nm) == LED_SUCCESS,
+                      "shadow ground name");
+                memset(&sc, 0, sizeof(sc));
+                sc.kind = LED_CMD_SET_SCALE;
+                snprintf(sc.label, sizeof(sc.label),
+                         "ShadowGround scale");
+                sc.target = sel;
+                sc.vec_value[0] = 8.0f;
+                sc.vec_value[1] = 0.5f;
+                sc.vec_value[2] = 8.0f;
+                CHECK(led_execute(s, &sc) == LED_SUCCESS,
+                      "shadow ground scale");
+            }
+        }
+        CHECK(le_world_find_by_name(w, "ShadowGround", &gnd2),
+              "shadow ground find");
+        /* Caster: box.glb drop floating 1.5 m over the ground. */
+        {
+            led_asset_record rec;
+            led_drag_payload pay;
+            float pos[3] = { 0.0f, 1.5f, 0.0f };
+
+            memset(&rec, 0, sizeof(rec));
+            CHECK(led_assetdb_find_by_path(s, "Assets/box.glb",
+                                           &rec),
+                  "shadow cube rec");
+            CHECK(led_browser_select(s, &rec.id) == LED_SUCCESS,
+                  "shadow cube select");
+            memset(&pay, 0, sizeof(pay));
+            CHECK(led_drag_begin(s, &pay), "shadow cube drag");
+            CHECK(led_drop_model_into_scene(s, &pay, pos),
+                  "shadow cube drop");
+            led_browser_clear_selection(s);
+        }
+        {
+            le_object sel = LE_OBJECT_INVALID;
+            uint32_t nsel = led_selection_get(s, &sel, 1);
+
+            CHECK(nsel == 1, "shadow cube selected");
+            {
+                led_command nm;
+
+                memset(&nm, 0, sizeof(nm));
+                nm.kind = LED_CMD_SET_NAME;
+                snprintf(nm.label, sizeof(nm.label),
+                         "ShadowCube name");
+                nm.target = sel;
+                strncpy(nm.name_value, "ShadowCube",
+                        sizeof(nm.name_value) - 1);
+                CHECK(led_execute(s, &nm) == LED_SUCCESS,
+                      "shadow cube name");
+            }
+        }
+        CHECK(le_world_find_by_name(w, "ShadowCube", &cube2),
+              "shadow cube find");
+        (void)gnd2;
+        (void)cube2;
+    }
+
+    snprintf(p, sizeof(p), "%s/Scenes/Shadow.luma_scene", root);
+    CHECK(led_scene_save_as(s, p) == LED_SUCCESS,
+          "save Shadow");
+    {
+        led_result orc = led_scene_open(s, p);
+
+        CHECK(orc == LED_SUCCESS, "reopen Shadow");
+    }
+    printf("shadow objects: %u\n",
+           (unsigned)le_world_get_object_count(w));
+
+done:
     led_session_destroy(s);
     le_world_destroy(w);
     le_engine_destroy(e);

@@ -736,50 +736,121 @@ int led_drop_model_into_scene(led_session *session,
         if (!le_asset_is_alive(session->engine, &material)) {
             return 0;
         }
-        /* CREATE via normal command, then assign asset renderable
-         * through reflection-shaped command bytes. */
-        memset(&cmd, 0, sizeof(cmd));
-        cmd.kind = LED_CMD_CREATE;
-        snprintf(cmd.label, sizeof(cmd.label), "Drop model");
-        if (led_execute(session, &cmd) != LED_SUCCESS) {
-            return 0;
-        }
-        /* Find the newborn (tail) and attach the renderable. */
+        /* CREATE via normal command, then attach the asset
+         * renderable to the SELECTION the drop leaves behind is
+         * wrong — led_execute does not select. Instead snapshot
+         * the live set BEFORE the CREATE and take the census
+         * diff after (exact even with slot recycling and
+         * parented children, which sort with all live objects —
+         * a tail rule attaches the drop to a camera child once
+         * one exists: real defect R-008, found live in the
+         * Shadow scene). */
         {
-            uint32_t live = le_world_get_object_count(
+            uint32_t nbefore = le_world_get_object_count(
                 session->edit_world);
+            le_object *before = NULL;
 
-            if (live > 0) {
-                le_object *all = (le_object *)malloc(
-                    live * sizeof(*all));
+            if (nbefore > 0) {
+                before = (le_object *)malloc(
+                    nbefore * sizeof(*before));
+                if (before != NULL) {
+                    uint32_t gotb = le_world_get_all_objects(
+                        session->edit_world, before,
+                        nbefore);
 
-                if (all != NULL) {
-                    uint32_t got = le_world_get_all_objects(
-                        session->edit_world, all, live);
-
-                    if (got > 0) {
-                        le_object born = all[got - 1u];
-                        le_asset_renderable_desc d;
-
-                        free(all);
-                        memset(&d, 0, sizeof(d));
-                        d.mesh = r->runtime_asset;
-                        d.material = material;
-                        d.visible = 1;
-                        if (le_object_add_asset_renderable(
-                                session->edit_world, &born,
-                                &d) != LE_SUCCESS) {
-                            return 0;
-                        }
-                        if (position != NULL) {
-                            le_object_set_position(
-                                session->edit_world, &born,
-                                position);
-                        }
-                        led_selection_set(session, &born, 1);
-                        return 1;
+                    if (gotb != nbefore) {
+                        free(before);
+                        before = NULL;
+                        nbefore = 0;
                     }
-                    free(all);
+                }
+            }
+            memset(&cmd, 0, sizeof(cmd));
+            cmd.kind = LED_CMD_CREATE;
+            snprintf(cmd.label, sizeof(cmd.label),
+                     "Drop model");
+            if (led_execute(session, &cmd) != LED_SUCCESS) {
+                free(before);
+                return 0;
+            }
+            {
+                uint32_t live = le_world_get_object_count(
+                    session->edit_world);
+                le_object *all = NULL;
+                le_object born = LE_OBJECT_INVALID;
+                int found = 0;
+
+                if (live > 0) {
+                    all = (le_object *)malloc(
+                        live * sizeof(*all));
+                    if (all != NULL) {
+                        uint32_t got =
+                            le_world_get_all_objects(
+                                session->edit_world, all,
+                                live);
+                        uint32_t i;
+
+                        for (i = 0; i < got && !found;
+                             i++) {
+                            uint32_t j;
+                            int was_live = 0;
+
+                            for (j = 0;
+                                 j < nbefore &&
+                                 before != NULL;
+                                 j++) {
+                                if (all[i].index ==
+                                        before[j].index &&
+                                    all[i].generation ==
+                                        before[j]
+                                            .generation &&
+                                    all[i].world_tag ==
+                                        before[j]
+                                            .world_tag) {
+                                    was_live = 1;
+                                    break;
+                                }
+                            }
+                            if (!was_live) {
+                                born = all[i];
+                                found = 1;
+                            }
+                        }
+                        free(all);
+                    }
+                }
+                free(before);
+                if (!found) {
+                    return 0;
+                }
+                {
+                    le_asset_renderable_desc d;
+
+                    memset(&d, 0, sizeof(d));
+                    d.mesh = r->runtime_asset;
+                    d.material = material;
+                    /* Dropped models participate in shadows (opt-out
+                     * is per-object via the inspector, not the
+                     * drop default — a zeroed desc leaves every
+                     * GUI-authored scene shadowless even under a
+                     * shadow light: real defect R-009, found live
+                     * in the Shadow ON/OFF pair: identical pixels
+                     * with shadows enabled vs disabled). */
+                    d.casts_shadow = 1;
+                    d.receives_shadow = 1;
+                    d.visible = 1;
+                    if (le_object_add_asset_renderable(
+                            session->edit_world, &born,
+                            &d) != LE_SUCCESS) {
+                        return 0;
+                    }
+                    if (position != NULL) {
+                        le_object_set_position(
+                            session->edit_world, &born,
+                            position);
+                    }
+                    led_selection_set(session, &born, 1);
+                    return 1;
                 }
             }
         }

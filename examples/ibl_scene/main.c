@@ -10,7 +10,13 @@
  * (HDR + sky) -> render_output (exposure + ACES into the swapchain)
  * -> present.
  *
- * Usage: ibl_scene [--frames N]
+ * Usage: ibl_scene [--frames N] [--screenshot out.png]
+ *   [--exposure EV] [--tonemap none|aces] [--no-ibl]
+ *
+ * Pass-2 visual A/B controls (all renderer-public, observe-only):
+ * exposure EV shifts brightness pre-tonemap; tonemap selects the
+ * operator; --no-ibl detaches the environment (direct-light-free
+ * scene goes near-black, proving IBL contribution).
  */
 
 #include <stdio.h>
@@ -157,6 +163,10 @@ int main(int argc, char **argv) {
     unsigned long frame = 0;
     unsigned long max_frames = 0;
     const char *screenshot_path = NULL;
+    float exposure_ev = 0.0f;
+    int exposure_set = 0;
+    lr_tonemap_operator tonemap_op = LR_TONEMAP_ACES;
+    int no_ibl = 0;
     int exit_code = 1;
     int i;
 
@@ -165,9 +175,30 @@ int main(int argc, char **argv) {
             max_frames = (unsigned long)strtoul(argv[++i], NULL, 10);
         } else if (strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc) {
             screenshot_path = argv[++i];
+        } else if (strcmp(argv[i], "--exposure") == 0 && i + 1 < argc) {
+            exposure_ev = (float)strtod(argv[++i], NULL);
+            exposure_set = 1;
+        } else if (strcmp(argv[i], "--tonemap") == 0 && i + 1 < argc) {
+            const char *op = argv[++i];
+
+            if (strcmp(op, "none") == 0) {
+                tonemap_op = LR_TONEMAP_NONE;
+            } else if (strcmp(op, "aces") == 0) {
+                tonemap_op = LR_TONEMAP_ACES;
+            } else {
+                fprintf(stderr, "usage: ibl_scene [--frames N] "
+                                "[--screenshot out.png] "
+                                "[--exposure EV] "
+                                "[--tonemap none|aces] [--no-ibl]\n");
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--no-ibl") == 0) {
+            no_ibl = 1;
         } else {
             fprintf(stderr, "usage: ibl_scene [--frames N] "
-                            "[--screenshot out.png]\n");
+                            "[--screenshot out.png] "
+                            "[--exposure EV] "
+                            "[--tonemap none|aces] [--no-ibl]\n");
             return 1;
         }
     }
@@ -303,12 +334,21 @@ int main(int argc, char **argv) {
         edesc.rotation = 0.0f;
         CHECK_LR(lr_environment_create(renderer, &edesc, &env),
                  "lr_environment_create");
-        CHECK_LR(lr_renderer_set_environment(renderer, env),
-                 "lr_renderer_set_environment");
-        CHECK_LR(lr_renderer_set_exposure(renderer, 0.0f),
+        if (no_ibl) {
+            /* A/B control: build the environment (same cost path)
+             * but never attach it — the scene has no direct
+             * lights, so output must go near-black. */
+            CHECK_LR(lr_renderer_set_environment(renderer, NULL),
+                     "lr_renderer_set_environment(null)");
+        } else {
+            CHECK_LR(lr_renderer_set_environment(renderer, env),
+                     "lr_renderer_set_environment");
+        }
+        (void)exposure_set;
+        CHECK_LR(lr_renderer_set_exposure(renderer, exposure_ev),
                  "lr_renderer_set_exposure");
         CHECK_LR(lr_renderer_set_tonemap_operator(renderer,
-                                                  LR_TONEMAP_ACES),
+                                                  tonemap_op),
                  "lr_renderer_set_tonemap_operator");
     }
 
