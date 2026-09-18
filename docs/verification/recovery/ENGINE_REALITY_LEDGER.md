@@ -32,13 +32,15 @@ draws=4 tris=38`.
 | Commit `16afba6` Phase33V fixture | scene open FAILED (`LED_ERROR_PARSE`) on every machine incl. author's | — | stale v1 hexes match no import | BROKEN (fixture, not engine) — replaced |
 | Model drop into scene | `led_drop_model_into_scene` via real payload (Static/Dynamic/Mover/Npc drops in builder) | H-drop headed 114-suite | drops in reopened scene | LIVE PASS |
 | Directional light toggle | Game vs Game.nosun: viewbox diff 779/3268 px, mean R −34 (sun removal darkens) | covered in scene suites | `17-game-aimed.png` vs `19-game-nosun.png` | LIVE PASS |
-| Point light | PointLight (1.0,0.8,0.6, int 20, range 12) submits alongside sun (lights=2/2 in shadow_scene) | — | nosun shot still lit (point survives) | LIVE PASS |
-| Shadows | `shadow_scene` runs (shadow_passes=1, shadow_draws=3, lights=2/2); Game Sun carries `shadow 1` | test_shadow + test_shadow_vulkan PASS | stats (example has no --screenshot; differential proof queued) | LIVE PASS (stats) / PARTIAL (visual) |
-| PBR/materials | test_pbr_vulkan readback asserts: rough-vs-smooth, metal-vs-dielectric, emissive, occlusion, sRGB (20/20 PASS lines) | test_pbr + test_pbr_vulkan PASS | checker crates distinguishable in viewport | LIVE PASS |
-| IBL/environment | `ibl_scene --frames 5 --screenshot`: sky + env objects, 3258 unique colors, `ibl=1 sky=1 tonemap=2` | test_ibl + test_ibl_vulkan PASS | `12-ibl-repeat.png` | LIVE PASS |
-| Tonemapping | stats report tonemap=2 in IBL run | — | exposure control comparison NOT done | PARTIAL |
+| Point light | intensity-10x close light visibly warms crates (598/4141 px diff, red 255,8,38 cluster grows); small lateral moves at range 12 are sub-threshold in this dark scene (0 px) — honest sensitivity note, not a failure | — | `pass2/point-close.png` vs `pass2/point-left.png` | LIVE PASS (with noted sensitivity floor) |
+| Shadows | Shadow scene ON vs OFF: 16957/21931 px differ, OFF brighter +39 (cast shadow); caster-move + light-move differentials; reopen byte-identical | test_shadow + test_shadow_vulkan PASS (crescent + moving + bias legs) | `pass2/shadow-on.png` vs `pass2/shadow-off.png` | LIVE PASS |
+| Shadow mutation | — | MUT_COMPOSITE arm kills H-comp leg (verified in matrix); shadow-caster disarm proven live by R-009 ON/OFF-identical pair | R-009 pair | LIVE PASS (by live disarm + arm) |
+| PBR/materials | readbacks 20/20 + grid shot banked (`pass2/pbr-grid.png`); endurance camera orbits away by frame 500 so the banked frame is mostly clear — readback legs are the proof, grid framing is a known-weak capture | test_pbr + test_pbr_vulkan PASS | `pass2/pbr-grid.png` (weak framing, noted) | LIVE PASS (readbacks) / PARTIAL (framed grid capture) |
+| IBL/environment | IBL-off A/B: attached mean (172,147,131) → detached pure black (0,0,0, 1 color), stats `ibl=1→0 sky=1→0` | test_ibl + test_ibl_vulkan PASS | `pass2/tonemap-aces-ev0.png` vs `pass2/ibl-off.png` | LIVE PASS |
+| Tonemapping | `--exposure`/`--tonemap` A/B on HDR sky: EV0 mean (172,147,131) → EV+2 (236,226,218); NONE (173,139,102, 4017 colors) vs ACES (3258) | test_ibl_vulkan ACES-CPU + EV-monotonic legs PASS | `pass2/tonemap-*.png` | LIVE PASS (renderer-public path; NO editor/exposure UI exists — NOT IMPLEMENTED there, not broken) |
 | Scene graph/transforms | rig→camera parenting persists (`parent a4b9…`), positions/rotations round-trip byte-identical | test_scene PASS | scene text inspected | LIVE PASS |
-| Save/reload round-trip | open never mutates the scene file (diff empty); builder save→reopen `objects=11` | H-id headed legs | file diff | LIVE PASS |
+| Save/reload round-trip | open never mutates the scene file (diff empty); builder save→reopen `objects=11`; Shadow reopen byte-identical hash | H-id headed legs | file diff + hash | LIVE PASS |
+| Import-all convergence | clean launch: all 7 UNIMPORTED (fp match disk), `import-all: 7 ok` is CORRECT warmup; sidecars byte-stable across launches E/F | — | probe dump + sidecar diff | LIVE PASS (with CRLF-checkout footnote below) |
 | Components | renderable/script/character/collider/rigid_body/light/shadow/camera rows persist + instantiate | test_scene PASS | scene text | LIVE PASS |
 | Lua scripts | lua_scene live: 4 scripts tick, error_demo fails frame 3 while spin/move/orbit keep running | test_script + test_script_vulkan + animation/input/physics_script PASS | console error text | LIVE PASS |
 | Lua in Game | Mover.orbit + CharDrive W/S + Trig.on_trigger_enter attached via real drop path | — | attach PASS lines in builder log | LIVE PASS (attach) |
@@ -63,7 +65,68 @@ draws=4 tris=38`.
 | Clean Debug suite | 94/94 PASS (`build/recovery`, 75 s) | — | — | LIVE PASS |
 | Clean Release proofs | 8/8 targeted (headed, scene, physics, animation, script, shadow, pbr, ibl) | — | — | LIVE PASS |
 
-## Defects found live (recovery log)
+## Defects found live (recovery log, pass 2 appends R-008+)
+
+### R-008: model drop attached to the wrong object once a parented child exists (P1, FIXED)
+- Subsystem: editor drop path (`editor/src/project/browser.c`,
+  `led_drop_model_into_scene`).
+- How discovered: Shadow scene built via the builder staged
+  ShadowGround/ShadowCube drops AFTER the ShadowCam child
+  existed — the saved scene had the renderable + camera on ONE
+  object, the rig rotation on the cube, and two empty objects.
+- User-visible symptom: any GUI drag of a model into a scene
+  with a parented object (cameras always) lands the mesh on
+  the wrong object.
+- Root cause: newborn found by "live tail"
+  (`all[got-1u]`); children sort with all live objects, so the
+  camera child (higher slot) shadowed later root drops.
+- Regression: headed H-drop leg still passes (no-parent case);
+  needs a parented-child drop leg (queued).
+- Mutation sensitivity: n/a (new path mirrors the
+  census-diff discipline `led_execute` already uses).
+- Fix: snapshot the live set BEFORE the CREATE, take the
+  census diff after (exact under slot recycling).
+- Live re-verification: Shadow scene regenerates correct
+  (rig/cam/cube/ground/sun, `1 1 1` flags), reopens, renders.
+
+### R-009: dropped models opted out of shadows (P1, FIXED)
+- Subsystem: same drop path (desc defaults).
+- How discovered: Shadow ON vs OFF screenshots byte-identical
+  (0/21931 px) with a shadow light + `shadow 1` in the scene.
+- User-visible symptom: NO editor-assembled scene can ever
+  show cast shadows (every GUI drop zeroes the flags the
+  format documents as opt-in).
+- Root cause: zeroed `le_asset_renderable_desc` leaves
+  `casts_shadow=receives_shadow=0`; the renderer honors the
+  flags, so nothing submits to the shadow map.
+- Regression: shadow ON/OFF pair IS the regression
+  (`pass2/shadow-on.png` vs `pass2/shadow-off.png`:
+  16957/21931 px, OFF +39 brightness).
+- Mutation sensitivity: proven by the pre-fix identical pair
+  (disarmed pipeline) vs post-fix differential.
+- Fix: drops set `casts_shadow=receives_shadow=1` (opt-out
+  stays per-object via inspector).
+- Live re-verification: ON/OFF + caster-move + light-move +
+  reopen proofs, all green.
+
+### R-010 (withdrawn — CRLF checkout artifact, NOT an engine defect)
+- Symptom seen: `Game.luma_scene.luma` fingerprint flipped
+  `2778 b323…` → `2891 1cd9…` on every open; looked like the
+  R-007 loop persisting.
+- Investigation: working file is 2891 bytes / 113 CR pairs;
+  committed blob is 2778 bytes (113 = line count). FNV over
+  LF-normalized bytes = EXACTLY `b3236c164a2d37b1`.
+- Cause: `* text=auto` checks the scene out CRLF on Windows
+  while the committed sidecar fingerprints LF bytes. The scan
+  correctly reports drift; the "loop" is git inflating the
+  file under the engine, one flip per fresh checkout (stable
+  afterwards — launches E/F byte-identical).
+- Action: NO production change (the stashed scan-write was
+  reverted). Follow-up: `.gitattributes` LF pinning for
+  `*.luma_scene` (+ regen sidecars) so fingerprints are
+  checkout-stable. Queued, not done in this pass.
+- Lesson kept in the verdict: user-visible state must match
+  the bytes the engine actually hashed.
 
 ### R-001: dedup import path drops sub-asset key strings (P1, FIXED)
 - Subsystem: engine glTF bridge (`engine/src/gltf_bridge.c`).
@@ -176,17 +239,16 @@ draws=4 tris=38`.
   cracked R-004: `submitted=4 dead=0` proved the renderer was
   innocent and the camera guilty. Keep it as CI discipline.
 
-## What was NOT live-verified (honest gaps)
-- Shadow-map visual differential (stats green; no shadow
-  on/off screenshot pair — example lacks --screenshot).
-- Tonemap/exposure control comparison.
+## What was NOT live-verified (honest gaps, pass-2 update)
+- Framed PBR grid capture (readbacks green; banked frame
+  mis-framed by the orbiting endurance camera).
 - Prefab instantiate live in-editor (suites green only).
 - Character stairs/slope/platform traversal inside Game
   (platform suite green; not staged in the acceptance scene).
 - Animation crossfade inside Game (animation suites green).
-- Linux build + sanitizers (validation runs are Windows
-  Vulkan; Linux/sanitizer legs from the 95-step spec did not
-  run in this session).
+- `.gitattributes` LF pinning for scene files (R-010 follow-up).
+- Linux build + sanitizers (Windows Vulkan validation runs
+  only in this session).
 
 ## Verdict
 
