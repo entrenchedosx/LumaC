@@ -11,6 +11,19 @@ CMakeLists.txt text
 .gitignore text
 .gitattributes text
 
+# Luma serialized formats: deterministic byte hashes matter
+# (sidecar fingerprints hash LF bytes — see R-010/R-012 logs and
+# docs/verification/recovery/ENGINE_REALITY_LEDGER.md). Pin these
+# to LF on checkout so fingerprints are checkout-stable on
+# Windows (no CRLF inflation under the engine). Readers tolerate
+# LF + CRLF everywhere (scene/prefab parsers strip \r); writers
+# always emit LF (binary mode, "\n" joins).
+*.luma_scene text eol=lf
+*.luprefab text eol=lf
+*.luma text eol=lf
+*.luprefab.luma text eol=lf
+luma.project text eol=lf
+
 # Windows batch / PowerShell helpers stay CRLF-proof via text=auto above;
 # no binary classification needed (no binaries are versioned).
 *.png binary

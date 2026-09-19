@@ -885,8 +885,14 @@ static void le_submit_frame_contents(le_world *world, lr_renderer *renderer,
 }
 
 le_result le_world_render_scene(le_world *world,
-                                lc_command_encoder *encoder, uint32_t width,
-                                uint32_t height) {
+                                 lc_command_encoder *encoder, uint32_t width,
+                                 uint32_t height) {
+    return le_world_render_scene_with_camera(world, encoder, width, height, NULL);
+}
+
+le_result le_world_render_scene_with_camera(
+    le_world *world, lc_command_encoder *encoder, uint32_t width,
+    uint32_t height, const lr_camera *camera_override) {
     lr_renderer *renderer;
     lr_camera camera;
     lr_result lr;
@@ -905,7 +911,19 @@ le_result le_world_render_scene(le_world *world,
         return LE_ERROR_INVALID_ARGUMENT;
     }
     renderer = world->engine->renderer;
-    le_world_get_render_camera(world, width, height, &camera);
+    if (camera_override != NULL) {
+        /* R-013 editor orbit override: the edit viewport derives this camera from led_viewport_camera with the live panel extent. Validate the same way lr_renderer_begin does (garbage matrices rejected, not uploaded). */
+        if (!(camera_override->vertical_fov > 0.0f) ||
+            !(camera_override->vertical_fov < 3.14159265358979323846f) ||
+            !(camera_override->aspect_ratio > 0.0f) ||
+            !(camera_override->near_plane > 0.0f) ||
+            !(camera_override->far_plane > camera_override->near_plane)) {
+            return LE_ERROR_INVALID_ARGUMENT;
+        }
+        camera = *camera_override;
+    } else {
+        le_world_get_render_camera(world, width, height, &camera);
+    }
     lr = lr_renderer_begin(renderer, &camera);
     if (lr != LR_SUCCESS) {
         return LE_ERROR_RENDERER;

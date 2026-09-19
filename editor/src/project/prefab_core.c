@@ -2102,9 +2102,15 @@ led_result led_prefab_instantiate(led_session *session,
         }
     }
     /* Commit into the edit world (scene commit path: fresh
-     * handles, staged validation, rollback on failure). */
-    erc = le_scene_instantiate(session->edit_world, &scratch_scene,
-                               &committed);
+     * handles, staged validation, rollback on failure). R-015:
+     * remap IDs — every instance mints fresh persistent IDs so
+     * two instances never share local IDs (whole-world capture
+     * would emit DUPLICATE_ID and break play/save). The published
+     * local->runtime map still carries the PAYLOAD IDs verbatim
+     * (le_scene_instantiate_remap contract). */
+    erc = le_scene_instantiate_remap(session->edit_world,
+                                     &scratch_scene, &committed,
+                                     1);
     le_asset_unload(session->engine, &scratch_scene);
     if (erc != LE_SUCCESS) {
         le_scene_instance_free(&committed);

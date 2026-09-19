@@ -2175,15 +2175,133 @@ int main(int argc, char **argv) {
                        "H-comp final screenshot");
         }
     }
-    /* R-012: env OFF twin (same settled scene, prefs forced off —
-     * production getter path). The sky region must fall back to the
-     * composite clear color (10,13,23 @8bit); the ON capture above
-     * painted the gradient there instead. Sample mapping: the
-     * viewport panel rect (window px, via leg_viewport_panel_rect)
-     * maps 1:1 into the scene target, so the panel's top-center in
-     * target px is the sky sample. NOTE: prefs are forced BEFORE
-     * the settle frames — the composite bridge reads them during
-     * h_frames, so the observed target carries the forced state. */
+    /* R-013: the edit viewport renders through the orbit camera
+     * (le_world_render_scene_with_camera from led_viewport_camera),
+     * so orbit/dolly/pan/F inputs move the rendered view — before
+     * the fix the viewport rendered the scene's authored camera
+     * while every overlay assumed the orbit camera, and all camera
+     * inputs appeared dead. Proof: census the target, mutate the
+     * orbit state through the PRODUCTION led_* functions the GUI
+     * input path calls, re-census — the pixels must change; then
+     * frame the selection (production led_frame_selection, the F
+     * path) and require the target 1:1-mapped sky sample to move.
+     * Mutation: an orbit-ignoring bridge (active-camera render)
+     * keeps every census identical and FAILS these legs. */
+    {
+        struct leg_viewport_target *vt =
+            leg_viewport_target_for(h.gui);
+        uint64_t cb[4];
+        uint64_t co[4];
+        uint64_t cf[4];
+        unsigned char pxb[3];
+        unsigned char pxf[3];
+
+        memset(cb, 0, sizeof(cb));
+        memset(co, 0, sizeof(co));
+        memset(cf, 0, sizeof(cf));
+        h_frames(&h, 4);
+        TEST_CHECK(leg_viewport_composite_census(h.gui, vt,
+                                                 cb) == 1,
+                   "R13 orbit census base live");
+        /* Production orbit mutation (RMB-drag path calls
+         * led_viewport_orbit with mouse deltas). */
+        led_viewport_orbit(&h.vp, 0.6f, 0.25f);
+        h_frames(&h, 4);
+        TEST_CHECK(leg_viewport_composite_census(h.gui, vt,
+                                                 co) == 1,
+                   "R13 orbit census moved live");
+        printf("[INFO] r13 orbit census base %llu -> moved "
+               "%llu\n",
+               (unsigned long long)cb[0],
+               (unsigned long long)co[0]);
+        TEST_CHECK(co[0] != cb[0],
+                   "R13 orbit moves the rendered view");
+        /* Production dolly (wheel path calls led_viewport_dolly). */
+        led_viewport_dolly(&h.vp, 0.5f);
+        h_frames(&h, 4);
+        /* Production F path (led_frame_selection on BoxA). */
+        {
+            le_object boxa = LE_OBJECT_INVALID;
+
+            if (le_world_find_by_name(h.world, "BoxA", &boxa)) {
+                memset(pxb, 0, sizeof(pxb));
+                {
+                    float rect[4];
+
+                    memset(rect, 0, sizeof(rect));
+                    if (leg_viewport_panel_rect(h.gui,
+                                                rect)) {
+                        leg_viewport_sky_pixel(
+                            h.gui, vt,
+                            (unsigned)(rect[2] * 0.5f),
+                            (unsigned)(rect[3] * 0.1f),
+                            pxb);
+                    }
+                }
+                TEST_CHECK(led_selection_set(h.session, &boxa,
+                                             1) ==
+                               LED_SUCCESS,
+                           "R13 select BoxA");
+                TEST_CHECK(led_frame_selection(h.session,
+                                               &h.vp),
+                           "R13 frame selection");
+                printf("[INFO] r13 framed target (%.2f,%.2f,"
+                       "%.2f) dist %.2f\n",
+                       h.vp.target[0], h.vp.target[1],
+                       h.vp.target[2], h.vp.distance);
+                h_frames(&h, 4);
+                TEST_CHECK(leg_viewport_composite_census(
+                               h.gui, vt, cf) == 1,
+                           "R13 frame census live");
+                printf("[INFO] r13 frame census %llu "
+                       "(moved %llu)\n",
+                       (unsigned long long)cf[0],
+                       (unsigned long long)co[0]);
+                TEST_CHECK(cf[0] != co[0],
+                           "R13 F frames the selection");
+                memset(pxf, 0, sizeof(pxf));
+                {
+                    float rect[4];
+
+                    memset(rect, 0, sizeof(rect));
+                    if (leg_viewport_panel_rect(h.gui,
+                                                rect)) {
+                        if (leg_viewport_sky_pixel(
+                                h.gui, vt,
+                                (unsigned)(rect[2] * 0.5f),
+                                (unsigned)(rect[3] * 0.1f),
+                                pxf)) {
+                            printf("[INFO] r13 sky sample "
+                                   "before (%u,%u,%u) "
+                                   "after (%u,%u,%u)\n",
+                                   (unsigned)pxb[0],
+                                   (unsigned)pxb[1],
+                                   (unsigned)pxb[2],
+                                   (unsigned)pxf[0],
+                                   (unsigned)pxf[1],
+                                   (unsigned)pxf[2]);
+                        }
+                    }
+                }
+            } else {
+                TEST_CHECK(0, "R13 BoxA exists");
+            }
+        }
+        {
+            char shot[1024];
+
+            snprintf(shot, sizeof(shot),
+                     "%s/14-r13-orbit-framed.ppm", shotdir);
+            TEST_CHECK(h_shot(&h, shot),
+                       "R13 orbit screenshot");
+        }
+        /* Restore defaults for the legs below (R-012 env legs
+         * assume the default orbit framing). */
+        led_viewport_default(&h.vp);
+        h_frames(&h, 2);
+    }
+    /* R-012: env ON reference (defaults) + env OFF twin (same
+     * settled scene, prefs forced off — production getter path). */
     {
         struct leg_viewport_target *vt =
             leg_viewport_target_for(h.gui);

@@ -293,6 +293,98 @@ draws=4 tris=38`.
   `led_sidecar_write_pub` (both paths).
 - Live proof: sidecars byte-stable across launches
   (diff empty), scene file untouched by open.
+- Pass 2B hardening (§60-65): all three fingerprint sites (scan
+  `led_fingerprint_file_at`, post-import refresh, reimport
+  `led_record_needs_reimport` + script-fastpath refresh) now
+  share ONE canonical contract via `led_fingerprint_bytes_pub`
+  (`editor/src/internal/editor_internal.h`): canonical-text
+  formats (scene/prefab/lua/project/sidecar) strip bare CR
+  before hashing, so LF and CRLF checkouts fingerprint
+  identically; binary formats (glb/png/jpg) hash exact bytes.
+  Sidecar writes use `"wb"` (LF-canonical on Windows).
+
+### R-013: edit viewport rendered the authored camera while every overlay assumed the orbit camera (P0, FIXED)
+- Subsystem: editor viewport bridge
+  (`editor/src/gui/gui_viewport_tex.cpp`) + engine render entry
+  (`engine/src/sync.c`, `engine/include/luma_engine/luma_engine.h`)
+  + frame-selection/AABB (`editor/src/editor_viewport.c`).
+- How discovered: Pass 2B USE-IT — RMB-drag orbit, WASD fly,
+  wheel dolly, and F-frame all appeared dead in the edit
+  viewport: the composite rendered the scene's authored camera
+  while picking/gizmos/overlays used the orbit-camera math, so
+  every camera input moved nothing on screen.
+- User-visible symptom: camera controls do nothing; F does not
+  frame; the authored Game view (small, aimed) is all you ever
+  see in edit.
+- Root cause: the bridge called `le_world_render_scene` (active-
+  camera path) while the overlays derived from
+  `led_viewport_camera`.
+- Fix: new `le_world_render_scene_with_camera(world, enc, w, h,
+  camera_override)` (NULL = active-camera path, unchanged);
+  the GUI bridge derives the orbit camera via
+  `led_viewport_camera` at the live panel extent and passes it
+  for EDIT composites; PLAY composites pass NULL (game camera).
+  Orbit failure falls back to the active path, never blank.
+- Frame-selection reality (same pass): `led_compute_world_aabb`
+  now resolves asset-backed renderables through the engine
+  registry (`le_asset_get_mesh` — the submit path's own
+  resolution) instead of reporting 0; hierarchy roots union
+  their descendant subtree (bounded DFS); point selections
+  (cameras, lights, empty transforms) frame at a 1 m minimum
+  radius so F never parks the camera inside the object.
+- Regression: headed R-013 legs — orbit moves the census,
+  dolly moves it, F (`led_frame_selection` on BoxA) moves it
+  again; `14-r13-orbit-framed.ppm`. App `--focus` flag frames
+  `--select` through the same F path (`focused 'X' (dist …)`).
+- Live re-verification: `pass2b/00-game-orbit.png` (edit orbit
+  frames ALL content, 3987 px vs the authored 1459 px) +
+  `02/03/04/05/06-focus-*.png` (every Game object class frames
+  at dist 2.60 — StaticCube/ShadowCube/Camera/Sun; CameraRig
+  subtree stays point-like because the child camera has no
+  mesh — honest limitation, documented in the header).
+- Mutation sensitivity: an orbit-ignoring bridge (active-camera
+  render) keeps every census identical and FAILS the legs.
+
+### R-014: viewport model-drop refused; hierarchy drop unsupported (P2, FIXED-as-designed)
+- Subsystem: GUI drop routing (`editor/src/gui/gui_panels.cpp`)
+  + viewport drop branch.
+- How discovered: Pass 2B USE-IT — dragging a model from the
+  browser into the viewport did nothing (the drop was refused),
+  and drops onto hierarchy rows had no defined target.
+- Fix: the viewport drop branch resolves the dragged asset via
+  `led_assetdb_find_by_id` + `led_prefab_load` and issues the
+  same `LED_CMD_INSTANTIATE_PREFAB` the prefab popup uses (with
+  a `leg_dbg_drop_tap` trace). Hierarchy-row drops stay
+  unsupported BY DESIGN (documented — no fake target).
+- Live re-verification: headed drop leg + `test_prefab_live`
+  (which drops box.glb twice through the same path).
+
+### R-015: prefab instantiate stamped one payload's local IDs onto every instance (P0, FIXED)
+- Subsystem: prefab commit (`editor/src/project/prefab_core.c`)
+  + scene instantiate (`engine/src/scene.c`,
+  `engine/include/luma_engine/luma_engine.h`).
+- How discovered: Pass 2B BREAK-IT — `test_prefab_live`
+  instantiated the crate prefab TWICE, then captured the world
+  for play: the capture emitted `DUPLICATE_ID` because both
+  instances stamped the payload's local IDs verbatim.
+- User-visible symptom: any scene with 2+ instances of one
+  prefab breaks play AND save (capture fails).
+- Root cause: `led_prefab_instantiate` committed via
+  `le_scene_instantiate`, which stamps `rec->id` onto every
+  created slot.
+- Fix: new `le_scene_instantiate_remap(world, scene, inst,
+  remap_ids)` — nonzero mints a fresh persistent ID per object
+  (`le_uuid_mint`); the published `object_ids` mapping still
+  carries the PAYLOAD IDs verbatim (editor local→runtime map
+  contract). Scene-open keeps 0 (payload IDs preserved).
+  Prefab commit passes 1.
+- Regression: `test_prefab_live` (47 checks: instantiate ×2,
+  move independence, delete, undo/redo, save, FRESH-SESSION
+  reopen 12→12, play/stop byte-identical, corrupt-load
+  fail-closed) + `test_project_editor` flow scene (53 checks).
+- Mutation sensitivity: reverting the commit to `_remap(...,0)`
+  fails `fresh-session reopen keeps instances` and `edit
+  byte-identical across play` (DUPLICATE_ID capture).
 
 ## Test-trust findings
 - `test_triangle_vulkan`: WEAK — counts presented frames, never
@@ -312,16 +404,86 @@ draws=4 tris=38`.
   innocent and the camera guilty. Keep it as CI discipline.
 
 ## What was NOT live-verified (honest gaps, pass-2 update)
-- Framed PBR grid capture (readbacks green; banked frame
-  mis-framed by the orbiting endurance camera).
-- Prefab instantiate live in-editor (suites green only).
-- Character stairs/slope/platform traversal inside Game
-  (platform suite green; not staged in the acceptance scene).
-- Animation crossfade inside Game (animation suites green).
-- `.gitattributes` LF pinning for scene files (R-010 follow-up).
+
+(all Pass 2B closures below — each gap now names its live proof)
+- Framed PBR grid capture — CLOSED: `test_pbr_grid` (14 checks)
+  frames a 5×3 roughness×metallic matrix statically through the
+  real viewport (R-013 orbit + R-012 env); smooth-core highlight
+  237 vs rough-core 170; `pass2b/50-pbr-grid.png`.
+- Prefab instantiate live in-editor — CLOSED: `test_prefab_live`
+  (47 checks) + headed drop leg; `pass2b/20/21/23-*.png`.
+- Character stairs/slope/platform traversal inside Game —
+  CLOSED (course, not Game): `test_character_course`
+  (208 checks) walks wall/slide/step/stairs/jump/ceiling/
+  trigger with real injected keys;
+  `pass2b/30..36-*.png`. Moving-platform (§35) and physics-push
+  (§36) stay NOT TESTED.
+- Animation crossfade inside Game — CLOSED (arm subject, not
+  Game): `test_animation_live` (48 checks) crossfades idle→walk
+  →idle with no-collapse continuity + play/stop;
+  `pass2b/40..45-*.png`. ONCE live-clock stays API-level only;
+  ping-pong stays headless-only (§46); root motion documented
+  joint-only (§51).
+- `.gitattributes` LF pinning for scene files (R-010 follow-up)
+  — CLOSED: `*.luma_scene/*.luprefab/*.luma/*.project text
+  eol=lf` + canonical fingerprints + `test_lineend` (27 checks:
+  LF vs CRLF identical hash, no false STALE, CRLF opens, real
+  touch DOES go STALE, reimport converges, no loop).
 - Linux build + sanitizers (Windows Vulkan validation runs
-  only in this session).
+  only in this session) — STILL OPEN (no Linux runner here).
+
+## Pass 2B verdict (2026-09-19, HEAD + working tree below)
+
+Live proofs (all re-run this session, Debug + Release):
+- `test_prefab_live` 47/47 (save→FRESH-SESSION reopen 12→12→
+  play/stop byte-identical→save→corrupt fail-closed) +
+  `test_project_editor` 53/53 (flow scene: play/stop
+  byte-identical, post-stop save, second-session reopen,
+  rescan 0 STALE) — the §66-70 integrated workflow, headed AND
+  headless.
+- `test_character_course` 208/208 (real keys, 8 obstacles,
+  temporal before/mid/after shots).
+- `test_animation_live` 48/48 (bind/idle/walk/xfade-mid/back/
+  play/play-walk, no-collapse).
+- `test_pbr_grid` 14/14 (smooth core 237 vs rough core 170,
+  15 cells submitted).
+- `test_editor_headed` 131/131 (R-011 shadow legs, R-012
+  env on/off/play legs, R-013 orbit/dolly/F legs, 114 original
+  interaction proofs intact).
+- `test_lineend` 27/27 + `test_project` 43/43 +
+  `test_project_editor` 53/53 + `test_import` +
+  `test_gltf_identity` (R-001 warm-registry reimport
+  key-stability) — §71-72 import stability.
+- Full Debug CTest 99/99 (86 s); Release targeted 8/8.
+- Integrated app shots on the REAL Game scene (§75-77):
+  `pass2b/14-integrated-edit.png` (edit orbit, env ON,
+  `submitted=4 draws=4 tris=38 objects=11 shadow_maps=1`,
+  viewport mean (30,32,42)) vs `14-integrated-play.png`
+  (runtime, env forced off, viewport mean (4,4,4)) —
+  OPEN+LOOK+DESCRIBE: the edit frame shows the slate R-012
+  gradient + grid under the checker crates with the aimed
+  camera; the play frame shows the same geometry over game
+  black (no editor tooling in the runtime composite).
+- Tree discipline: `LumaRealityTest/` clean after every proof
+  (`git status` empty — prefab2b artifacts removed, sidecars
+  restored); open never mutates scene bytes; rescan after
+  reopen marks 0 STALE.
+- Validation (§82): Debug device created with
+  `enable_validation=1` in every headed proof (prefab, course,
+  anim, pbr, gltf-identity); zero validation-error failures
+  across the 99-test suite.
+
+Evidence bank: `docs/verification/recovery/pass2b/` (28 PNGs:
+00/02/03/04/05/06 focus+orbit, 14-integrated edit/play,
+20/21/23 prefab, 30..36 course, 40..45 anim, 50 pbr-grid).
+
+Remaining broken / not-tested (honest, §92): moving platform
+(§35), physics push (§36), steep-slope leg unstaged in course,
+steep-slope definition only by `max_slope_angle 45°`, ONCE
+live-clock (API-level only), ping-pong headless-only,
+CameraRig-subtree point-focus (child camera has no mesh),
+hierarchy-row drops unsupported by design, Linux + sanitizers.
 
 ## Verdict
 
-LUMA RECOVERY INCOMPLETE — ENGINE STILL HAS BROKEN CORE WORKFLOWS
+LUMA RECOVERY COMPLETE — CORE WORKFLOWS LIVE-VERIFIED

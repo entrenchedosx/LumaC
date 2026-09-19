@@ -309,9 +309,12 @@ int main(void) {
                    "source hero survives redo");
     }
 
-    /* End-to-end: save the prefab-instance scene to
-     * Scenes/flow.luma_scene, reopen in a second session over a
-     * second engine, verify the object count round-trips. */
+    /* End-to-end (§66-70 integrated save→play→stop→save→
+     * reopen): save the prefab-instance scene to
+     * Scenes/flow.luma_scene, play/stop FIRST (edit must be
+     * byte-identical), save AGAIN post-stop, reopen in a second
+     * session over a second engine, verify the object count
+     * round-trips AND a rescan marks nothing STALE (no churn). */
     {
         char flow_abs[2048];
 
@@ -319,6 +322,42 @@ int main(void) {
                  "%s/Scenes/flow.luma_scene", root);
         TEST_CHECK(led_scene_save_as(s, flow_abs) == LED_SUCCESS,
                    "save flow scene");
+        /* play/stop with the instance live, then save again. */
+        {
+            char *before = NULL;
+            char *after = NULL;
+            size_t bsize = 0;
+            size_t asize = 0;
+
+            before = capture_canonical(e, w, &bsize);
+            TEST_CHECK(before != NULL,
+                       "capture before play (flow)");
+            TEST_CHECK(led_play_enter(s) == LED_SUCCESS,
+                       "play flow scene");
+            TEST_CHECK(led_play_tick(s, 1.0f / 60.0f) ==
+                           LED_SUCCESS,
+                       "tick flow scene");
+            TEST_CHECK(led_play_tick(s, 1.0f / 60.0f) ==
+                           LED_SUCCESS,
+                       "tick flow scene 2");
+            TEST_CHECK(led_play_exit(s) == LED_SUCCESS,
+                       "stop flow scene");
+            after = capture_canonical(e, w, &asize);
+            TEST_CHECK(after != NULL,
+                       "capture after stop (flow)");
+            TEST_CHECK(bsize == asize &&
+                           strcmp(before, after) == 0,
+                       "edit byte-identical across "
+                       "play/stop (flow)");
+            if (before != NULL) {
+                le_scene_free_text(before);
+            }
+            if (after != NULL) {
+                le_scene_free_text(after);
+            }
+        }
+        TEST_CHECK(led_scene_save_as(s, flow_abs) == LED_SUCCESS,
+                   "save flow scene post-stop");
         {
             led_session *s2 = NULL;
             le_engine *e2 = NULL;
@@ -327,11 +366,27 @@ int main(void) {
 
             TEST_CHECK(make_session(&s2, &e2, &w2),
                        "make session 2");
+            TEST_CHECK(led_project_open(s2, root) ==
+                           LED_SUCCESS,
+                       "open project 2 (same root)");
             TEST_CHECK(led_scene_open(s2, flow_abs) ==
                            LED_SUCCESS,
                        "reopen flow scene");
             TEST_CHECK(le_world_get_object_count(w2) == n1,
                        "object count round-trips");
+            /* No-churn: a rescan in the fresh session marks
+             * nothing STALE (fingerprints match what the save
+             * wrote — the R-007/R-010 loop stays dead). */
+            {
+                led_scan_stats st;
+
+                memset(&st, 0, sizeof(st));
+                TEST_CHECK(led_project_scan(s2, &st) ==
+                               LED_SUCCESS,
+                           "rescan reopened project");
+                TEST_CHECK(st.stale_marked == 0,
+                           "reopened project scan clean");
+            }
             kill_session(s2, e2, w2);
         }
     }

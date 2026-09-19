@@ -671,29 +671,19 @@ led_result led_import_one_record(led_session *session,
              * sidecar kept the stale fingerprint and the NEXT open
              * marked the record STALE again (import-all every
              * launch, forever). Fingerprint the import source (abs)
-             * here so sidecar == bytes imported. */
+             * here so sidecar == bytes imported. Pass 2B §60-65:
+             * canonical-text types (scene/prefab/lua/project/
+             * sidecar) hash CANONICAL bytes (bare CR stripped) so
+             * LF vs CRLF checkouts fingerprint identically —
+             * mirror led_fingerprint_file_at in asset_db.c. */
             {
-                FILE *ff = fopen(abs, "rb");
+                uint64_t fsz = 0;
+                uint64_t fhh = 0;
 
-                if (ff != NULL) {
-                    unsigned char fbuf[4096];
-                    size_t nn = 0;
-                    uint64_t hh = 14695981039346656037ull;
-                    uint64_t sz = 0;
-
-                    while ((nn = fread(fbuf, 1, sizeof(fbuf),
-                                       ff)) > 0) {
-                        size_t zi = 0;
-
-                        for (zi = 0; zi < nn; zi++) {
-                            hh ^= (uint64_t)fbuf[zi];
-                            hh *= 1099511628211ull;
-                        }
-                        sz += (uint64_t)nn;
-                    }
-                    fclose(ff);
-                    r->fp_size = sz;
-                    r->fp_hash = hh;
+                if (led_fingerprint_bytes_pub(
+                        abs, r->source_path, &fsz, &fhh)) {
+                    r->fp_size = fsz;
+                    r->fp_hash = fhh;
                 }
             }
             led_sidecar_write_pub(p, r);

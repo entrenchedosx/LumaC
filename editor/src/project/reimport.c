@@ -30,33 +30,19 @@ static int led_record_needs_reimport(led_project *p,
     char abs[2048];
     uint64_t fsize = 0;
     uint64_t fhash = 0;
-    FILE *f = NULL;
-    unsigned char buf[4096];
-    size_t n = 0;
-    uint64_t h = 14695981039346656037ull;
-    uint64_t size = 0;
 
     if (strlen(p->root) + 1 + strlen(r->source_path) + 1 >
         sizeof(abs)) {
         return 1; /* treat as changed (safe direction) */
     }
     snprintf(abs, sizeof(abs), "%s/%s", p->root, r->source_path);
-    f = fopen(abs, "rb");
-    if (f == NULL) {
-        return 0; /* missing is not stale (scan marks MISSING) */
+    /* Pass 2B §60-65: canonical fingerprint (LF vs CRLF checkouts
+     * compare identically); missing is not stale (scan marks
+     * MISSING). */
+    if (!led_fingerprint_bytes_pub(abs, r->source_path, &fsize,
+                                   &fhash)) {
+        return 0;
     }
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-        size_t i;
-
-        for (i = 0; i < n; i++) {
-            h ^= (uint64_t)buf[i];
-            h *= 1099511628211ull;
-        }
-        size += (uint64_t)n;
-    }
-    fclose(f);
-    fsize = size;
-    fhash = h;
     if (fsize != r->fp_size || fhash != r->fp_hash) {
         return 1;
     }
@@ -225,33 +211,21 @@ led_result led_reimport_asset(led_session *session,
                      * launch reimported every edited script and
                      * (worse) the scene refs resolved against a
                      * registry the app's import-all then rebuilt
-                     * in a different order. Persist here. */
+                     * in a different order. Persist here. Pass 2B
+                     * §60-65: canonical fingerprint (LF vs CRLF
+                     * checkouts compare identically). */
                     {
                         char abs2[2048];
-                        FILE *ff = NULL;
-                        unsigned char fbuf[4096];
-                        size_t nn = 0;
-                        uint64_t hh = 14695981039346656037ull;
-                        uint64_t sz = 0;
+                        uint64_t fsz = 0;
+                        uint64_t fhh = 0;
 
                         snprintf(abs2, sizeof(abs2), "%s/%s",
                                  p->root, r->source_path);
-                        ff = fopen(abs2, "rb");
-                        if (ff != NULL) {
-                            while ((nn = fread(fbuf, 1,
-                                               sizeof(fbuf),
-                                               ff)) > 0) {
-                                size_t zi;
-
-                                for (zi = 0; zi < nn; zi++) {
-                                    hh ^= (uint64_t)fbuf[zi];
-                                    hh *= 1099511628211ull;
-                                }
-                                sz += (uint64_t)nn;
-                            }
-                            fclose(ff);
-                            r->fp_size = sz;
-                            r->fp_hash = hh;
+                        if (led_fingerprint_bytes_pub(
+                                abs2, r->source_path, &fsz,
+                                &fhh)) {
+                            r->fp_size = fsz;
+                            r->fp_hash = fhh;
                             led_sidecar_write_pub(p, r);
                         }
                     }

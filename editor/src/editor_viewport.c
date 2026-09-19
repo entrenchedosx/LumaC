@@ -408,15 +408,29 @@ int led_compute_world_aabb(led_session *session,
     if (!le_object_is_alive(w, object)) {
         return 0;
     }
-    /* Asset-backed renderables: persistent IDs are not renderer
-     * pointers — never guessed. */
+    /* Asset-backed renderables resolve through the engine registry
+     * (le_asset_get_mesh — the same resolution the submit path
+     * uses). R-013: every Game/Shadow scene object is asset-backed,
+     * so the old "never guessed" early-out made F fall back to a
+     * zero-size point box for ALL real content (Game framed at
+     * dist 0.87, Shadow at 0.52 — inside the geometry). Unready
+     * assets still report 0 (never guessed). */
     {
-        le_object_info2 info;
+        le_asset_renderable_desc ad;
+        lr_mesh *amesh = NULL;
 
-        memset(&info, 0, sizeof(info));
-        le_object_get_info2(w, object, &info);
-        if (info.has_asset_renderable) {
-            return 0;
+        memset(&ad, 0, sizeof(ad));
+        if (le_object_get_asset_renderable(w, object, &ad)) {
+            if (session->engine != NULL) {
+                amesh = le_asset_get_mesh(session->engine,
+                                          &ad.mesh);
+            }
+            if (amesh == NULL) {
+                return 0;
+            }
+            lr_mesh_get_bounds(amesh, &b);
+            le_object_get_world_matrix(w, object, m);
+            goto corners;
         }
     }
     if (!le_object_get_renderable(w, object, &d)) {
@@ -427,6 +441,7 @@ int led_compute_world_aabb(led_session *session,
     }
     lr_mesh_get_bounds(d.mesh, &b);
     le_object_get_world_matrix(w, object, m);
+corners:
     /* 8 corners of the local AABB through the world matrix. */
     for (i = 0; i < 8; i++) {
         float x = (i & 1) ? b.max[0] : b.min[0];
@@ -496,25 +511,88 @@ int led_selection_aabb(led_session *session, float out_min[3],
             }
             any = 1;
         } else {
-            /* Fall back to the object position for non-mesh
-             * selection members. */
-            float p[3];
+            /* R-013: hierarchy roots have no mesh of their own —
+             * union the descendant subtree bounds (bounded DFS:
+             * 4096 descendants, 256-child chunks, cycle-safe via
+             * the engine's own child lists). A rig framing only
+             * its own point would park the camera at an empty
+             * location; the subtree bounds frame the actual
+             * content (CameraRig → Camera). Members that still
+             * have no bounds fall back to their position. */
+            le_object stack[256];
+            uint32_t top = 0;
+            uint32_t walked = 0;
+            int sub_any = 0;
 
-            le_object_get_position(session->edit_world,
-                                   &session->selection[i], p);
-            {
-                int a;
+            stack[top++] = session->selection[i];
+            while (top > 0 && walked < 4096) {
+                le_object cur = stack[--top];
+                uint32_t cc = le_object_get_child_count(
+                    session->edit_world, &cur);
+                le_object kids[256];
+                uint32_t total = 0;
+                uint32_t k = 0;
+                uint32_t got = 0;
 
-                for (a = 0; a < 3; a++) {
-                    if (p[a] < mn[a]) {
-                        mn[a] = p[a];
+                walked++;
+                if (cc == 0 || cc > 4096) {
+                    continue;
+                }
+                if (le_object_get_children(session->edit_world,
+                                           &cur, kids, 256,
+                                           &total) != LE_SUCCESS) {
+                    continue;
+                }
+                got = (total < 256) ? total : 256;
+                for (k = 0; k < got; k++) {
+                    float kmn[3];
+                    float kmx[3];
+                    int a;
+
+                    if (!le_object_is_alive(
+                            session->edit_world, &kids[k])) {
+                        continue;
                     }
-                    if (p[a] > mx[a]) {
-                        mx[a] = p[a];
+                    if (led_compute_world_aabb(session,
+                                               &kids[k], kmn,
+                                               kmx)) {
+                        for (a = 0; a < 3; a++) {
+                            if (kmn[a] < mn[a]) {
+                                mn[a] = kmn[a];
+                            }
+                            if (kmx[a] > mx[a]) {
+                                mx[a] = kmx[a];
+                            }
+                        }
+                        any = 1;
+                        sub_any = 1;
+                    }
+                    if (top < 256) {
+                        stack[top++] = kids[k];
                     }
                 }
             }
-            any = 1;
+            if (!sub_any) {
+                /* Fall back to the object position for non-mesh
+                 * selection members. */
+                float p[3];
+
+                le_object_get_position(session->edit_world,
+                                       &session->selection[i], p);
+                {
+                    int a;
+
+                    for (a = 0; a < 3; a++) {
+                        if (p[a] < mn[a]) {
+                            mn[a] = p[a];
+                        }
+                        if (p[a] > mx[a]) {
+                            mx[a] = p[a];
+                        }
+                    }
+                }
+                any = 1;
+            }
         }
     }
     if (!any) {
@@ -591,6 +669,15 @@ int led_frame_selection(led_session *session,
     d[1] = mx[1] - mn[1];
     d[2] = mx[2] - mn[2];
     radius = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) * 0.5f;
+    /* R-013: degenerate (point) selections — position-only members
+     * (cameras, lights, empty transforms) union to a zero-size box.
+     * A zero radius would park the camera ON the point (inside the
+     * object / near-plane clip). Floor the radius at 1 m so F on a
+     * camera/light/empty frames its neighborhood at a useful
+     * working distance instead of ending inside it. */
+    if (!(radius >= 1.0f)) {
+        radius = 1.0f;
+    }
     memcpy(viewport->target, center, sizeof(center));
     {
         float half_fov = viewport->fov_y_rad * 0.5f;

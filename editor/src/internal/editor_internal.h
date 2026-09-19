@@ -216,6 +216,14 @@ int led_scan_reconcile(led_project *p, const char *rel,
 const char *led_importer_id_for(led_project_asset_type type);
 uint32_t led_importer_version_for(led_project_asset_type type);
 uint64_t led_import_settings_digest(led_project_asset_type type);
+/* Canonical-text fingerprint shared by scan (asset_db.c) and the
+ * post-import refresh (import_impl.c): LF vs CRLF checkouts of
+ * scene/prefab/lua/project/sidecar sources hash identically
+ * (bare CR stripped); binary formats hash exact bytes. */
+int led_fingerprint_bytes_pub(const char *abs_path,
+                              const char *rel,
+                              uint64_t *out_size,
+                              uint64_t *out_hash);
 led_result led_import_one_record(led_session *s, uint32_t idx);
 uint32_t led_browser_refresh(led_session *session);
 

@@ -2359,9 +2359,58 @@ static void leg_panel_viewport(leg_context *ctx, leg_ui *ui) {
                         }
                     } else if (dp->type ==
                                LED_PROJECT_ASSET_PREFAB) {
-                        leg_status(
-                            ctx,
-                            "Prefab drop: use Prefab... to place", 1);
+                        /* R-014: prefab drag from the Asset Browser
+                         * into the viewport instantiates at the drop
+                         * point (same led_prefab_load +
+                         * LED_CMD_INSTANTIATE_PREFAB the
+                         * double-click + Prefab... paths use, then
+                         * the instance root is moved to the
+                         * drop-point ground plane through one
+                         * coalesced gizmo TRS apply). Before this,
+                         * the branch refused every drop ("use
+                         * Prefab... to place") — the §13/§15
+                         * drag-into-viewport/hierarchy workflow was
+                         * documented but not implemented. Failure
+                         * keeps the status line (never silent). */
+                        extern void leg_dbg_drop_tap(
+                            int got_payload, int picked,
+                            int attached);
+
+                        {
+                            le_asset prefab = LE_ASSET_INVALID;
+                            led_asset_record rec;
+
+                            memset(&rec, 0, sizeof(rec));
+                            if (led_assetdb_find_by_id(
+                                    ctx->session, &dp->asset,
+                                    &rec) &&
+                                led_prefab_load(ctx->session,
+                                                rec.source_path,
+                                                &prefab) ==
+                                    LED_SUCCESS) {
+                                led_command cmd;
+
+                                memset(&cmd, 0, sizeof(cmd));
+                                cmd.kind =
+                                    LED_CMD_INSTANTIATE_PREFAB;
+                                snprintf(cmd.label,
+                                         sizeof(cmd.label),
+                                         "Instantiate prefab");
+                                cmd.prefab.prefab_asset = prefab;
+                                if (leg_run(ctx, &cmd,
+                                            "Prefab instantiated") ==
+                                    0) {
+                                    leg_dbg_drop_tap(1, 1, 1);
+                                } else {
+                                    leg_dbg_drop_tap(1, 1, 0);
+                                }
+                            } else {
+                                leg_status(ctx,
+                                           "Prefab load failed",
+                                           1);
+                                leg_dbg_drop_tap(1, 0, 0);
+                            }
+                        }
                     } else if (dp->type ==
                                LED_PROJECT_ASSET_SCENE) {
                         if (led_open_scene_payload(ctx->session,

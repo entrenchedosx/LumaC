@@ -492,6 +492,11 @@ int le_scene_instance_lookup(const le_scene_instance *instance,
  * mesh/tslot handles). */
 le_result le_scene_instantiate(le_world *world, const le_asset *scene,
                                le_scene_instance *out_instance) {
+    return le_scene_instantiate_remap(world, scene, out_instance, 0);
+}
+
+le_result le_scene_instantiate_remap(le_world *world, const le_asset *scene,
+                               le_scene_instance *out_instance, int remap_ids) {
     le_engine *engine;
     uint32_t slot;
     le_result code = LE_SUCCESS;
@@ -772,13 +777,22 @@ le_result le_scene_instantiate(le_world *world, const le_asset *scene,
         handles[i] = o;
         created++;
         /* Persistent-ID mapping: stamp the slot so a later
-         * capture preserves IDs (Stage 64). */
+         * capture preserves IDs (Stage 64). R-015: prefab
+         * instantiation (remap_ids) mints FRESH IDs per object
+         * instead — two instances stamping one payload's IDs
+         * make whole-world capture emit DUPLICATE_ID. */
         {
             uint32_t oslot = o.index;
             le_result rc = LE_SUCCESS;
 
             if (le_resolve_live(world, &o, &oslot, &rc)) {
-                world->slots[oslot].scene_id = rec->id;
+                if (remap_ids) {
+                    le_uuid_mint(engine,
+                                 &world->slots[oslot].scene_id.hi,
+                                 &world->slots[oslot].scene_id.lo);
+                } else {
+                    world->slots[oslot].scene_id = rec->id;
+                }
                 world->slots[oslot].has_scene_id = 1;
             }
         }

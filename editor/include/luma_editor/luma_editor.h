@@ -594,17 +594,23 @@ LED_API int led_viewport_pick_select(led_session *session,
                                      float pixel_x, float pixel_y);
 
 /** World-space AABB (plain min/max; 1 when computable, 0 with
- *  zeroed out for empty/missing/stale/asset-backed). Pointer
- *  renderables only; asset-backed report LED-unavailable (never
- *  guessed). Mirrored bases expand conservatively. */
+ *  zeroed out for empty/missing/stale/unready-asset). Pointer +
+ *  asset-backed renderables (the latter resolves through the
+ *  engine registry — the same resolution the submit path uses).
+ *  Mirrored bases expand conservatively. */
 LED_API int led_compute_world_aabb(led_session *session,
                                    const le_object *object,
                                    float out_min[3], float out_max[3]);
-/** Union AABB over the live selection (1/0, same contract). */
+/** Union AABB over the live selection (1/0, same contract).
+ *  Hierarchy roots with no mesh of their own union their
+ *  descendant subtree bounds (bounded DFS); members with no
+ *  bounds anywhere fall back to their position. */
 LED_API int led_selection_aabb(led_session *session, float out_min[3],
                                float out_max[3]);
 /** Fit orbit distance to the selection (or whole scene when empty;
- *  0 when nothing frames). */
+ *  0 when nothing frames). Point selections (cameras, lights, empty
+ *  transforms) frame at a 1 m minimum radius so F never parks the
+ *  camera inside the object. */
 LED_API int led_frame_selection(led_session *session,
                                 led_viewport *viewport);
 

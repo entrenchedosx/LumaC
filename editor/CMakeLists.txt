@@ -295,6 +295,18 @@ if(UNIX AND NOT APPLE)
 endif()
 add_test(NAME test_project_editor COMMAND test_project_editor)
 
+# Pass 2B line-ending/checkout regression (headless): canonical
+# text assets must not flip STALE on CRLF checkout (R-010 policy:
+# LF writers + canonical fingerprints + CR-tolerant readers).
+add_executable(test_lineend tests/test_lineend.c)
+target_link_libraries(test_lineend PRIVATE luma_editor)
+target_include_directories(test_lineend PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_lineend PRIVATE m)
+endif()
+add_test(NAME test_lineend COMMAND test_lineend)
+
 # Phase 32 glTF identity (Vulkan-gated; SKIP without a device).
 add_executable(test_gltf_identity tests/test_gltf_identity.c)
 target_link_libraries(test_gltf_identity PRIVATE luma_editor luma_assets luma_renderer lumac Vulkan::Vulkan)
@@ -393,6 +405,71 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(test_editor_headed PRIVATE m)
 endif()
 add_test(NAME test_editor_headed COMMAND test_editor_headed --shotdir "${CMAKE_CURRENT_BINARY_DIR}/shots34a")
+
+# Pass 2B live prefab proof (Vulkan-gated; SKIP without a device):
+# real prefab workflow with VISIBLE geometry through production
+# paths (drop -> create -> instantiate x2 -> move/delete -> undo/
+# redo -> save -> play/stop -> corrupt-load), composited + censused
+# + shot. Shots land in build/shots2b (evidence bank copies the
+# keepers into docs/verification/recovery/pass2b).
+add_executable(test_prefab_live tests/test_prefab_live.c)
+target_link_libraries(test_prefab_live PRIVATE luma_editor_gui luma_engine luma_renderer lumac Vulkan::Vulkan)
+target_include_directories(test_prefab_live PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../engine/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../renderer/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_prefab_live PRIVATE m)
+endif()
+add_test(NAME test_prefab_live COMMAND test_prefab_live --shotdir "${CMAKE_CURRENT_BINARY_DIR}/shots2b" --project "${CMAKE_CURRENT_SOURCE_DIR}/../LumaRealityTest")
+
+# Pass 2B live character-course proof (Vulkan-gated; SKIP without a
+# device): real controller + real injected keys + real viewport
+# composite over an obstacle course (wall/slide/step/stairs/jump/
+# ceiling/trigger), with temporal before/mid/after screenshots.
+add_executable(test_character_course tests/test_character_course.c)
+target_link_libraries(test_character_course PRIVATE luma_editor_gui luma_engine luma_renderer lumac Vulkan::Vulkan)
+target_include_directories(test_character_course PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../engine/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../renderer/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_character_course PRIVATE m)
+endif()
+add_test(NAME test_character_course COMMAND test_character_course --shotdir "${CMAKE_CURRENT_BINARY_DIR}/shots2b")
+
+# Pass 2B live animation proof (Vulkan-gated; SKIP without a device):
+# visible skinned arm (bind/idle/walk), crossfade both directions
+# with no-collapse acceptance, loop-boundary continuity, ONCE
+# semantics. Shots land in build/shots2b.
+add_executable(test_animation_live tests/test_animation_live.c)
+target_link_libraries(test_animation_live PRIVATE luma_editor_gui luma_engine luma_renderer lumac Vulkan::Vulkan)
+target_include_directories(test_animation_live PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../engine/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../renderer/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_animation_live PRIVATE m)
+endif()
+add_test(NAME test_animation_live COMMAND test_animation_live --shotdir "${CMAKE_CURRENT_BINARY_DIR}/shots2b")
+
+# Pass 2B PBR grid proof (Vulkan-gated; SKIP without a device):
+# properly framed 5x3 roughness x metallic material matrix through
+# the real viewport (R-013 orbit + R-012 env). Shot -> pass2b.
+add_executable(test_pbr_grid tests/test_pbr_grid.c)
+target_link_libraries(test_pbr_grid PRIVATE luma_editor_gui luma_engine luma_renderer lumac Vulkan::Vulkan)
+target_include_directories(test_pbr_grid PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../engine/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../renderer/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_pbr_grid PRIVATE m)
+endif()
+add_test(NAME test_pbr_grid COMMAND test_pbr_grid --shotdir "${CMAKE_CURRENT_BINARY_DIR}/shots2b")
 
 # Phase 34A mutation matrix (each arm breaks ONE headed proof while
 # armed; the report rebuilds each arm and asserts the matching proof
@@ -647,7 +724,7 @@ set_tests_properties(editor_demo_phase33 PROPERTIES
 # explicitly (no-op for static builds; set AFTER add_test so the
 # demo target exists in every tree, incl. shared).
 if(WIN32)
-    set_tests_properties(test_editor_core test_editor_history test_editor_play test_editor_viewport test_editor_reflect test_prefab_smoke test_project test_import test_assetdb test_project_editor test_gltf_identity test_prefab test_editor_gui test_editor_gui_gpu test_editor_negative test_editor_headed test_portable_identity editor_demo_phase33 PROPERTIES
+    set_tests_properties(test_editor_core test_editor_history test_editor_play test_editor_viewport test_editor_reflect test_prefab_smoke test_project test_import test_assetdb test_project_editor test_lineend test_gltf_identity test_prefab test_editor_gui test_editor_gui_gpu test_editor_negative test_editor_headed test_portable_identity editor_demo_phase33 PROPERTIES
         ENVIRONMENT "PATH=$<TARGET_FILE_DIR:lumac>\;$ENV{PATH}")
 endif()
 

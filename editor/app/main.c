@@ -110,6 +110,7 @@ int main(int argc, char **argv) {
     const char *screenshot_path = NULL;
     const char *select_name = NULL;
     const char *size_arg = NULL;
+    int focus_at_start = 0;
     int play_at_start = 0;
     int want_report = 0;
     unsigned long max_frames = 0;
@@ -163,6 +164,11 @@ int main(int argc, char **argv) {
             /* Automation/verification selection (same
              * led_selection_set the Hierarchy click path calls). */
             select_name = argv[++i];
+        } else if (strcmp(argv[i], "--focus") == 0) {
+            /* Automation/verification focus (same
+             * led_frame_selection the F key calls — frames the
+             * --select target through the orbit camera). */
+            focus_at_start = 1;
         } else if (strcmp(argv[i], "--size") == 0 &&
                    i + 1 < argc) {
             /* Verification window size (e.g. 1920x1080, 1280x720). */
@@ -183,7 +189,7 @@ int main(int argc, char **argv) {
                     "[--scene FILE] [--frames N] [--no-validation] "
                     "[--no-vsync] [--screenshot out.png] "
                     "[--import-all] [--select NAME] [--size WxH] "
-                    "[--play] [--report]\n");
+                    "[--play] [--report] [--focus]\n");
             return 1;
         }
     }
@@ -381,9 +387,28 @@ int main(int argc, char **argv) {
         if (le_world_find_by_name(world, select_name, &found)) {
             led_selection_set(session, &found, 1);
             printf("selected '%s'\n", select_name);
+            if (focus_at_start) {
+                /* Same led_frame_selection the F key calls (the
+                 * orbit camera frames the selection; the app
+                 * host owns led_viewport like the GUI loop). */
+                if (led_frame_selection(session, &vp)) {
+                    printf("focused '%s' (dist %.2f)\n",
+                           select_name, vp.distance);
+                } else {
+                    fprintf(stderr,
+                            "warning: focus failed ('%s')\n",
+                            select_name);
+                }
+            }
         } else {
             fprintf(stderr, "warning: select target '%s' not found\n",
                     select_name);
+        }
+    } else if (focus_at_start) {
+        /* --focus without --select frames the whole scene (the
+         * empty-selection path: union over object positions). */
+        if (led_frame_selection(session, &vp)) {
+            printf("focused scene (dist %.2f)\n", vp.distance);
         }
     }
 

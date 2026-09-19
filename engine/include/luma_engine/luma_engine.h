@@ -842,6 +842,19 @@ LE_API int le_world_get_render_camera(le_world *world, uint32_t width,
                                       uint32_t height,
                                       lr_camera *out_camera);
 
+/** Submit this world's extracted frame to its engine renderer with
+ *  an explicit camera override (NULL camera = active-camera path,
+ *  identical to le_world_render_scene). R-013: the editor viewport
+ *  renders through its orbit camera (led_viewport_camera) while
+ *  picking/gizmos/overlays use the same orbit math — before this,
+ *  the viewport rendered the scene's authored camera while every
+ *  overlay assumed the orbit camera, so RMB/WASD/wheel/F appeared
+ *  dead. Play/headless keep the NULL (active-camera) path;
+ *  gameplay rendering is untouched. */
+LE_API le_result le_world_render_scene_with_camera(
+    le_world *world, lc_command_encoder *encoder, uint32_t width,
+    uint32_t height, const lr_camera *camera_override);
+
 /** Submit this world's extracted frame to its engine renderer:
  *  le_world_update(0) + renderer begin (derived active camera) +
  *  light submits + renderable submits (world matrix + stable ID) +
@@ -1813,6 +1826,19 @@ typedef struct le_scene_instance {
 LE_API le_result le_scene_instantiate(le_world *world,
                                       const le_asset *scene,
                                       le_scene_instance *out_instance);
+
+/** Instantiate with fresh persistent IDs (R-015): every created
+ *  object mints a NEW scene ID instead of stamping the payload's.
+ *  Prefab instantiation must use this — two instantiations of one
+ *  payload stamping the same local IDs make a later whole-world
+ *  capture emit DUPLICATE_ID (breaking play/save with 2+
+ *  instances). The published object_ids mapping still carries the
+ *  PAYLOAD IDs verbatim (editor local->runtime map contract).
+ *  Zero remap_ids == le_scene_instantiate (scene-open spelling). */
+LE_API le_result le_scene_instantiate_remap(le_world *world,
+                                            const le_asset *scene,
+                                            le_scene_instance *out_instance,
+                                            int remap_ids);
 
 /** Release an instance record (mapping arrays only; world objects
  *  stay live). NULL-safe no-op. */

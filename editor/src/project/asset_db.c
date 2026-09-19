@@ -319,7 +319,11 @@ static led_result led_sidecar_write(led_project *p,
         return LED_ERROR_INVALID_ARGUMENT;
     }
     led_project_id_to_hex(&r->id, idhex);
-    f = fopen(path, "w");
+    /* Binary mode (like le_scene_save_file + prefab emit): sidecar
+     * bytes must be LF-canonical on every platform — text mode
+     * ("w") would emit CRLF on Windows and churn the file under
+     * git despite the eol=lf pinning. */
+    f = fopen(path, "wb");
     if (f == NULL) {
         return LED_ERROR_IO;
     }
@@ -528,15 +532,48 @@ static int led_sidecar_read(led_project *p, const char *rel,
     return 1;
 }
 
-/* ---- source fingerprint (size + FNV-1a-64 over bytes) ---- */
+/* ---- source fingerprint (size + FNV-1a-64 over bytes) ----
+ *
+ * R-010/§60-65 policy: text formats with deterministic content
+ * (scene/prefab/lua/project/sidecar) hash CANONICAL bytes (bare
+ * CR stripped — LF and CRLF checkouts fingerprint identically),
+ * so git newline conversion never marks clean assets STALE.
+ * Binary formats (glb/png/jpg) hash EXACT bytes. Canonical size
+ * is the post-strip length (what the hash covers). */
+static int led_is_canonical_text(const char *rel) {
+    size_t n = 0;
+    size_t i = 0;
+    const char *dot = NULL;
 
-static int led_fingerprint_file(const char *abs_path, uint64_t *out_size,
-                                uint64_t *out_hash) {
+    if (rel == NULL) {
+        return 0;
+    }
+    n = strlen(rel);
+    for (i = 0; i < n; i++) {
+        if (rel[i] == '.') {
+            dot = rel + i;
+        }
+    }
+    if (dot == NULL) {
+        return 0;
+    }
+    return strcmp(dot, ".luma_scene") == 0 ||
+           strcmp(dot, ".luprefab") == 0 ||
+           strcmp(dot, ".lua") == 0 ||
+           strcmp(dot, ".luma") == 0 ||
+           strcmp(dot, ".project") == 0;
+}
+
+static int led_fingerprint_file_at(const char *abs_path,
+                                     const char *rel,
+                                     uint64_t *out_size,
+                                     uint64_t *out_hash) {
     FILE *f = NULL;
     uint64_t h = 14695981039346656037ull;
     uint64_t size = 0;
     unsigned char buf[4096];
     size_t n = 0;
+    int canonical = led_is_canonical_text(rel);
 
     if (out_size != NULL) {
         *out_size = 0;
@@ -555,10 +592,16 @@ static int led_fingerprint_file(const char *abs_path, uint64_t *out_size,
         size_t i;
 
         for (i = 0; i < n; i++) {
+            /* Canonical text: strip bare CR (CRLF -> LF) so LF
+             * and CRLF checkouts hash identically. Binary:
+             * exact bytes. */
+            if (canonical && buf[i] == '\r') {
+                continue;
+            }
             h ^= (uint64_t)buf[i];
             h *= 1099511628211ull;
+            size++;
         }
-        size += (uint64_t)n;
     }
     fclose(f);
     if (out_size != NULL) {
@@ -568,6 +611,22 @@ static int led_fingerprint_file(const char *abs_path, uint64_t *out_size,
         *out_hash = h;
     }
     return 1;
+}
+
+static int led_fingerprint_file(const char *abs_path, uint64_t *out_size,
+                                uint64_t *out_hash) {
+    return led_fingerprint_file_at(abs_path, "", out_size,
+                                   out_hash);
+}
+
+/* Public cross-TU entry (import_impl.c post-import refresh): same
+ * canonical contract as the scan path above. */
+int led_fingerprint_bytes_pub(const char *abs_path,
+                              const char *rel,
+                              uint64_t *out_size,
+                              uint64_t *out_hash) {
+    return led_fingerprint_file_at(abs_path, rel, out_size,
+                                   out_hash);
 }
 
 /* ---- per-file reconciliation (scan core) ----
@@ -685,7 +744,8 @@ int led_scan_reconcile(led_project *p, const char *rel,
         led_db_record *r = &p->records[idx];
         uint64_t fsize = 0;
         uint64_t fhash = 0;
-        int have_file = led_fingerprint_file(abs, &fsize, &fhash);
+        int have_file =
+            led_fingerprint_file_at(abs, rel, &fsize, &fhash);
         int had_sidecar = r->has_sidecar;
 
         /* Tag visited (high bit; cleared by the sweep). */

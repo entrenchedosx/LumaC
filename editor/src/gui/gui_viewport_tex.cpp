@@ -334,6 +334,12 @@ ImTextureID leg_viewport_render(leg_context *ctx,
     lc_render_color_attachment catt;
     lc_render_depth_attachment datt;
     lc_render_pass_desc pass;
+    /* R-013: edit-viewport orbit camera override (value type, no
+     * lifetime). Play keeps the active-camera path (gameplay
+     * rendering untouched); edit renders through the orbit camera
+     * the overlays/picking/gizmos already assume. */
+    int use_orbit_camera = 0;
+    lr_camera orbit_camera;
 
     if (ctx == NULL || vt == NULL || enc == NULL) {
         return ImTextureID_Invalid;
@@ -347,10 +353,15 @@ ImTextureID leg_viewport_render(leg_context *ctx,
     if (w == 0 || h == 0 || vt->target == NULL) {
         return ImTextureID_Invalid;
     }
+    /* R-013 scope: is_play + use_orbit_camera must survive the
+     * blocks below (orbit override needs both). */
+    int is_play = 0;
 #if defined(LUMA34A_MUT_COMPOSITE)
     /* M-composite (clear-only): skip the engine trio (the census
      * must read ~0 non-clear pixels while armed). */
     (void)world;
+    (void)is_play;
+    (void)use_orbit_camera;
 #else
     /* Play shows the RUNTIME world; edit shows the edit world.
      * R-012 editor environment: enabled ONLY around the EDIT-world
@@ -359,8 +370,9 @@ ImTextureID leg_viewport_render(leg_context *ctx,
      * Toggles live on the GUI prefs (View menu); the renderer
      * defaults are off, so headless probes are unaffected. */
     {
-        int is_play = led_is_playing(ctx->session);
         lr_renderer *ren = NULL;
+
+        is_play = led_is_playing(ctx->session);
 
         world = is_play ? led_play_get_world(ctx->session)
                         : led_session_get_edit_world(ctx->session);
@@ -389,7 +401,36 @@ ImTextureID leg_viewport_render(leg_context *ctx,
     if (world == NULL) {
         return ImTextureID_Invalid;
     }
-    if (le_world_render_scene(world, enc, w, h) != LE_SUCCESS) {
+    /* R-013: derive the orbit camera from the host's led_viewport
+     * (same struct the panel sizes + the overlays project through).
+     * Width/height override to the live target extent (the struct
+     * follows the panel a frame later; aspect must match THIS
+     * composite). Failure falls back to the active-camera path
+     * (never a blank viewport over a math hiccup). */
+    if (!is_play) {
+        extern led_viewport *leg_viewport_host_viewport(void);
+        led_viewport *host_vp = leg_viewport_host_viewport();
+        led_viewport scratch;
+
+        if (host_vp != NULL) {
+            scratch = *host_vp;
+            scratch.width = w;
+            scratch.height = h;
+            memset(&orbit_camera, 0, sizeof(orbit_camera));
+            if (led_viewport_camera(&scratch, &orbit_camera)) {
+                use_orbit_camera = 1;
+            }
+        }
+    }
+    if (use_orbit_camera) {
+        if (le_world_render_scene_with_camera(world, enc, w, h,
+                                              &orbit_camera) !=
+            LE_SUCCESS) {
+            le_world_render_end(world);
+            return ImTextureID_Invalid;
+        }
+    } else if (le_world_render_scene(world, enc, w, h) !=
+               LE_SUCCESS) {
         le_world_render_end(world);
         return ImTextureID_Invalid;
     }
